@@ -1,6 +1,5 @@
 use crate::equation::{score_equation, Equation, EquationScore, TopK};
 use crate::library::FeatureLibrary;
-use crate::llm::LlmClient;
 use crate::Dataset;
 
 #[derive(Clone, Debug)]
@@ -28,7 +27,6 @@ pub fn run_search(
     dataset: &Dataset,
     library: &FeatureLibrary,
     cfg: &DiscoveryConfig,
-    llm: Option<&dyn LlmClient>,
 ) -> TopK {
     let mut rng = Lcg::new(cfg.seed);
     let mut population: Vec<Equation> = (0..cfg.population)
@@ -49,12 +47,6 @@ pub fn run_search(
         for s in &scored {
             topk.update(s.clone());
         }
-        if let Some(client) = llm {
-            if let Ok(ranked) = client.rank_equations(&topk.entries) {
-                topk.entries = ranked;
-            }
-        }
-
         let survivors = scored.iter().take((cfg.population / 2).max(1)).cloned().collect::<Vec<_>>();
         population = survivors
             .iter()
@@ -141,7 +133,7 @@ mod tests {
         let data = dataset();
         let lib = FeatureLibrary::default_physics();
         let cfg = DiscoveryConfig { runs: 5, population: 6, max_terms: 2, mutation_rate: 0.5, seed: 1 };
-        let topk = run_search(&data, &lib, &cfg, None);
+        let topk = run_search(&data, &lib, &cfg);
         assert_eq!(topk.entries.len(), 3);
     }
 
@@ -151,8 +143,8 @@ mod tests {
         let lib = FeatureLibrary::default_physics();
         let cfg1 = DiscoveryConfig { runs: 2, population: 6, max_terms: 2, mutation_rate: 0.5, seed: 2 };
         let cfg2 = DiscoveryConfig { runs: 6, population: 6, max_terms: 2, mutation_rate: 0.5, seed: 2 };
-        let top1 = run_search(&data, &lib, &cfg1, None);
-        let top2 = run_search(&data, &lib, &cfg2, None);
+        let top1 = run_search(&data, &lib, &cfg1);
+        let top2 = run_search(&data, &lib, &cfg2);
         let best1 = top1.best().unwrap().score;
         let best2 = top2.best().unwrap().score;
         assert!(best2 <= best1 + 1e-12);

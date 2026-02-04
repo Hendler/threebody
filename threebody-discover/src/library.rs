@@ -1,4 +1,5 @@
 use crate::equation::{Equation, Term};
+use crate::judge::FeatureDescription;
 
 #[derive(Clone, Debug)]
 pub struct FeatureLibrary {
@@ -27,6 +28,44 @@ impl FeatureLibrary {
             terms.push(Term { feature, coeff });
         }
         Equation { terms }
+    }
+
+    pub fn feature_descriptions(&self) -> Vec<FeatureDescription> {
+        self.features
+            .iter()
+            .map(|name| match name.as_str() {
+                "r_inv2" => FeatureDescription {
+                    name: name.clone(),
+                    description: "sum of inverse-square distances (proxy for gravity magnitude)".to_string(),
+                    tags: vec!["distance".to_string(), "gravity".to_string()],
+                },
+                "r_inv3" => FeatureDescription {
+                    name: name.clone(),
+                    description: "sum of inverse-cube distances (directional gravity proxy)".to_string(),
+                    tags: vec!["distance".to_string(), "gravity".to_string()],
+                },
+                "v" => FeatureDescription {
+                    name: name.clone(),
+                    description: "speed magnitude of the target body".to_string(),
+                    tags: vec!["velocity".to_string()],
+                },
+                "v_cross_r" => FeatureDescription {
+                    name: name.clone(),
+                    description: "magnitude of v x r scaled by distance (magnetic-like proxy)".to_string(),
+                    tags: vec!["velocity".to_string(), "cross".to_string(), "em".to_string()],
+                },
+                "v_cross_v_cross_r" => FeatureDescription {
+                    name: name.clone(),
+                    description: "magnitude of v x (v x r) scaled by distance (Lorentz-like proxy)".to_string(),
+                    tags: vec!["velocity".to_string(), "cross".to_string(), "em".to_string()],
+                },
+                _ => FeatureDescription {
+                    name: name.clone(),
+                    description: "feature".to_string(),
+                    tags: vec![],
+                },
+            })
+            .collect()
     }
 }
 

@@ -1,0 +1,448 @@
+use crate::equation::Equation;
+use serde::{Deserialize, Serialize};
+
+pub const RUBRIC_VERSION: &str = "v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScoreScale {
+    pub min: f64,
+    pub max: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RubricWeights {
+    pub fidelity: f64,
+    pub parsimony: f64,
+    pub physical_plausibility: f64,
+    pub regime_consistency: f64,
+    pub stability_risk: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Rubric {
+    pub version: String,
+    pub scale: ScoreScale,
+    pub weights: RubricWeights,
+    pub notes: Vec<String>,
+}
+
+impl Rubric {
+    pub fn default_rubric() -> Self {
+        Self {
+            version: RUBRIC_VERSION.to_string(),
+            scale: ScoreScale { min: 0.0, max: 5.0 },
+            weights: RubricWeights {
+                fidelity: 0.45,
+                parsimony: 0.20,
+                physical_plausibility: 0.15,
+                regime_consistency: 0.10,
+                stability_risk: 0.10,
+            },
+            notes: vec![
+                "Fidelity is primary; do not up-rank higher-error models unless evidence shows improved stability or regime validity."
+                    .to_string(),
+                "Use only provided evidence; if unknown, score low and state uncertainty.".to_string(),
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CandidateMetrics {
+    pub mse: f64,
+    pub complexity: usize,
+    pub rollout_rmse: Option<f64>,
+    pub divergence_time: Option<f64>,
+    pub stability_flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CandidateSummary {
+    pub id: usize,
+    pub equation: Equation,
+    pub metrics: CandidateMetrics,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DatasetSummary {
+    pub n_samples: usize,
+    pub target_description: String,
+    pub feature_names: Vec<String>,
+    pub feature_descriptions: Vec<FeatureDescription>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FeatureDescription {
+    pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SimulationSummary {
+    pub steps: usize,
+    pub energy_start: Option<f64>,
+    pub energy_end: Option<f64>,
+    pub energy_drift: Option<f64>,
+    pub min_pair_dist: Option<f64>,
+    pub max_speed: Option<f64>,
+    pub max_accel: Option<f64>,
+    pub dt_min: Option<f64>,
+    pub dt_max: Option<f64>,
+    pub dt_avg: Option<f64>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IcBounds {
+    pub mass_min: f64,
+    pub mass_max: f64,
+    pub charge_min: f64,
+    pub charge_max: f64,
+    pub pos_min: f64,
+    pub pos_max: f64,
+    pub vel_min: f64,
+    pub vel_max: f64,
+    pub min_pair_dist: f64,
+    pub recommend_barycentric: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct IcRequest {
+    pub bounds: IcBounds,
+    pub regime: String,
+    pub notes: Vec<String>,
+    pub seed: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BodyInit {
+    pub mass: f64,
+    pub charge: f64,
+    pub pos: [f64; 3],
+    pub vel: [f64; 3],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InitialConditionSpec {
+    pub bodies: Vec<BodyInit>,
+    pub barycentric: bool,
+    pub notes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JudgeInput {
+    pub rubric: Rubric,
+    pub regime: String,
+    pub dataset: DatasetSummary,
+    pub simulation: Option<SimulationSummary>,
+    pub candidates: Vec<CandidateSummary>,
+    pub ic_bounds: IcBounds,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScoreComponents {
+    pub fidelity: f64,
+    pub parsimony: f64,
+    pub physical_plausibility: f64,
+    pub regime_consistency: f64,
+    pub stability_risk: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JudgeScore {
+    pub id: usize,
+    pub total: f64,
+    pub components: ScoreComponents,
+    pub rationale: String,
+    pub flags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JudgeRecommendations {
+    pub next_initial_conditions: Option<InitialConditionSpec>,
+    pub next_search_directions: Vec<String>,
+    pub notes: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JudgeResponse {
+    pub version: String,
+    pub ranking: Vec<usize>,
+    pub scores: Vec<JudgeScore>,
+    pub recommendations: JudgeRecommendations,
+    pub summary: String,
+}
+
+impl JudgeResponse {
+    pub fn validate(&self, input: &JudgeInput) -> Result<(), String> {
+        if self.version != input.rubric.version {
+            return Err("rubric version mismatch".to_string());
+        }
+        let scale = &input.rubric.scale;
+        let weight_sum = input.rubric.weights.fidelity
+            + input.rubric.weights.parsimony
+            + input.rubric.weights.physical_plausibility
+            + input.rubric.weights.regime_consistency
+            + input.rubric.weights.stability_risk;
+        let min_total = scale.min * weight_sum;
+        let max_total = scale.max * weight_sum;
+        for score in &self.scores {
+            if !input.candidates.iter().any(|c| c.id == score.id) {
+                return Err(format!("unknown candidate id: {}", score.id));
+            }
+            for val in [
+                score.components.fidelity,
+                score.components.parsimony,
+                score.components.physical_plausibility,
+                score.components.regime_consistency,
+                score.components.stability_risk,
+            ] {
+                if !val.is_finite() || val < scale.min || val > scale.max {
+                    return Err("component score out of range".to_string());
+                }
+            }
+            if !score.total.is_finite() || score.total < min_total || score.total > max_total {
+                return Err("total score out of range".to_string());
+            }
+        }
+        if !self.ranking.is_empty() {
+            let mut seen = std::collections::HashSet::new();
+            for id in &self.ranking {
+                if !input.candidates.iter().any(|c| c.id == *id) {
+                    return Err("ranking contains unknown id".to_string());
+                }
+                if !seen.insert(*id) {
+                    return Err("ranking contains duplicate id".to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn build_ic_prompt(request: &IcRequest) -> String {
+    let b = &request.bounds;
+    let mut prompt = String::new();
+    prompt.push_str("You are selecting initial conditions for a 3-body simulation.\n");
+    prompt.push_str("Return ONLY valid JSON that matches the schema below. No extra text.\n");
+    prompt.push_str("Constraints:\n");
+    prompt.push_str(&format!(
+        "- mass in [{:.3}, {:.3}]\n- charge in [{:.3}, {:.3}]\n- position components in [{:.3}, {:.3}]\n- velocity components in [{:.3}, {:.3}]\n- minimum pair distance >= {:.3}\n",
+        b.mass_min, b.mass_max, b.charge_min, b.charge_max, b.pos_min, b.pos_max, b.vel_min, b.vel_max, b.min_pair_dist
+    ));
+    if b.recommend_barycentric {
+        prompt.push_str("- barycentric = true is recommended.\n");
+    }
+    prompt.push_str(&format!("Regime: {}\n", request.regime));
+    if !request.notes.is_empty() {
+        prompt.push_str("Notes:\n");
+        for note in &request.notes {
+            prompt.push_str(&format!("- {}\n", note));
+        }
+    }
+    prompt.push_str("Schema:\n");
+    prompt.push_str("{\"bodies\":[{\"mass\":1.0,\"charge\":0.0,\"pos\":[0,0,0],\"vel\":[0,0,0]}, ... x3],\"barycentric\":true,\"notes\":\"...\"}\n");
+    prompt.push_str("Output JSON only.\n");
+    prompt
+}
+
+pub fn build_judge_prompt(input: &JudgeInput) -> String {
+    let mut prompt = String::new();
+    prompt.push_str("You are an academic reviewer evaluating candidate equations for a dynamical system.\n");
+    prompt.push_str("Your role is advisory and supplemental. The primary numeric ranking is based on MSE.\n");
+    prompt.push_str("Use ONLY the evidence provided. If evidence is missing, score low and note uncertainty.\n");
+    prompt.push_str("Return JSON only. Do not include Markdown or extra text.\n\n");
+
+    prompt.push_str("Rubric (0-5 for each component):\n");
+    prompt.push_str(&format!(
+        "Weights: fidelity={:.2}, parsimony={:.2}, physical_plausibility={:.2}, regime_consistency={:.2}, stability_risk={:.2}\n",
+        input.rubric.weights.fidelity,
+        input.rubric.weights.parsimony,
+        input.rubric.weights.physical_plausibility,
+        input.rubric.weights.regime_consistency,
+        input.rubric.weights.stability_risk
+    ));
+    for note in &input.rubric.notes {
+        prompt.push_str(&format!("- {}\n", note));
+    }
+    prompt.push_str("\nDataset summary:\n");
+    prompt.push_str(&format!(
+        "samples={}, target={}\n",
+        input.dataset.n_samples, input.dataset.target_description
+    ));
+    prompt.push_str("Features:\n");
+    for fd in &input.dataset.feature_descriptions {
+        prompt.push_str(&format!(
+            "- {}: {} (tags: {})\n",
+            fd.name,
+            fd.description,
+            fd.tags.join(", ")
+        ));
+    }
+    prompt.push_str(&format!("\nRegime: {}\n", input.regime));
+    if let Some(sim) = &input.simulation {
+        prompt.push_str("Simulation summary:\n");
+        prompt.push_str(&format!(
+            "steps={}, energy_start={:?}, energy_end={:?}, energy_drift={:?}, min_pair_dist={:?}, max_speed={:?}, max_accel={:?}, dt_min={:?}, dt_max={:?}, dt_avg={:?}\n",
+            sim.steps,
+            sim.energy_start,
+            sim.energy_end,
+            sim.energy_drift,
+            sim.min_pair_dist,
+            sim.max_speed,
+            sim.max_accel,
+            sim.dt_min,
+            sim.dt_max,
+            sim.dt_avg
+        ));
+        if !sim.warnings.is_empty() {
+            prompt.push_str(&format!("warnings: {}\n", sim.warnings.join("; ")));
+        }
+    }
+    prompt.push_str("\nCandidates:\n");
+    for c in &input.candidates {
+        prompt.push_str(&format!(
+            "id={}, eq=\"{}\", mse={:.6}, complexity={}, rollout_rmse={:?}, divergence_time={:?}, flags={}\n",
+            c.id,
+            c.equation.format(),
+            c.metrics.mse,
+            c.metrics.complexity,
+            c.metrics.rollout_rmse,
+            c.metrics.divergence_time,
+            c.metrics.stability_flags.join(", ")
+        ));
+        if !c.notes.is_empty() {
+            prompt.push_str(&format!("notes: {}\n", c.notes.join("; ")));
+        }
+    }
+    prompt.push_str("\nInitial condition bounds for next run:\n");
+    let b = &input.ic_bounds;
+    prompt.push_str(&format!(
+        "mass=[{:.3},{:.3}], charge=[{:.3},{:.3}], pos=[{:.3},{:.3}], vel=[{:.3},{:.3}], min_pair_dist>={:.3}, barycentric_recommended={}\n",
+        b.mass_min, b.mass_max, b.charge_min, b.charge_max, b.pos_min, b.pos_max, b.vel_min, b.vel_max, b.min_pair_dist, b.recommend_barycentric
+    ));
+
+    if !input.notes.is_empty() {
+        prompt.push_str("\nAdditional notes:\n");
+        for note in &input.notes {
+            prompt.push_str(&format!("- {}\n", note));
+        }
+    }
+
+    prompt.push_str("\nOutput JSON schema:\n");
+    prompt.push_str("{\n");
+    prompt.push_str("  \"version\": \"v1\",\n");
+    prompt.push_str("  \"ranking\": [0,1,2],\n");
+    prompt.push_str("  \"scores\": [\n");
+    prompt.push_str("    {\"id\":0,\"total\":3.5,\"components\":{\"fidelity\":3,\"parsimony\":4,\"physical_plausibility\":3,\"regime_consistency\":4,\"stability_risk\":3},\"rationale\":\"...\",\"flags\":[\"...\"]}\n");
+    prompt.push_str("  ],\n");
+    prompt.push_str("  \"recommendations\": {\n");
+    prompt.push_str("    \"next_initial_conditions\": {\"bodies\":[{\"mass\":1.0,\"charge\":0.0,\"pos\":[0,0,0],\"vel\":[0,0,0]}],\"barycentric\":true,\"notes\":\"...\"},\n");
+    prompt.push_str("    \"next_search_directions\": [\"...\"],\n");
+    prompt.push_str("    \"notes\": \"...\"\n");
+    prompt.push_str("  },\n");
+    prompt.push_str("  \"summary\": \"...\"\n");
+    prompt.push_str("}\n");
+    prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn judge_response_validation_rejects_out_of_range() {
+        let rubric = Rubric::default_rubric();
+        let input = JudgeInput {
+            rubric: rubric.clone(),
+            regime: "gravity_only".to_string(),
+            dataset: DatasetSummary {
+                n_samples: 1,
+                target_description: "a_mag".to_string(),
+                feature_names: vec!["r_inv2".to_string()],
+                feature_descriptions: vec![FeatureDescription {
+                    name: "r_inv2".to_string(),
+                    description: "sum 1/r^2".to_string(),
+                    tags: vec!["distance".to_string()],
+                }],
+            },
+            simulation: None,
+            candidates: vec![CandidateSummary {
+                id: 0,
+                equation: Equation { terms: vec![] },
+                metrics: CandidateMetrics {
+                    mse: 1.0,
+                    complexity: 0,
+                    rollout_rmse: None,
+                    divergence_time: None,
+                    stability_flags: vec![],
+                },
+                notes: vec![],
+            }],
+            ic_bounds: IcBounds {
+                mass_min: 0.1,
+                mass_max: 10.0,
+                charge_min: -1.0,
+                charge_max: 1.0,
+                pos_min: -1.0,
+                pos_max: 1.0,
+                vel_min: -1.0,
+                vel_max: 1.0,
+                min_pair_dist: 0.2,
+                recommend_barycentric: true,
+            },
+            notes: vec![],
+        };
+        let bad = JudgeResponse {
+            version: rubric.version.clone(),
+            ranking: vec![0],
+            scores: vec![JudgeScore {
+                id: 0,
+                total: 99.0,
+                components: ScoreComponents {
+                    fidelity: 99.0,
+                    parsimony: 0.0,
+                    physical_plausibility: 0.0,
+                    regime_consistency: 0.0,
+                    stability_risk: 0.0,
+                },
+                rationale: "bad".to_string(),
+                flags: vec![],
+            }],
+            recommendations: JudgeRecommendations {
+                next_initial_conditions: None,
+                next_search_directions: vec![],
+                notes: String::new(),
+            },
+            summary: String::new(),
+        };
+        assert!(bad.validate(&input).is_err());
+    }
+
+    #[test]
+    fn ic_prompt_contains_bounds() {
+        let request = IcRequest {
+            bounds: IcBounds {
+                mass_min: 0.1,
+                mass_max: 10.0,
+                charge_min: -1.0,
+                charge_max: 1.0,
+                pos_min: -1.0,
+                pos_max: 1.0,
+                vel_min: -1.0,
+                vel_max: 1.0,
+                min_pair_dist: 0.2,
+                recommend_barycentric: true,
+            },
+            regime: "gravity_only".to_string(),
+            notes: vec!["avoid collisions".to_string()],
+            seed: Some(1),
+        };
+        let prompt = build_ic_prompt(&request);
+        assert!(prompt.contains("minimum pair distance"));
+        assert!(prompt.contains("barycentric"));
+    }
+}

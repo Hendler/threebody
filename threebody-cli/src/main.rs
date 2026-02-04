@@ -1,8 +1,12 @@
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use threebody_core::config::{Config, IntegratorKind};
+use threebody_core::frames::to_barycentric;
+use threebody_core::forces::{compute_accel, ForceConfig};
 use threebody_core::integrators::{boris::Boris, implicit_midpoint::ImplicitMidpoint, leapfrog::Leapfrog, rk45::Rk45, Integrator};
 use threebody_core::math::vec3::Vec3;
 use threebody_core::output::csv::write_csv;
@@ -11,7 +15,11 @@ use threebody_core::sim::{simulate, SimOptions};
 use threebody_core::state::{Body, State, System};
 use threebody_discover::ga::DiscoveryConfig;
 use threebody_discover::library::FeatureLibrary;
-use threebody_discover::llm::{LlmClient, OpenAIClient};
+use threebody_discover::judge::{
+    CandidateMetrics, CandidateSummary, DatasetSummary, FeatureDescription, IcBounds, IcRequest, InitialConditionSpec,
+    JudgeInput, JudgeResponse, Rubric, SimulationSummary,
+};
+use threebody_discover::llm::{LlmClient, MockLlm, OpenAIClient};
 use threebody_discover::{grid_search, run_search, Dataset};
 
 #[derive(Parser)]
@@ -117,6 +125,54 @@ enum Commands {
         #[arg(long, default_value = "gpt-5")]
         model: String,
     },
+    /// Run the LLM-assisted factory loop (ICs -> sim -> discovery -> judge).
+    Factory {
+        /// Output directory for all artifacts.
+        #[arg(long, default_value = "factory_out")]
+        out_dir: PathBuf,
+        /// Max iterations to run.
+        #[arg(long, default_value_t = 1)]
+        max_iters: usize,
+        /// Run without prompts.
+        #[arg(long)]
+        auto: bool,
+        /// Config JSON path.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Steps to simulate.
+        #[arg(long, default_value_t = 200)]
+        steps: usize,
+        /// Timestep.
+        #[arg(long, default_value_t = 0.01)]
+        dt: f64,
+        /// Mode: standard or truth (adaptive RK45).
+        #[arg(long, default_value = "standard")]
+        mode: String,
+        /// Preset used when LLM is off or fails.
+        #[arg(long, default_value = "two-body")]
+        preset: String,
+        /// Disable EM.
+        #[arg(long)]
+        no_em: bool,
+        /// Disable gravity.
+        #[arg(long)]
+        no_gravity: bool,
+        /// Number of GA runs.
+        #[arg(long, default_value_t = 50)]
+        runs: usize,
+        /// Population size.
+        #[arg(long, default_value_t = 20)]
+        population: usize,
+        /// Random seed.
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        /// LLM mode: off, mock, openai.
+        #[arg(long, default_value = "off")]
+        llm_mode: String,
+        /// LLM model name (openai mode).
+        #[arg(long, default_value = "gpt-5")]
+        model: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -198,6 +254,41 @@ fn main() -> anyhow::Result<()> {
             model,
         } => {
             run_discovery(runs, population, seed, out, llm, model)?;
+        }
+        Commands::Factory {
+            out_dir,
+            max_iters,
+            auto,
+            config,
+            steps,
+            dt,
+            mode,
+            preset,
+            no_em,
+            no_gravity,
+            runs,
+            population,
+            seed,
+            llm_mode,
+            model,
+        } => {
+            run_factory(
+                out_dir,
+                max_iters,
+                auto,
+                config,
+                steps,
+                dt,
+                mode,
+                preset,
+                no_em,
+                no_gravity,
+                runs,
+                population,
+                seed,
+                llm_mode,
+                model,
+            )?;
         }
     }
     Ok(())
@@ -329,17 +420,15 @@ fn run_discovery(
         seed,
         ..DiscoveryConfig::default()
     };
-    let llm_client = if llm {
-        Some(OpenAIClient::from_env(&model)?)
-    } else {
-        None
-    };
+    let llm_client = if llm { Some(OpenAIClient::from_env(&model)?) } else { None };
 
-    let topk = run_search(&dataset, &library, &cfg, llm_client.as_ref().map(|c| c as &dyn LlmClient));
+    let topk = run_search(&dataset, &library, &cfg);
     let candidates: Vec<_> = topk.entries.iter().map(|e| e.equation.clone()).collect();
-    let grid_topk = grid_search(&candidates, &dataset, llm_client.as_ref().map(|c| c as &dyn LlmClient));
-    let interpretation = if let Some(client) = llm_client.as_ref() {
-        client.interpret_results(&topk).ok()
+    let grid_topk = grid_search(&candidates, &dataset);
+
+    let judge = if let Some(client) = llm_client.as_ref() {
+        let judge_input = build_judge_input(&dataset, &library, &topk.entries, None, "toy_dataset");
+        client.judge_candidates(&judge_input).ok().map(|r| r.value)
     } else {
         None
     };
@@ -348,13 +437,13 @@ fn run_discovery(
     struct Output {
         top3: Vec<threebody_discover::EquationScore>,
         grid_top3: Vec<threebody_discover::EquationScore>,
-        interpretation: Option<String>,
+        judge: Option<JudgeResponse>,
     }
 
     let output = Output {
         top3: topk.entries.clone(),
         grid_top3: grid_topk.entries.clone(),
-        interpretation,
+        judge,
     };
     let json = serde_json::to_string_pretty(&output)?;
     fs::write(out, json)?;
