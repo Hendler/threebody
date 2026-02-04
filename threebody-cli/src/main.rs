@@ -2674,6 +2674,141 @@ fn format_opt_f64(v: Option<f64>) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct BasisUsage {
+    grav: bool,
+    elec: bool,
+    mag: bool,
+}
+
+fn basis_usage_from_equation_text(text: &str) -> BasisUsage {
+    BasisUsage {
+        grav: text.contains("grav_"),
+        elec: text.contains("elec_"),
+        mag: text.contains("mag_"),
+    }
+}
+
+fn parse_vector_equation_terms(equation_text: &str) -> [Vec<(f64, String)>; 3] {
+    let mut x_terms: Vec<(f64, String)> = Vec::new();
+    let mut y_terms: Vec<(f64, String)> = Vec::new();
+    let mut z_terms: Vec<(f64, String)> = Vec::new();
+
+    for part in equation_text.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (lhs, rhs) = match part.split_once('=') {
+            Some(v) => v,
+            None => continue,
+        };
+        let axis = lhs.trim().chars().last().unwrap_or(' ');
+        let rhs = rhs.trim();
+        if rhs.is_empty() || rhs == "0" {
+            continue;
+        }
+        let target = match axis {
+            'x' => &mut x_terms,
+            'y' => &mut y_terms,
+            'z' => &mut z_terms,
+            _ => continue,
+        };
+        for token in rhs.split_whitespace() {
+            let (coeff_raw, feature) = match token.split_once('*') {
+                Some(v) => v,
+                None => continue,
+            };
+            let coeff: f64 = match coeff_raw.parse::<f64>() {
+                Ok(v) if v.is_finite() => v,
+                _ => continue,
+            };
+            target.push((coeff, feature.to_string()));
+        }
+    }
+
+    [x_terms, y_terms, z_terms]
+}
+
+fn feature_to_math_symbol(feature: &str, axis: char) -> String {
+    let basis = if feature.starts_with("grav_") {
+        "g"
+    } else if feature.starts_with("elec_") {
+        "e"
+    } else if feature.starts_with("mag_") {
+        "b"
+    } else {
+        return feature.to_string();
+    };
+    format!("{basis}_{{i,{axis}}}^*")
+}
+
+fn feature_to_tex_symbol(feature: &str, axis: char) -> String {
+    if feature.starts_with("grav_") {
+        return format!("g_{{i,{axis}}}^*");
+    }
+    if feature.starts_with("elec_") {
+        return format!("e_{{i,{axis}}}^*");
+    }
+    if feature.starts_with("mag_") {
+        return format!("b_{{i,{axis}}}^*");
+    }
+    format!("\\text{{\\texttt{{{}}}}}", escape_latex(feature))
+}
+
+fn render_expanded_math_md(equation_text: &str) -> String {
+    let usage = basis_usage_from_equation_text(equation_text);
+    let [tx, ty, tz] = parse_vector_equation_terms(equation_text);
+
+    fn render_component(axis: char, terms: &[(f64, String)]) -> String {
+        if terms.is_empty() {
+            return "0".to_string();
+        }
+        let mut out = String::new();
+        for (i, (coeff, feature)) in terms.iter().enumerate() {
+            let sign = if *coeff >= 0.0 { "+" } else { "-" };
+            let abs = coeff.abs();
+            if i == 0 {
+                if sign == "-" {
+                    out.push_str("-");
+                }
+            } else {
+                out.push(' ');
+                out.push_str(sign);
+                out.push(' ');
+            }
+            out.push_str(&format!("{abs:.6} * {}", feature_to_math_symbol(feature, axis)));
+        }
+        out
+    }
+
+    let mut md = String::new();
+    md.push_str("\n## Math Formula (Expanded)\n");
+    md.push_str("Same best model, written in standard physics-ish notation (per body `i`):\n\n");
+    md.push_str("```text\n");
+    md.push_str(&format!("a_{{i,x}} ≈ {}\n", render_component('x', &tx)));
+    md.push_str(&format!("a_{{i,y}} ≈ {}\n", render_component('y', &ty)));
+    md.push_str(&format!("a_{{i,z}} ≈ {}\n", render_component('z', &tz)));
+    md.push_str("```\n\n");
+
+    md.push_str("Basis definitions used by the feature library:\n\n");
+    md.push_str("```text\n");
+    if usage.grav {
+        md.push_str("g_i^* = Σ_{j≠i} m_j * (r_j - r_i) / ||r_j - r_i||^3    (no G)\n");
+    }
+    if usage.elec {
+        md.push_str("e_i^* = (q_i/m_i) * Σ_{j≠i} q_j * (r_i - r_j) / ||r_i - r_j||^3    (no k_e)\n");
+    }
+    if usage.mag {
+        md.push_str("B_i^* = (1/4π) * Σ_{j≠i} q_j * (v_j × (r_i - r_j)) / ||r_i - r_j||^3    (no μ0)\n");
+        md.push_str("b_i^* = (q_i/m_i) * (v_i × B_i^*)    (no μ0)\n");
+    }
+    md.push_str("```\n\n");
+
+    md.push_str("Note: the basis terms omit physical constants, so learned coefficients roughly match `config.constants.g`, `k_e`, and `mu_0`.\n");
+    md
+}
+
 fn render_evaluation_tex(
     eval_input: &FactoryEvaluationInput,
     current_best: Option<&BestFactoryCandidate>,
@@ -2683,6 +2818,7 @@ fn render_evaluation_tex(
     let mut tex = String::new();
     tex.push_str("\\documentclass[11pt]{article}\n");
     tex.push_str("\\usepackage[margin=1in]{geometry}\n");
+    tex.push_str("\\usepackage{amsmath}\n");
     tex.push_str("\\usepackage{booktabs}\n");
     tex.push_str("\\usepackage{longtable}\n");
     tex.push_str("\\usepackage{hyperref}\n");
@@ -2741,6 +2877,71 @@ fn render_evaluation_tex(
         tex.push_str("\\begin{verbatim}\n");
         tex.push_str(&best.candidate.equation_text);
         tex.push_str("\n\\end{verbatim}\n\n");
+    } else {
+        tex.push_str("N/A.\n\n");
+    }
+
+    tex.push_str("\\section*{Math Formula (Expanded)}\n");
+    if let Some(best) = current_best {
+        let usage = basis_usage_from_equation_text(&best.candidate.equation_text);
+        let [tx, ty, tz] = parse_vector_equation_terms(&best.candidate.equation_text);
+
+        fn render_component(axis: char, terms: &[(f64, String)]) -> String {
+            if terms.is_empty() {
+                return "0".to_string();
+            }
+            let mut out = String::new();
+            for (i, (coeff, feature)) in terms.iter().enumerate() {
+                let sign = if *coeff >= 0.0 { "+" } else { "-" };
+                let abs = coeff.abs();
+                if i == 0 {
+                    if sign == "-" {
+                        out.push_str("-");
+                    }
+                } else {
+                    out.push_str(" ");
+                    out.push_str(sign);
+                    out.push_str(" ");
+                }
+                let symbol = feature_to_tex_symbol(feature, axis);
+                out.push_str(&format!("{abs:.6}\\,{symbol}"));
+            }
+            out
+        }
+
+        tex.push_str("\\begin{align*}\n");
+        tex.push_str(&format!(
+            "a_{{i,x}} &\\approx {}\\\\\n",
+            render_component('x', &tx)
+        ));
+        tex.push_str(&format!(
+            "a_{{i,y}} &\\approx {}\\\\\n",
+            render_component('y', &ty)
+        ));
+        tex.push_str(&format!(
+            "a_{{i,z}} &\\approx {}\n",
+            render_component('z', &tz)
+        ));
+        tex.push_str("\\end{align*}\n\n");
+
+        tex.push_str("\\noindent Basis definitions used by the feature library:\n\n");
+        tex.push_str("\\begin{align*}\n");
+        if usage.grav {
+            tex.push_str(
+                "g_i^* &= \\sum_{j\\ne i} m_j\\, \\frac{r_j - r_i}{\\lVert r_j - r_i \\rVert^3} \\quad (\\text{no }G)\\\\\n",
+            );
+        }
+        if usage.elec {
+            tex.push_str("e_i^* &= (q_i/m_i)\\, \\sum_{j\\ne i} q_j\\, \\frac{r_i - r_j}{\\lVert r_i - r_j \\rVert^3} \\quad (\\text{no }k_e)\\\\\n");
+        }
+        if usage.mag {
+            tex.push_str("B_i^* &= (1/4\\pi)\\, \\sum_{j\\ne i} q_j\\, \\frac{v_j \\times (r_i - r_j)}{\\lVert r_i - r_j \\rVert^3} \\quad (\\text{no }\\mu_0)\\\\\n");
+            tex.push_str("b_i^* &= (q_i/m_i)\\, (v_i \\times B_i^*) \\quad (\\text{no }\\mu_0)\\\\\n");
+        }
+        tex.push_str("\\end{align*}\n\n");
+        tex.push_str(
+            "\\noindent\\textbf{Note:} basis terms omit physical constants, so learned coefficients roughly match $G$, $k_e$, and $\\mu_0$ from the config.\n\n",
+        );
     } else {
         tex.push_str("N/A.\n\n");
     }
@@ -2829,6 +3030,7 @@ fn render_executive_summary_md(
             md.push_str("```text\n");
             md.push_str(&best.candidate.equation_text);
             md.push_str("\n```\n");
+            md.push_str(&render_expanded_math_md(&best.candidate.equation_text));
         }
         None => {
             md.push_str("- No candidate equations were recorded.\n");
