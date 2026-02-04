@@ -1158,6 +1158,7 @@ fn run_factory(
             &dataset_x,
         );
 
+        let mut trace_written = false;
         if !vector_candidates.is_empty() {
             let mut best_idx = 0usize;
             let mut best_mse = vector_candidates[0].metrics.mse;
@@ -1185,6 +1186,7 @@ fn run_factory(
                 );
                 let trace_path = run_dir.join("rollout_trace.json");
                 fs::write(&trace_path, serde_json::to_string_pretty(&trace)?)?;
+                trace_written = true;
             }
         }
 
@@ -1195,12 +1197,18 @@ fn run_factory(
             vector_data.samples.len(),
             "accel_components_body_all",
         );
-        let judge_input = build_judge_input_from_candidates(
+        let mut judge_input = build_judge_input_from_candidates(
             dataset_summary,
             vector_candidates.clone(),
             Some(sim_summary.clone()),
             regime,
         );
+        judge_input
+            .notes
+            .push(format!("ga_fitness={}", current_fitness.as_str()));
+        judge_input
+            .notes
+            .push(format!("rollout_integrator={}", rollout_integrator_label(current_rollout)));
         let judge_input_path = run_dir.join("judge_input.json");
         fs::write(&judge_input_path, serde_json::to_string_pretty(&judge_input)?)?;
         let mut judge_prompt = None;
@@ -1284,7 +1292,11 @@ fn run_factory(
             llm_model: if matches!(llm_mode, LlmMode::OpenAI) { Some(model.clone()) } else { None },
             fitness_heuristic: current_fitness.as_str().to_string(),
             rollout_integrator: rollout_integrator_label(current_rollout).to_string(),
-            rollout_trace: Some("rollout_trace.json".to_string()),
+            rollout_trace: if trace_written {
+                Some("rollout_trace.json".to_string())
+            } else {
+                None
+            },
         };
         let report_json = serde_json::to_string_pretty(&report)?;
         fs::write(run_dir.join("report.json"), report_json)?;

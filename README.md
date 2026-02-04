@@ -83,6 +83,7 @@ Outputs:
 - The LLM is a supplemental judge, not a generator. It scores candidates with a fixed rubric (fidelity, parsimony, physical plausibility, regime consistency, stability risk) and outputs JSON only.
 - The LLM can propose initial conditions within strict bounds to drive the `factory` loop.
 - Prompts and responses are logged for reproducibility; numeric metrics (MSE, rollout RMSE, divergence time) remain the primary ranking.
+- The rollout evaluator supports `euler` and `leapfrog`; the LLM can recommend which to use next, along with the GA fitness heuristic (`mse` vs `mse_parsimony`).
 - Requires an API key in `OPENAI_API_KEY` for `--llm-mode openai`. Offline and `--llm-mode mock` are supported.
 
 **Status**
@@ -109,17 +110,18 @@ cargo run -p threebody-cli -- simulate --config config.json --output run_truth.c
 cargo run -p threebody-cli -- discover --runs 50 --population 20 --out top_equations.json
 
 # Run one factory iteration with a mock LLM (no API key needed)
-cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode mock
+cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode mock --rollout-integrator euler --fitness mse
 
 # Run one factory iteration with OpenAI (requires OPENAI_API_KEY)
 export OPENAI_API_KEY="your_key_here"
-cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5
+cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5 --rollout-integrator leapfrog --fitness mse_parsimony
 ```
 
 **Factory Outputs (Per Iteration)**
 - `traj.csv` and `traj.json` sidecar.
 - `initial_conditions.json` and `ic_request.json`.
 - `discovery.json` with `top3_x/top3_y/top3_z` and `vector_candidates`.
+- `rollout_trace.json` for the best vector candidate under the selected rollout integrator.
 - `judge_input.json` plus `judge_prompt.txt` and `judge_response.txt` (when LLM is enabled).
 - `report.json` and `report.md` summaries.
 

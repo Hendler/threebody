@@ -108,4 +108,6 @@ fn factory_runs_once_with_mock_llm() {
     assert!(output.status.success());
     let report = tmp_dir.join("run_001").join("report.json");
     assert!(report.exists());
+    let trace = tmp_dir.join("run_001").join("rollout_trace.json");
+    assert!(trace.exists());
 }

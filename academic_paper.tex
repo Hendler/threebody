@@ -197,6 +197,7 @@ Editorial uncertainty: In chaotic regimes, long-horizon point prediction is not 
 
 \subsection{LLM-assisted interpretation (optional)}
 We add an optional LLM judge layer to interpret candidate equations and propose next experiments. The LLM does \emph{not} generate equations and does \emph{not} override numeric ranking; it is a supplemental reviewer that produces a structured scorecard and narrative synthesis. The rubric is explicit and machine-readable, with component scores for (i) predictive fidelity, (ii) parsimony, (iii) physical plausibility, (iv) regime consistency, and (v) stability risk. Evidence passed to the judge includes equation forms plus numeric metrics (MSE, rollout RMSE, divergence time) and regime diagnostics. We require JSON-only output to preserve determinism. When enabled, the LLM may also propose the next initial conditions within strict bounds; proposals are validated and clipped before use. All prompts and responses are logged as reproducibility artifacts.
+The judge can additionally recommend (a) which rollout integrator to use for evaluation (Euler vs.\ leapfrog) and (b) which baseline genetic-algorithm fitness heuristic to employ (MSE vs.\ MSE with parsimony penalty), allowing controlled ablations without compromising reproducibility.
 
 \section{System Integration and Reproducibility}
 \subsection{CLI-driven workflow}

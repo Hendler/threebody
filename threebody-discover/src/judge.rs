@@ -341,6 +341,8 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     }
 
     prompt.push_str("\nOutput JSON schema:\n");
+    prompt.push_str("Allowed next_rollout_integrator: \"euler\" or \"leapfrog\".\n");
+    prompt.push_str("Allowed next_ga_heuristic: \"mse\" or \"mse_parsimony\".\n");
     prompt.push_str("{\n");
     prompt.push_str("  \"version\": \"v1\",\n");
     prompt.push_str("  \"ranking\": [0,1,2],\n");

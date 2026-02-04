@@ -134,7 +134,14 @@ mod tests {
     fn search_returns_top3() {
         let data = dataset();
         let lib = FeatureLibrary::default_physics();
-        let cfg = DiscoveryConfig { runs: 5, population: 6, max_terms: 2, mutation_rate: 0.5, seed: 1 };
+        let cfg = DiscoveryConfig {
+            runs: 5,
+            population: 6,
+            max_terms: 2,
+            mutation_rate: 0.5,
+            seed: 1,
+            fitness: FitnessHeuristic::Mse,
+        };
         let topk = run_search(&data, &lib, &cfg);
         assert_eq!(topk.entries.len(), 3);
     }
@@ -143,8 +150,22 @@ mod tests {
     fn more_runs_not_worse_best() {
         let data = dataset();
         let lib = FeatureLibrary::default_physics();
-        let cfg1 = DiscoveryConfig { runs: 2, population: 6, max_terms: 2, mutation_rate: 0.5, seed: 2 };
-        let cfg2 = DiscoveryConfig { runs: 6, population: 6, max_terms: 2, mutation_rate: 0.5, seed: 2 };
+        let cfg1 = DiscoveryConfig {
+            runs: 2,
+            population: 6,
+            max_terms: 2,
+            mutation_rate: 0.5,
+            seed: 2,
+            fitness: FitnessHeuristic::Mse,
+        };
+        let cfg2 = DiscoveryConfig {
+            runs: 6,
+            population: 6,
+            max_terms: 2,
+            mutation_rate: 0.5,
+            seed: 2,
+            fitness: FitnessHeuristic::Mse,
+        };
         let top1 = run_search(&data, &lib, &cfg1);
         let top2 = run_search(&data, &lib, &cfg2);
         let best1 = top1.best().unwrap().score;

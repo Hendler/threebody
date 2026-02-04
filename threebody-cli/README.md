@@ -34,6 +34,8 @@ cargo run -p threebody-cli -- --help
 - `--dry-run` performs all steps without writing output files.
 - `--mode truth` enables adaptive RK45 with strict tolerances.
 - Default config uses adaptive RK45; `--mode standard` preserves user config without overrides.
+- `--fitness` selects GA fitness heuristic (`mse`, `mse_parsimony`).
+- `--rollout-integrator` selects the rollout evaluator (`euler`, `leapfrog`) for factory scoring.
 
 **LLM**
 Set `OPENAI_API_KEY` to enable LLM judge mode for discovery or the factory loop:
@@ -43,3 +45,4 @@ cargo run -p threebody-cli -- discover --llm --model gpt-5
 cargo run -p threebody-cli -- factory --llm-mode openai --model gpt-5 --max-iters 1 --auto
 ```
 The LLM judge receives equation forms plus numeric metrics (MSE, rollout RMSE, divergence time) and emits JSON-only scorecards.
+It may recommend the next rollout evaluator (`euler` or `leapfrog`) and GA fitness heuristic (`mse` or `mse_parsimony`).
