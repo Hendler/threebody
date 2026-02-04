@@ -3,12 +3,16 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use threebody_core::config::{Config, IntegratorKind};
-use threebody_core::integrators::{boris::Boris, leapfrog::Leapfrog, rk45::Rk45, Integrator};
+use threebody_core::integrators::{boris::Boris, implicit_midpoint::ImplicitMidpoint, leapfrog::Leapfrog, rk45::Rk45, Integrator};
 use threebody_core::math::vec3::Vec3;
 use threebody_core::output::csv::write_csv;
 use threebody_core::output::sidecar::{build_sidecar, write_sidecar};
 use threebody_core::sim::{simulate, SimOptions};
 use threebody_core::state::{Body, State, System};
+use threebody_discover::ga::DiscoveryConfig;
+use threebody_discover::library::FeatureLibrary;
+use threebody_discover::llm::{LlmClient, OpenAIClient};
+use threebody_discover::{grid_search, run_search, Dataset};
 
 #[derive(Parser)]
 #[command(name = "threebody-cli")]
@@ -29,8 +33,8 @@ enum Commands {
     /// Run a simulation.
     Simulate {
         /// Config JSON path.
-        #[arg(long, default_value = "config.json")]
-        config: PathBuf,
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Output CSV path.
         #[arg(long, default_value = "traj.csv")]
         output: PathBuf,
@@ -40,6 +44,9 @@ enum Commands {
         /// Timestep.
         #[arg(long, default_value_t = 0.01)]
         dt: f64,
+        /// Mode: standard or truth (adaptive RK45 with strict tolerances).
+        #[arg(long, default_value = "standard")]
+        mode: String,
         /// Preset initial conditions.
         #[arg(long, default_value = "two-body")]
         preset: String,
@@ -64,14 +71,16 @@ enum Commands {
     },
     /// Alias for simulate.
     Run {
-        #[arg(long, default_value = "config.json")]
-        config: PathBuf,
+        #[arg(long)]
+        config: Option<PathBuf>,
         #[arg(long, default_value = "traj.csv")]
         output: PathBuf,
         #[arg(long, default_value_t = 100)]
         steps: usize,
         #[arg(long, default_value_t = 0.01)]
         dt: f64,
+        #[arg(long, default_value = "standard")]
+        mode: String,
         #[arg(long, default_value = "two-body")]
         preset: String,
         #[arg(long)]
@@ -86,6 +95,27 @@ enum Commands {
         dry_run: bool,
         #[arg(long)]
         summary: bool,
+    },
+    /// Run the equation discovery loop.
+    Discover {
+        /// Number of GA runs.
+        #[arg(long, default_value_t = 50)]
+        runs: usize,
+        /// Population size.
+        #[arg(long, default_value_t = 20)]
+        population: usize,
+        /// Random seed.
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        /// Output JSON path.
+        #[arg(long, default_value = "top_equations.json")]
+        out: PathBuf,
+        /// Enable LLM ranking/interpretation.
+        #[arg(long)]
+        llm: bool,
+        /// LLM model name.
+        #[arg(long, default_value = "gpt-5")]
+        model: String,
     },
 }
 
@@ -106,6 +136,7 @@ fn main() -> anyhow::Result<()> {
             output,
             steps,
             dt,
+            mode,
             preset,
             integrator,
             no_em,
@@ -119,6 +150,7 @@ fn main() -> anyhow::Result<()> {
                 output,
                 steps,
                 dt,
+                mode,
                 preset,
                 integrator,
                 no_em,
@@ -133,6 +165,7 @@ fn main() -> anyhow::Result<()> {
             output,
             steps,
             dt,
+            mode,
             preset,
             integrator,
             no_em,
@@ -146,6 +179,7 @@ fn main() -> anyhow::Result<()> {
                 output,
                 steps,
                 dt,
+                mode,
                 preset,
                 integrator,
                 no_em,
@@ -155,15 +189,26 @@ fn main() -> anyhow::Result<()> {
                 summary,
             )?;
         }
+        Commands::Discover {
+            runs,
+            population,
+            seed,
+            out,
+            llm,
+            model,
+        } => {
+            run_discovery(runs, population, seed, out, llm, model)?;
+        }
     }
     Ok(())
 }
 
 fn run_simulation(
-    config_path: PathBuf,
+    config_path: Option<PathBuf>,
     output: PathBuf,
     steps: usize,
     dt: f64,
+    mode: String,
     preset: String,
     integrator_override: Option<String>,
     no_em: bool,
@@ -175,8 +220,17 @@ fn run_simulation(
     if format != "csv" {
         anyhow::bail!("unsupported format: {format}");
     }
-    let cfg_json = fs::read_to_string(&config_path)?;
-    let mut cfg: Config = serde_json::from_str(&cfg_json)?;
+    let mut cfg: Config = if let Some(path) = config_path.clone() {
+        if path.exists() {
+            let cfg_json = fs::read_to_string(&path)?;
+            serde_json::from_str(&cfg_json)?
+        } else {
+            eprintln!("config not found, using defaults: {}", path.display());
+            Config::default()
+        }
+    } else {
+        Config::default()
+    };
     if no_em {
         cfg.enable_em = false;
     }
@@ -192,6 +246,17 @@ fn run_simulation(
             _ => anyhow::bail!("unknown integrator: {name}"),
         };
     }
+
+    if mode == "truth" {
+        cfg.integrator.kind = IntegratorKind::Rk45;
+        cfg.integrator.adaptive = true;
+        cfg.integrator.rtol = 1e-12;
+        cfg.integrator.atol = 1e-14;
+        cfg.integrator.dt_min = cfg.integrator.dt_min.min(1e-6);
+        cfg.integrator.dt_max = cfg.integrator.dt_max.max(0.05);
+    } else if mode != "standard" {
+        anyhow::bail!("unknown mode: {mode}");
+    }
     cfg.validate().map_err(anyhow::Error::msg)?;
 
     let system = preset_system(&preset)?;
@@ -201,7 +266,7 @@ fn run_simulation(
             IntegratorKind::Leapfrog => (Box::new(Leapfrog), None),
             IntegratorKind::Rk45 => (Box::new(Rk45), None),
             IntegratorKind::Boris => (Box::new(Boris), None),
-            IntegratorKind::ImplicitMidpoint => (Box::new(Rk45), None),
+            IntegratorKind::ImplicitMidpoint => (Box::new(ImplicitMidpoint), None),
         };
 
     let result = simulate(system, &cfg, integrator.as_ref(), encounter_integrator.as_deref(), options);
@@ -246,4 +311,64 @@ fn preset_system(name: &str) -> anyhow::Result<System> {
         }
         _ => anyhow::bail!("unknown preset: {name}"),
     }
+}
+
+fn run_discovery(
+    runs: usize,
+    population: usize,
+    seed: u64,
+    out: PathBuf,
+    llm: bool,
+    model: String,
+) -> anyhow::Result<()> {
+    let dataset = discovery_dataset();
+    let library = FeatureLibrary::default_physics();
+    let cfg = DiscoveryConfig {
+        runs,
+        population,
+        seed,
+        ..DiscoveryConfig::default()
+    };
+    let llm_client = if llm {
+        Some(OpenAIClient::from_env(&model)?)
+    } else {
+        None
+    };
+
+    let topk = run_search(&dataset, &library, &cfg, llm_client.as_ref().map(|c| c as &dyn LlmClient));
+    let candidates: Vec<_> = topk.entries.iter().map(|e| e.equation.clone()).collect();
+    let grid_topk = grid_search(&candidates, &dataset, llm_client.as_ref().map(|c| c as &dyn LlmClient));
+    let interpretation = if let Some(client) = llm_client.as_ref() {
+        client.interpret_results(&topk).ok()
+    } else {
+        None
+    };
+
+    #[derive(serde::Serialize)]
+    struct Output {
+        top3: Vec<threebody_discover::EquationScore>,
+        grid_top3: Vec<threebody_discover::EquationScore>,
+        interpretation: Option<String>,
+    }
+
+    let output = Output {
+        top3: topk.entries.clone(),
+        grid_top3: grid_topk.entries.clone(),
+        interpretation,
+    };
+    let json = serde_json::to_string_pretty(&output)?;
+    fs::write(out, json)?;
+    Ok(())
+}
+
+fn discovery_dataset() -> Dataset {
+    let feature_names = vec!["x".to_string(), "x2".to_string()];
+    let mut samples = Vec::new();
+    let mut targets = Vec::new();
+    for i in 1..=5 {
+        let x = i as f64;
+        samples.push(vec![x, x * x]);
+        targets.push(x);
+    }
+    Dataset::new(feature_names, samples, targets)
 }

@@ -55,3 +55,9 @@
 3. Tolerances must be explicit in tests, stored in `threebody-core/tests/tolerances.rs` to keep DRY.
 4. Every public function must have at least one test that covers a failure mode (invalid inputs, division by zero, or `epsilon` edge cases).
 5. Every CLI command and runner task must have at least one integration or smoke test that exercises its happy path.
+
+**New Requirements (Accuracy + Discovery + LLM)**
+1. Add a truth-mode simulation strategy: adaptive RK45 with step rejection, strict tolerances, and dt tracking per step. Update CSV to emit `dt` per row. Tests: adaptive mode adjusts dt within bounds; error does not explode.
+2. Add a discovery crate with a genetic algorithm that keeps the top 3 equations after N runs and continues searching for improvements. Tests: top3 persisted, best score non-increasing over longer runs.
+3. Integrate an LLM client (ChatGPT 5.2 via OpenAI API) to rank equations and interpret results during grid search. Tests: mock client reorderings are applied; LLM calls are optional and do not break offline runs.
+4. Make API key setup part of onboarding: document `OPENAI_API_KEY` and add a CLI flag to enable LLM ranking. Tests: CLI discover command writes top3 JSON with LLM disabled.

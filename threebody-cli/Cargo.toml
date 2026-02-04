@@ -8,3 +8,5 @@ clap = { version = "4.5.4", features = ["derive"] }
 threebody-core = { path = "../threebody-core" }
 serde_json = "1.0"
 anyhow = "1.0"
+threebody-discover = { path = "../threebody-discover" }
+serde = { version = "1.0", features = ["derive"] }

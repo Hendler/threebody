@@ -8,4 +8,5 @@ fi
 
 just example-config
 just simulate
+just discover
 just test

@@ -94,6 +94,8 @@ We provide two integrators:
 \item \textbf{Leapfrog (Kick--Drift--Kick)}\cite{Verlet1967,Ruth1983,Yoshida1990,ForestRuth1990}: a fast, stable second-order method often favored for long-horizon gravitational dynamics.
 \end{itemize}
 
+We implement a strict ``truth mode'' that enables adaptive RK45 with step rejection and per-step dt tracking. If the embedded error exceeds tolerance, the step is rejected and dt is reduced; otherwise, dt is increased within configured bounds. This provides a best-effort accuracy strategy under the stated model assumptions, especially near close encounters where fixed-step methods can fail.
+
 Editorial uncertainty: For purely Hamiltonian gravity, symplectic methods have strong long-term stability guarantees. With the chosen EM terms, the system is not treated with a full Hamiltonian field formulation here; leapfrog remains useful but should not be assumed to preserve the same structure exactly. This is one reason we maintain RK-based truth mode.
 
 \subsection{Diagnostics and conservation interpretation}
@@ -190,6 +192,9 @@ Pointwise acceleration fit is not sufficient. We evaluate:
 
 Editorial uncertainty: In chaotic regimes, long-horizon point prediction is not meaningful\cite{Lorenz1963}; evaluation should shift toward short-horizon deterministic accuracy, ensemble/statistical predictions, and qualitative invariants and manifold structure. We are not yet fully implementing those alternative evaluation regimes.
 
+\subsection{LLM-assisted interpretation (optional)}
+We add an optional LLM layer to rank candidate equations and interpret results from grid search or genetic search. This is not used to generate equations directly; rather, it provides a human-readable synthesis of tradeoffs and highlights plausible forms. The LLM layer is advisory and fully optional; all discovery remains reproducible without it.
+
 \section{System Integration and Reproducibility}
 \subsection{CLI-driven workflow}
 The systems are controlled by CLI:
@@ -262,6 +267,7 @@ We interpret ``novel'' as compact approximations that outperform naive baselines
 \item Add an \textbf{em\_fields} library that learns directly from simulator fields $E, B$ to obtain even simpler discovered laws.
 \item Implement regime partitioning (``atlas of models''): train multiple sparse models with a lightweight regime classifier.
 \item Extend discovery to probabilistic forecasts for chaotic regimes.
+\item Add LLM-assisted review to triage large candidate sets and summarize top equations.
 \end{itemize}
 
 \section{Conclusion}

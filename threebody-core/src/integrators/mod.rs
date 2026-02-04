@@ -4,6 +4,7 @@ use crate::state::System;
 pub mod leapfrog;
 pub mod boris;
 pub mod rk45;
+pub mod implicit_midpoint;
 
 /// Core integrator interface.
 pub trait Integrator {

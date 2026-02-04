@@ -26,5 +26,5 @@ println!("steps={}", result.steps.len());
 - `config`: model parameters and integrator choices.
 - `forces`: gravity and EM models.
 - `integrators`: leapfrog, RK45, Boris.
-- `sim`: simulation driver and encounter policy.
-- `output`: CSV writer and sidecar metadata.
+- `sim`: simulation driver, adaptive RK45 truth mode, and encounter policy.
+- `output`: CSV writer (includes per-step `dt`) and sidecar metadata.

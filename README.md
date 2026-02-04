@@ -74,11 +74,22 @@ Outputs:
 - Fits via sequential thresholded least squares (SINDy / STLS).
 - Evaluates models by rollout accuracy, stability, and generalization within a regime.
 
-**Status**
-This repo is currently documentation and a build plan. Implementation is intended in Rust, with a workspace containing `threebody-core` (library) and `threebody-cli` (binary). The discovery crate is optional and only planned if discovery is implemented in Rust.
+**Accuracy / Truth Mode**
+- Adaptive RK45 with step rejection and strict tolerances.
+- Per-step `dt` recorded in output; close-encounter policy configurable.
+- Intended for “truth-grade” runs where accuracy is prioritized over speed. The default config uses adaptive RK45.
 
-**Quick Start (Planned)**
-Once the Rust workspace exists, the intended flow is:
+**LLM-Assisted Discovery (Optional)**
+- The discovery loop can use a ChatGPT 5.2 client to rank equations and interpret results.
+- Requires an API key in `OPENAI_API_KEY`.
+- This is optional; the system runs fully offline without LLM ranking.
+- Discovery output includes GA top-3 equations and a grid-search top-3 (LLM-ranked when enabled).
+
+**Status**
+This repo now includes a working Rust workspace with `threebody-core` (library), `threebody-cli` (binary), and `threebody-discover` (discovery engine). The core simulator supports gravity + quasi-static EM, adaptive RK45 truth mode, and CSV + JSON sidecar output. The discovery engine runs a genetic search and can optionally use an LLM to rank and interpret candidate equations.
+
+**Quick Start**
+The intended flow is:
 1. Generate an example config with the CLI.
 2. Run a simulation from that config and produce a CSV.
 3. Inspect or visualize outputs, and then feed them into discovery.
@@ -86,10 +97,16 @@ Once the Rust workspace exists, the intended flow is:
 Expected commands (exact flags will be finalized during implementation):
 ```bash
 # Generate a starter config
-cargo run -p threebody-cli -- example-config > config.json
+cargo run -p threebody-cli -- example-config --out config.json
 
 # Run a simulation and emit CSV output
-cargo run -p threebody-cli -- simulate --config config.json --out run.csv
+cargo run -p threebody-cli -- simulate --config config.json --output run.csv
+
+# Run a truth-mode simulation (adaptive RK45)
+cargo run -p threebody-cli -- simulate --config config.json --output run_truth.csv --mode truth
+
+# Run discovery (writes top 3 equations)
+cargo run -p threebody-cli -- discover --runs 50 --population 20 --out top_equations.json
 ```
 
 **Implementation Plan (TDD-first, condensed from `todo.md`)**

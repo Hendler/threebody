@@ -128,6 +128,7 @@ mod tests {
         assert!(header.contains(&"r1_x".to_string()));
         assert!(header.contains(&"v2_y".to_string()));
         assert!(header.contains(&"a3_z".to_string()));
+        assert!(header.contains(&"dt".to_string()));
         assert!(header.contains(&"energy_proxy".to_string()));
     }
 

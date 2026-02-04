@@ -9,6 +9,9 @@ simulate:
 simulate-em:
   cargo run -p threebody-cli -- simulate --config config.json --output traj_em.csv --steps 100 --dt 0.01
 
+discover:
+  cargo run -p threebody-cli -- discover --runs 50 --population 20 --out top_equations.json
+
 test:
   cargo test
 
