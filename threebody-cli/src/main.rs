@@ -504,6 +504,7 @@ fn build_judge_input(
         .map(|(id, e)| CandidateSummary {
             id,
             equation: e.equation.clone(),
+            equation_text: e.equation.format(),
             metrics: CandidateMetrics {
                 mse: e.score,
                 complexity: e.equation.complexity(),

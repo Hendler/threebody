@@ -247,6 +247,7 @@ mod tests {
                 CandidateSummary {
                     id: 0,
                     equation: Equation { terms: vec![] },
+                    equation_text: "0".to_string(),
                     metrics: CandidateMetrics {
                         mse: 1.0,
                         complexity: 0,
@@ -259,6 +260,7 @@ mod tests {
                 CandidateSummary {
                     id: 1,
                     equation: Equation { terms: vec![] },
+                    equation_text: "0".to_string(),
                     metrics: CandidateMetrics {
                         mse: 2.0,
                         complexity: 2,

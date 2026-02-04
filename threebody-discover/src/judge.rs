@@ -61,6 +61,7 @@ pub struct CandidateMetrics {
 pub struct CandidateSummary {
     pub id: usize,
     pub equation: Equation,
+    pub equation_text: String,
     pub metrics: CandidateMetrics,
     pub notes: Vec<String>,
 }
@@ -310,7 +311,7 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
         prompt.push_str(&format!(
             "id={}, eq=\"{}\", mse={:.6}, complexity={}, rollout_rmse={:?}, divergence_time={:?}, flags={}\n",
             c.id,
-            c.equation.format(),
+            c.equation_text,
             c.metrics.mse,
             c.metrics.complexity,
             c.metrics.rollout_rmse,
@@ -376,6 +377,7 @@ mod tests {
             candidates: vec![CandidateSummary {
                 id: 0,
                 equation: Equation { terms: vec![] },
+                equation_text: "0".to_string(),
                 metrics: CandidateMetrics {
                     mse: 1.0,
                     complexity: 0,
