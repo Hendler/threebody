@@ -8,3 +8,8 @@ target
 .venv/
 factory_out/
 .openai_key
+config.json
+ic.json
+top_equations.json
+traj.csv
+traj.json

@@ -23,6 +23,7 @@ quickstart:
   cargo run -p threebody-cli -- example-ic --preset three-body --out ic.json
   cargo run -p threebody-cli -- simulate --config config.json --ic ic.json --output traj.csv --steps 200 --dt 0.01
   cargo run -p threebody-cli -- discover --solver stls --out top_equations.json
+  ts="$(date +%Y%m%d_%H%M%S)"; out="factory_out/quickstart_${ts}"; if [ -f .openai_key ] || [ -n "${OPENAI_API_KEY:-}" ]; then llm_mode=openai; else llm_mode=mock; fi; echo "Running factory (10 iters): out_dir=$out llm_mode=$llm_mode"; cargo run -p threebody-cli -- factory --out-dir "$out" --max-iters 10 --auto --config config.json --steps 200 --dt 0.01 --llm-mode "$llm_mode" --model gpt-5 --solver stls --rollout-integrator euler --fitness mse
 
 test:
   cargo test

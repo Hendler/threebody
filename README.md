@@ -104,6 +104,10 @@ Fastest path (uses `just`):
 ```bash
 just quickstart
 ```
+What it does:
+- Generates `config.json` and `ic.json`.
+- Runs one simulation to produce `traj.csv` + `traj.json`, then runs discovery to produce `top_equations.json`.
+- Runs **10** `factory` iterations with an LLM judge (uses `--llm-mode openai` if `.openai_key` or `OPENAI_API_KEY` is present; otherwise uses `--llm-mode mock`) and writes artifacts under `factory_out/quickstart_*/run_###/`.
 
 Commands:
 ```bash
