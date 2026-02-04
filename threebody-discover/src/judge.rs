@@ -94,6 +94,7 @@ pub struct SimulationSummary {
     pub dt_max: Option<f64>,
     pub dt_avg: Option<f64>,
     pub warnings: Vec<String>,
+    pub rollout_integrator: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -165,6 +166,8 @@ pub struct JudgeScore {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct JudgeRecommendations {
     pub next_initial_conditions: Option<InitialConditionSpec>,
+    pub next_rollout_integrator: Option<String>,
+    pub next_ga_heuristic: Option<String>,
     pub next_search_directions: Vec<String>,
     pub notes: String,
 }
@@ -302,6 +305,7 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
             sim.dt_max,
             sim.dt_avg
         ));
+        prompt.push_str(&format!("rollout_integrator={}\n", sim.rollout_integrator));
         if !sim.warnings.is_empty() {
             prompt.push_str(&format!("warnings: {}\n", sim.warnings.join("; ")));
         }
@@ -345,6 +349,8 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     prompt.push_str("  ],\n");
     prompt.push_str("  \"recommendations\": {\n");
     prompt.push_str("    \"next_initial_conditions\": {\"bodies\":[{\"mass\":1.0,\"charge\":0.0,\"pos\":[0,0,0],\"vel\":[0,0,0]}],\"barycentric\":true,\"notes\":\"...\"},\n");
+    prompt.push_str("    \"next_rollout_integrator\": \"euler\",\n");
+    prompt.push_str("    \"next_ga_heuristic\": \"mse\",\n");
     prompt.push_str("    \"next_search_directions\": [\"...\"],\n");
     prompt.push_str("    \"notes\": \"...\"\n");
     prompt.push_str("  },\n");
@@ -419,6 +425,8 @@ mod tests {
             }],
             recommendations: JudgeRecommendations {
                 next_initial_conditions: None,
+                next_rollout_integrator: None,
+                next_ga_heuristic: None,
                 next_search_directions: vec![],
                 notes: String::new(),
             },

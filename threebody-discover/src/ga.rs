@@ -1,4 +1,4 @@
-use crate::equation::{score_equation, Equation, EquationScore, TopK};
+use crate::equation::{score_equation_with, Equation, EquationScore, FitnessHeuristic, TopK};
 use crate::library::FeatureLibrary;
 use crate::Dataset;
 
@@ -9,6 +9,7 @@ pub struct DiscoveryConfig {
     pub max_terms: usize,
     pub mutation_rate: f64,
     pub seed: u64,
+    pub fitness: FitnessHeuristic,
 }
 
 impl Default for DiscoveryConfig {
@@ -19,6 +20,7 @@ impl Default for DiscoveryConfig {
             max_terms: 4,
             mutation_rate: 0.3,
             seed: 42,
+            fitness: FitnessHeuristic::Mse,
         }
     }
 }
@@ -39,7 +41,7 @@ pub fn run_search(
             .iter()
             .cloned()
             .map(|eq| EquationScore {
-                score: score_equation(&eq, dataset),
+                score: score_equation_with(&eq, dataset, cfg.fitness),
                 equation: eq,
             })
             .collect();

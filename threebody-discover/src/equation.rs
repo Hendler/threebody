@@ -1,6 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub enum FitnessHeuristic {
+    Mse,
+    MseParsimony,
+}
+
+impl FitnessHeuristic {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            FitnessHeuristic::Mse => "mse",
+            FitnessHeuristic::MseParsimony => "mse_parsimony",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Term {
     pub feature: String,
@@ -92,6 +107,17 @@ pub fn score_equation(eq: &Equation, dataset: &Dataset) -> f64 {
     mse / n
 }
 
+pub fn score_equation_with(eq: &Equation, dataset: &Dataset, heuristic: FitnessHeuristic) -> f64 {
+    let mse = score_equation(eq, dataset);
+    match heuristic {
+        FitnessHeuristic::Mse => mse,
+        FitnessHeuristic::MseParsimony => {
+            let penalty = 1.0 + 0.05 * (eq.complexity() as f64);
+            mse * penalty
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TopK {
     pub k: usize,
@@ -158,6 +184,24 @@ mod tests {
         };
         let score = score_equation(&eq, &dataset);
         assert!(score < 1e-12);
+    }
+
+    #[test]
+    fn parsimony_penalty_increases_score() {
+        let dataset = Dataset::new(
+            vec!["x".to_string(), "y".to_string()],
+            vec![vec![1.0, 2.0]],
+            vec![5.0],
+        );
+        let eq = Equation {
+            terms: vec![
+                Term { feature: "x".to_string(), coeff: 1.0 },
+                Term { feature: "y".to_string(), coeff: 2.0 },
+            ],
+        };
+        let mse = score_equation_with(&eq, &dataset, FitnessHeuristic::Mse);
+        let penalized = score_equation_with(&eq, &dataset, FitnessHeuristic::MseParsimony);
+        assert!(penalized >= mse);
     }
 
     #[test]

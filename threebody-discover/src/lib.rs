@@ -8,6 +8,7 @@ pub mod grid;
 pub mod judge;
 
 pub use equation::{Dataset, Equation, EquationScore, TopK};
+pub use equation::FitnessHeuristic;
 pub use ga::{run_search, DiscoveryConfig};
 pub use grid::grid_search;
 pub use judge::{

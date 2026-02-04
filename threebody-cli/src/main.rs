@@ -19,7 +19,7 @@ use threebody_discover::judge::{
     JudgeInput, JudgeResponse, Rubric, SimulationSummary,
 };
 use threebody_discover::llm::{LlmClient, MockLlm, OpenAIClient};
-use threebody_discover::{grid_search, run_search, Dataset};
+use threebody_discover::{grid_search, run_search, Dataset, FitnessHeuristic};
 
 #[derive(Parser)]
 #[command(name = "threebody-cli")]
@@ -123,6 +123,9 @@ enum Commands {
         /// LLM model name.
         #[arg(long, default_value = "gpt-5")]
         model: String,
+        /// Fitness heuristic: mse | mse_parsimony.
+        #[arg(long, default_value = "mse")]
+        fitness: String,
     },
     /// Run the LLM-assisted factory loop (ICs -> sim -> discovery -> judge).
     Factory {
@@ -165,6 +168,12 @@ enum Commands {
         /// Random seed.
         #[arg(long, default_value_t = 42)]
         seed: u64,
+        /// Fitness heuristic: mse | mse_parsimony.
+        #[arg(long, default_value = "mse")]
+        fitness: String,
+        /// Rollout integrator for evaluation: euler | leapfrog.
+        #[arg(long, default_value = "euler")]
+        rollout_integrator: String,
         /// LLM mode: off, mock, openai.
         #[arg(long, default_value = "mock")]
         llm_mode: String,
@@ -251,8 +260,9 @@ fn main() -> anyhow::Result<()> {
             out,
             llm,
             model,
+            fitness,
         } => {
-            run_discovery(runs, population, seed, out, llm, model)?;
+            run_discovery(runs, population, seed, out, llm, model, fitness)?;
         }
         Commands::Factory {
             out_dir,
@@ -268,6 +278,8 @@ fn main() -> anyhow::Result<()> {
             runs,
             population,
             seed,
+            fitness,
+            rollout_integrator,
             llm_mode,
             model,
         } => {
@@ -285,6 +297,8 @@ fn main() -> anyhow::Result<()> {
                 runs,
                 population,
                 seed,
+                fitness,
+                rollout_integrator,
                 llm_mode,
                 model,
             )?;
@@ -423,13 +437,16 @@ fn run_discovery(
     out: PathBuf,
     llm: bool,
     model: String,
+    fitness: String,
 ) -> anyhow::Result<()> {
     let dataset = discovery_dataset();
     let library = FeatureLibrary::default_physics();
+    let fitness = parse_fitness_heuristic(&fitness)?;
     let cfg = DiscoveryConfig {
         runs,
         population,
         seed,
+        fitness,
         ..DiscoveryConfig::default()
     };
     let llm_client = if llm { Some(OpenAIClient::from_env(&model)?) } else { None };
@@ -844,7 +861,7 @@ fn build_vector_candidates(
     candidates
 }
 
-fn build_sim_summary(result: &threebody_core::sim::SimResult) -> SimulationSummary {
+fn build_sim_summary(result: &threebody_core::sim::SimResult, rollout_integrator: RolloutIntegrator) -> SimulationSummary {
     let energy_start = result.steps.first().map(|s| s.diagnostics.energy_proxy);
     let energy_end = result.steps.last().map(|s| s.diagnostics.energy_proxy);
     let energy_drift = match (energy_start, energy_end) {
@@ -880,6 +897,7 @@ fn build_sim_summary(result: &threebody_core::sim::SimResult) -> SimulationSumma
         dt_max: result.stats.dt_max,
         dt_avg: result.stats.dt_avg,
         warnings: result.warnings.clone(),
+        rollout_integrator: rollout_integrator_label(rollout_integrator).to_string(),
     }
 }
 
@@ -890,12 +908,41 @@ enum LlmMode {
     OpenAI,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum RolloutIntegrator {
+    Euler,
+    Leapfrog,
+}
+
 fn parse_llm_mode(mode: &str) -> anyhow::Result<LlmMode> {
     match mode {
         "off" => Ok(LlmMode::Off),
         "mock" => Ok(LlmMode::Mock),
         "openai" => Ok(LlmMode::OpenAI),
         _ => anyhow::bail!("unknown llm mode: {mode}"),
+    }
+}
+
+fn parse_rollout_integrator(name: &str) -> anyhow::Result<RolloutIntegrator> {
+    match name {
+        "euler" => Ok(RolloutIntegrator::Euler),
+        "leapfrog" => Ok(RolloutIntegrator::Leapfrog),
+        _ => anyhow::bail!("unknown rollout integrator: {name}"),
+    }
+}
+
+fn rollout_integrator_label(intg: RolloutIntegrator) -> &'static str {
+    match intg {
+        RolloutIntegrator::Euler => "euler",
+        RolloutIntegrator::Leapfrog => "leapfrog",
+    }
+}
+
+fn parse_fitness_heuristic(name: &str) -> anyhow::Result<FitnessHeuristic> {
+    match name {
+        "mse" => Ok(FitnessHeuristic::Mse),
+        "mse_parsimony" => Ok(FitnessHeuristic::MseParsimony),
+        _ => anyhow::bail!("unknown fitness heuristic: {name}"),
     }
 }
 
@@ -929,6 +976,8 @@ fn run_factory(
     runs: usize,
     population: usize,
     seed: u64,
+    fitness: String,
+    rollout_integrator: String,
     llm_mode: String,
     model: String,
 ) -> anyhow::Result<()> {
@@ -936,6 +985,8 @@ fn run_factory(
     let mut next_ic: Option<InitialConditionSpec> = None;
     let llm_mode = parse_llm_mode(&llm_mode)?;
     let llm_client = select_llm_client(llm_mode, &model)?;
+    let mut current_fitness = parse_fitness_heuristic(&fitness)?;
+    let mut current_rollout = parse_rollout_integrator(&rollout_integrator)?;
 
     for iter in 0..max_iters {
         let run_id = format!("run_{:03}", iter + 1);
@@ -1006,6 +1057,7 @@ fn run_factory(
             runs,
             population,
             seed: seed + iter as u64,
+            fitness: current_fitness,
             ..DiscoveryConfig::default()
         };
         let topk_x = run_search(&dataset_x, &library, &disc_cfg);
@@ -1019,6 +1071,7 @@ fn run_factory(
             &result,
             &cfg,
             regime,
+            current_rollout,
         );
         let grid_topk = grid_search(
             &vector_candidates
@@ -1028,7 +1081,7 @@ fn run_factory(
             &dataset_x,
         );
 
-        let sim_summary = build_sim_summary(&result);
+        let sim_summary = build_sim_summary(&result, current_rollout);
         let dataset_summary = build_dataset_summary(
             &vector_data.feature_names,
             &library,
@@ -1104,6 +1157,8 @@ fn run_factory(
             judge: Option<JudgeResponse>,
             llm_mode: String,
             llm_model: Option<String>,
+            fitness_heuristic: String,
+            rollout_integrator: String,
         }
 
         let report = FactoryReport {
@@ -1119,6 +1174,8 @@ fn run_factory(
             judge: judge.clone(),
             llm_mode: llm_mode_label(llm_mode).to_string(),
             llm_model: if matches!(llm_mode, LlmMode::OpenAI) { Some(model.clone()) } else { None },
+            fitness_heuristic: current_fitness.as_str().to_string(),
+            rollout_integrator: rollout_integrator_label(current_rollout).to_string(),
         };
         let report_json = serde_json::to_string_pretty(&report)?;
         fs::write(run_dir.join("report.json"), report_json)?;
@@ -1159,6 +1216,16 @@ fn run_factory(
         if let Some(j) = judge {
             if let Some(next) = j.recommendations.next_initial_conditions {
                 next_ic = Some(next);
+            }
+            if let Some(next) = j.recommendations.next_ga_heuristic.as_ref() {
+                if let Ok(parsed) = parse_fitness_heuristic(next) {
+                    current_fitness = parsed;
+                }
+            }
+            if let Some(next) = j.recommendations.next_rollout_integrator.as_ref() {
+                if let Ok(parsed) = parse_rollout_integrator(next) {
+                    current_rollout = parsed;
+                }
             }
         }
     }

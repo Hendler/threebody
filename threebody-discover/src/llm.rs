@@ -93,6 +93,8 @@ impl LlmClient for MockLlm {
             scores,
             recommendations: JudgeRecommendations {
                 next_initial_conditions: None,
+                next_rollout_integrator: Some("leapfrog".to_string()),
+                next_ga_heuristic: Some("mse_parsimony".to_string()),
                 next_search_directions: vec!["expand library with explicit r-hat terms".to_string()],
                 notes: "mock judge".to_string(),
             },
