@@ -1,0 +1,125 @@
+# Three-Body Oracle + Predictor
+
+This repo is a concise, implementation-focused research blueprint for a two-system approach to three-body dynamics, and I like how it balances rigorous simulation with interpretable model discovery.
+
+**Summary**
+This project proposes two coupled systems:
+- A truth-grade numerical simulator (the "oracle") for three bodies under Newtonian gravity plus a quasi-static, nonrelativistic electromagnetic (EM) model.
+- A sparse discovery engine (the "predictor") that learns compact, interpretable equations that approximate the oracle and are validated via forward rollout.
+
+The implementation plan is explicitly TDD-first and emphasizes reproducibility, explicit assumptions, and regime-specific claims rather than universal closed-form solutions.
+
+**Current Contents**
+- `academic_paper.tex` describes the system architecture, equations, numerical methods, and modeling limitations.
+- `todo.md` is the detailed, test-driven implementation plan for a Rust codebase.
+
+**Core Ideas**
+- Use a high-fidelity simulator as ground truth with explicit error control.
+- Train discovery models on simulator-provided accelerations to avoid derivative noise in chaotic systems.
+- Constrain discovery to structured feature libraries to keep equations interpretable.
+- Validate discovered equations by rollout, not just pointwise acceleration fit.
+- Be explicit about modeling limits and avoid overclaiming.
+
+**Assumptions and Modeling Limits**
+- Units are SI by default; `G`, `k_e`, and `mu_0` are configurable.
+- EM is quasi-static and nonrelativistic: no retardation, no radiation reaction, no self-fields.
+- Energy and momentum conservation are not guaranteed once magnetic terms are enabled; energy is treated as a mechanical proxy.
+- Close encounters are numerically stiff; softening is optional but changes physics.
+- Long-horizon prediction is not meaningful in chaotic regimes; evaluation should emphasize short-horizon accuracy and stability.
+
+**Simulator (Oracle) Overview**
+State per body:
+- Mass `m_i`, charge `q_i`
+- Position `r_i(t)` and velocity `v_i(t)`
+
+Forces and fields (ASCII form):
+```text
+Gravity:
+  a_i(g) = sum_{j != i} G * m_j * (r_j - r_i) / |r_j - r_i|^3
+
+Electrostatics:
+  E_i = sum_{j != i} k_e * q_j * (r_i - r_j) / |r_i - r_j|^3
+
+Magnetostatics (quasi-static Biot-Savart style):
+  B_i = sum_{j != i} (mu_0 / 4pi) * q_j * (v_j x (r_i - r_j)) / |r_i - r_j|^3
+
+Lorentz acceleration:
+  a_i(em) = (q_i / m_i) * (E_i + v_i x B_i)
+
+Total:
+  a_i = a_i(g) + a_i(em)
+
+Potentials:
+  phi_i = sum_{j != i} k_e * q_j / |r_i - r_j|
+  A_i   = sum_{j != i} (mu_0 / 4pi) * q_j * v_j / |r_i - r_j|
+```
+
+Numerical integration (planned):
+- Adaptive RK45 (Dormand-Prince) for truth-mode error control.
+- Leapfrog (kick-drift-kick) for fast, long-horizon gravity runs.
+- An EM-suitable integrator (Boris or implicit midpoint) is required when EM is enabled.
+
+Diagnostics:
+- Linear momentum, angular momentum.
+- Mechanical energy proxy (kinetic + gravitational + electric potential).
+
+Outputs:
+- Wide CSV with positions, velocities, accelerations, fields, potentials, and diagnostics.
+- Robust header-based parsing to avoid schema brittleness.
+- Planned JSON sidecar for full reproducibility metadata.
+
+**Discovery Engine (Predictor) Overview**
+- Learns sparse, interpretable models of acceleration from simulator output.
+- Uses structured feature libraries (relative positions, distances, cross products, etc.).
+- Fits via sequential thresholded least squares (SINDy / STLS).
+- Evaluates models by rollout accuracy, stability, and generalization within a regime.
+
+**Status**
+This repo is currently documentation and a build plan. Implementation is intended in Rust, with a workspace containing `threebody-core` (library) and `threebody-cli` (binary). The discovery crate is optional and only planned if discovery is implemented in Rust.
+
+**Implementation Plan (TDD-first, condensed from `todo.md`)**
+1. Create a Cargo workspace with crates `threebody-core` and `threebody-cli`. Tests: placeholder smoke test.
+2. Establish code conventions in `threebody-core/src/lib.rs` and `threebody-core/src/prelude.rs` with re-exports. Tests: rustdoc examples compile.
+3. Document exact physics equations in `threebody-core/src/physics.rs`. Tests: doc tests validate numeric examples.
+4. Implement `Vec3` math (or document a dependency choice). Tests: add, sub, scalar mul, dot, cross, norm, normalize, approx.
+5. Add `approx_eq` and `clamp` in `threebody-core/src/math/float.rs`. Tests: tolerance edge cases.
+6. Define core data types in `threebody-core/src/state.rs` for bodies, state, and system. Tests: construction, clone, pair indices.
+7. Implement barycentric initialization in `threebody-core/src/frames.rs`. Tests: COM position and momentum are zeroed.
+8. Implement gravity in `threebody-core/src/forces/gravity.rs` with optional softening. Tests: two-body symmetry, zero masses.
+9. Implement EM in `threebody-core/src/forces/em.rs` with softening. Tests: zero charges, zero velocities, zero `q_i`.
+10. Implement potentials in `threebody-core/src/forces/potentials.rs`. Tests: zero charges, zero velocities.
+11. Create force aggregator in `threebody-core/src/forces/mod.rs` with shared pairwise computations. Tests: matches individual modules, flags on/off deterministic.
+12. Implement diagnostics in `threebody-core/src/diagnostics.rs`. Tests: bounded energy in gravity-only, EM proxy checks.
+13. Define integrator trait in `threebody-core/src/integrators/mod.rs`. Tests: generic harness on harmonic oscillator.
+14. Implement leapfrog in `threebody-core/src/integrators/leapfrog.rs`. Tests: bounded energy error for gravity-only.
+15. Implement adaptive RK45 in `threebody-core/src/integrators/rk45.rs`. Tests: tolerance tracks error, short-horizon agreement.
+16. Implement simulation driver in `threebody-core/src/sim.rs` with event hooks. Tests: deterministic output, encounter triggers.
+17. Define config schema in `threebody-core/src/config.rs` using `serde`. Tests: JSON roundtrip, defaults, invalid configs.
+18. Implement CSV output in `threebody-core/src/output/csv.rs` with header-based schema. Tests: header correctness, index map.
+19. Implement header-based parser in `threebody-core/src/output/parse.rs`. Tests: extra columns ok, missing columns error.
+20. Build CLI in `threebody-cli/src/main.rs` using `clap` with `example-config` and `simulate`. Tests: help text and valid JSON output.
+21. Add public API facade in `threebody-core/src/lib.rs`. Tests: integration test runs tiny sim.
+22. Add deterministic fixtures in `threebody-core/tests/fixtures/`. Tests: output matches within tolerance, no NaNs.
+23. Add benchmarks in `threebody-core/benches/` using `criterion`. Tests: benches compile.
+24. Add docs in `threebody-core/README.md` and `threebody-cli/README.md`. Tests: `cargo test --doc`.
+25. Optional discovery crate `threebody-discover` with feature library, STLS solver, and rollout evaluator. Tests: recover synthetic coefficients, rollout checks.
+
+**Mitigation Insertions (placed after referenced steps)**
+1. After step 3: add a model validity matrix in `threebody-core/src/physics.rs` listing supported regimes and non-claims. Tests: doc test asserts regimes and non-claims are present.
+2. After step 11: add `threebody-core/src/regime.rs` for regime diagnostics. Tests: deterministic, no NaNs.
+3. After step 13: add integrator capability metadata table. Tests: includes all integrators.
+4. After step 14: add an EM-suitable integrator (Boris or implicit midpoint). Tests: bounded energy and stable gyration under EM surrogate.
+5. After step 16: add close-encounter policy in config (`soften`, `switch_integrator`, `stop_and_report`). Tests: deterministic triggers.
+6. After step 17: add warning system for leapfrog + EM unless explicitly overridden. Tests: warning emitted.
+7. After step 18: emit a JSON sidecar with config, tolerances, constants, and header hash. Tests: sidecar schema roundtrip.
+8. After step 22: add oracle-comparison tests (RK45 vs leapfrog vs EM integrator). Tests: divergence time finite and consistent.
+9. After step 23: add accuracy-per-ms benchmarks with regression thresholds.
+
+**Cross-Cutting Test Rules**
+1. Every physics formula appears in code comments or module docs in the same file as its implementation, and each has a numeric test.
+2. Invariants must be asserted by regime. Gravity-only and electrostatic-only can assert momentum conservation; EM with magnetic terms must not.
+3. Tolerances live in `threebody-core/tests/tolerances.rs` and are reused everywhere.
+4. Every public function has at least one failure-mode test (invalid inputs, division by zero, or epsilon edge cases).
+
+**Where This Is Headed**
+The near-term goal is a reproducible, testable simulator whose outputs can be used to discover compact, regime-specific predictive laws. The long-term goal is an "atlas of models" that balances interpretability with predictive power across regimes.
