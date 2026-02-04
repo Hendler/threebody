@@ -1,5 +1,11 @@
 # TODO: Rust Components for Three-Body Oracle + Predictor
 
+**Status (Feb 4, 2026)**
+- All Build Order items 1–34 have been implemented and verified in the repo.
+- New Requirements (Accuracy + Discovery + LLM) items 1–4 are implemented, including truth-mode RK45, GA top-3 persistence, optional LLM ranking, and API-key setup in docs.
+- JSON sidecar now includes dt statistics (accepted/rejected/min/max/avg) for reproducibility.
+- Remaining work: add new items below if requirements change or additional features are desired.
+
 **Assumptions (explicit so tests are honest)**
 - Units are SI by default. Constants `G`, `k_e`, `mu_0` are configurable in code and config so tests can use normalized values.
 - Electromagnetism is quasi-static and nonrelativistic. No retardation, no radiation reaction, no self-field effects. This means momentum and energy conservation are not guaranteed once magnetic terms are enabled, and tests must not assume them.
