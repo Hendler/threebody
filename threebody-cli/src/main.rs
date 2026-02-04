@@ -688,12 +688,11 @@ fn build_vector_dataset(
         enable_gravity: cfg.enable_gravity,
         enable_em: cfg.enable_em,
     };
-    let eps = cfg.softening.max(1e-9);
     for step in &result.steps {
         let system = &step.system;
         let acc = compute_accel(system, &force_cfg);
         for body in 0..3 {
-            let features = compute_feature_vector(system, body, eps, feature_names);
+            let features = compute_feature_vector(system, body, cfg, feature_names);
             samples.push(features);
             targets.push([acc[body].x, acc[body].y, acc[body].z]);
         }
@@ -724,35 +723,72 @@ fn component_datasets(vec_data: &VectorDataset) -> [Dataset; 3] {
 fn compute_feature_vector(
     system: &System,
     body: usize,
-    eps: f64,
+    cfg: &Config,
     feature_names: &[String],
 ) -> Vec<f64> {
-    let v = system.state.vel[body];
-    let v_mag = v.norm();
-    let mut r_inv2 = 0.0;
-    let mut r_inv3 = 0.0;
-    let mut v_cross_r = 0.0;
-    let mut v_cross_v_cross_r = 0.0;
-    for j in 0..3 {
-        if j == body {
-            continue;
+    fn softened_inv_r3(r2: f64, epsilon: f64) -> f64 {
+        if r2 == 0.0 {
+            return 0.0;
         }
-        let r = system.state.pos[j] - system.state.pos[body];
-        let r2 = r.norm_sq() + eps * eps;
-        let r_norm = r2.sqrt();
-        r_inv2 += 1.0 / r2;
-        r_inv3 += 1.0 / (r2 * r_norm);
-        v_cross_r += v.cross(r).norm() / (r2 * r_norm);
-        v_cross_v_cross_r += v.cross(v.cross(r)).norm() / (r2 * r_norm);
+        let soft2 = if epsilon == 0.0 { r2 } else { r2 + epsilon * epsilon };
+        let r = soft2.sqrt();
+        1.0 / (r * r * r)
+    }
+
+    let epsilon = cfg.softening;
+    let mut grav = Vec3::zero(); // Σ m_j (r_j - r_i) / |r|^3  (no G)
+    let mut elec = Vec3::zero(); // (q_i/m_i) Σ q_j (r_i - r_j) / |r|^3 (no k_e)
+    let mut mag = Vec3::zero(); // (q_i/m_i) (v_i × B_basis) where B_basis=(1/4π)Σ q_j(v_j×(r_i-r_j))/|r|^3 (no μ0)
+
+    if cfg.enable_gravity {
+        for j in 0..3 {
+            if j == body {
+                continue;
+            }
+            let r_ji = system.state.pos[j] - system.state.pos[body];
+            let inv_r3 = softened_inv_r3(r_ji.norm_sq(), epsilon);
+            grav = grav + r_ji * (system.bodies[j].mass * inv_r3);
+        }
+    }
+
+    if cfg.enable_em {
+        let qi = system.bodies[body].charge;
+        let mi = system.bodies[body].mass;
+        if qi != 0.0 && mi != 0.0 {
+            let q_over_m = qi / mi;
+            let mut e_basis = Vec3::zero();
+            let mut b_basis = Vec3::zero();
+            let inv_4pi = 1.0 / (4.0 * std::f64::consts::PI);
+            for j in 0..3 {
+                if j == body {
+                    continue;
+                }
+                // Use (r_i - r_j) to match the electrostatic field direction.
+                let r = system.state.pos[body] - system.state.pos[j];
+                let inv_r3 = softened_inv_r3(r.norm_sq(), epsilon);
+                let qj = system.bodies[j].charge;
+                e_basis = e_basis + r * (qj * inv_r3);
+
+                // Magnetic basis uses v_j × (r_i - r_j).
+                let vj_cross_r = system.state.vel[j].cross(r);
+                b_basis = b_basis + vj_cross_r * (qj * inv_r3 * inv_4pi);
+            }
+            elec = e_basis * q_over_m;
+            mag = system.state.vel[body].cross(b_basis) * q_over_m;
+        }
     }
     feature_names
         .iter()
         .map(|name| match name.as_str() {
-            "r_inv2" => r_inv2,
-            "r_inv3" => r_inv3,
-            "v" => v_mag,
-            "v_cross_r" => v_cross_r,
-            "v_cross_v_cross_r" => v_cross_v_cross_r,
+            "grav_x" => grav.x,
+            "grav_y" => grav.y,
+            "grav_z" => grav.z,
+            "elec_x" => elec.x,
+            "elec_y" => elec.y,
+            "elec_z" => elec.z,
+            "mag_x" => mag.x,
+            "mag_y" => mag.y,
+            "mag_z" => mag.z,
             _ => 0.0,
         })
         .collect()
