@@ -18,29 +18,17 @@ simulate-em:
 discover:
   cargo run -p threebody-cli -- discover --solver stls --out top_equations.json
 
-quickstart:
+quickstart steps="200":
   #!/usr/bin/env bash
   set -euo pipefail
   ts="$(date +%Y%m%d_%H%M%S)"
   out="results/quickstart_${ts}"
   mkdir -p "$out"
 
-  cargo run -p threebody-cli -- example-config --out "$out/config.json"
-  cargo run -p threebody-cli -- example-ic --preset three-body --out "$out/ic.json"
-  cargo run -p threebody-cli -- simulate --config "$out/config.json" --ic "$out/ic.json" --output "$out/traj.csv" --steps 200 --dt 0.01
-  cargo run -p threebody-cli -- discover --solver stls --input "$out/traj.csv" --sidecar "$out/traj.json" --out "$out/top_equations.json"
-
-  factory_dir="$out/factory"
-  if [ -f .openai_key ] || [ -n "${OPENAI_API_KEY:-}" ]; then llm_mode=openai; else llm_mode=mock; fi
-  echo "Running factory (10 iters): out_dir=$factory_dir llm_mode=$llm_mode"
-  cargo run -p threebody-cli -- factory --out-dir "$factory_dir" --max-iters 10 --auto --config "$out/config.json" --preset three-body --steps 200 --dt 0.01 --llm-mode "$llm_mode" --model gpt-5 --solver stls --rollout-integrator euler --fitness mse
-
-  if [ -f "$factory_dir/evaluation.md" ]; then cp "$factory_dir/evaluation.md" "$out/evaluation.md"; fi
+  echo "Running quickstart: out_dir=$out steps={{steps}} max_iters=10 llm_mode=auto"
+  cargo run -p threebody-cli -- quickstart --out-dir "$out" --steps "{{steps}}" --max-iters 10
 
   echo "Quickstart complete: $out"
-  echo "Key outputs:"
-  echo "- $out/top_equations.json"
-  echo "- $out/evaluation.md"
 
 test:
   cargo test

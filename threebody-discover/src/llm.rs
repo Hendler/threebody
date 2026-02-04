@@ -325,6 +325,14 @@ impl LlmClient for AutoLlmClient {
 }
 
 fn build_mock_factory_evaluation_md(input: &FactoryEvaluationInput) -> String {
+    fn format_opt(v: Option<f64>) -> String {
+        match v {
+            Some(x) if x.is_finite() => format!("{x:.6}"),
+            Some(_) => "nan".to_string(),
+            None => "n/a".to_string(),
+        }
+    }
+
     let n_iters = input.iterations.len();
     let mut best_run: Option<(&str, &str, &crate::judge::FactoryEvaluationCandidate)> = None;
     for iter in &input.iterations {
@@ -370,8 +378,11 @@ fn build_mock_factory_evaluation_md(input: &FactoryEvaluationInput) -> String {
         md.push_str(&format!("- Best run: `{}` (regime: `{}`)\n", run_id, regime));
         md.push_str(&format!("- Equation (vector form): {}\n", cand.equation_text));
         md.push_str(&format!(
-            "- Metrics: mse={:.6}, rollout_rmse={:?}, divergence_time={:?}, complexity={}\n",
-            cand.metrics.mse, cand.metrics.rollout_rmse, cand.metrics.divergence_time, cand.metrics.complexity
+            "- Metrics: mse={:.6e}, rollout_rmse={}, divergence_time={}, complexity={}\n",
+            cand.metrics.mse,
+            format_opt(cand.metrics.rollout_rmse),
+            format_opt(cand.metrics.divergence_time),
+            cand.metrics.complexity
         ));
         if !cand.metrics.stability_flags.is_empty() {
             md.push_str(&format!(

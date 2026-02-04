@@ -86,9 +86,9 @@ Outputs:
 - Prompts and responses are logged for reproducibility; numeric metrics (MSE, rollout RMSE, divergence time) remain the primary ranking.
 - The rollout evaluator supports `euler` and `leapfrog`; the LLM can recommend which to use next, along with the discovery configuration (solver: `stls`/`lasso`/`ga` and key hyperparameters).
 - The LLM does not directly generate equations or fit coefficients; it steers the loop (IC proposals, candidate ranking/interpretation, and next-step recommendations).
-- If `.openai_key` exists in the working directory, it is used by default for `--llm-mode openai` and overrides `OPENAI_API_KEY`.
+- `--llm-mode auto` uses OpenAI when a key is available, and otherwise falls back to a local mock judge/explainer. If the OpenAI call fails once (offline / network blocked / auth), it switches to mock for the remainder of the run.
+- If `.openai_key` exists in the working directory, it is used for OpenAI mode and overrides `OPENAI_API_KEY`.
 - You can pass `--openai-key-file` to use a specific key file.
-- If no key file is found, `OPENAI_API_KEY` is used. Offline and `--llm-mode mock` are supported.
 - Create the key file with: `echo "sk-your-key" > .openai_key`.
 
 **Status**
@@ -107,13 +107,21 @@ just quickstart
 What it does:
 - Creates a timestamped run directory under `results/quickstart_*/`.
 - Writes `config.json`, `ic.json`, `traj.csv` + `traj.json`, and `top_equations.json` into that directory.
-- Runs **10** `factory` iterations with an LLM judge (uses `--llm-mode openai` if `.openai_key` or `OPENAI_API_KEY` is present; otherwise uses `--llm-mode mock`) and writes artifacts under `results/quickstart_*/factory/run_###/`.
-- Writes an explainer/evaluation doc to `results/quickstart_*/evaluation.md`.
+- Runs **10** `factory` iterations with an LLM judge (`--llm-mode auto`) and writes artifacts under `results/quickstart_*/factory/run_###/`.
+- Writes an explainer/evaluation doc to `results/quickstart_*/evaluation.md` plus a reproducible LaTeX evaluation to `results/quickstart_*/evaluation.tex` (and `evaluation.pdf` when `pdflatex` is available).
+
+Tune simulation length (the only “knob” you should need):
+```bash
+just quickstart steps=400
+```
 
 Commands:
 ```bash
 # Create an output directory (recommended: keep artifacts out of repo root)
 out="results/manual_$(date +%Y%m%d_%H%M%S)"; mkdir -p "$out"
+
+# One-command quickstart (recommended)
+cargo run -p threebody-cli -- quickstart --out-dir "$out" --steps 200
 
 # Generate a starter config + initial conditions
 cargo run -p threebody-cli -- example-config --out "$out/config.json"
@@ -143,8 +151,8 @@ cargo run -p threebody-cli -- factory --out-dir "$out/factory" --max-iters 10 --
 # Open the high-school-friendly explainer
 cat "$out/factory/evaluation.md"
 
-# Switch to OpenAI (uses .openai_key by default if present)
-# cargo run -p threebody-cli -- factory --out-dir "$out/factory" --max-iters 10 --auto --config "$out/config.json" --steps 200 --dt 0.01 --llm-mode openai --model gpt-5.2
+# Use OpenAI when available, but fall back cleanly when offline
+# cargo run -p threebody-cli -- factory --out-dir "$out/factory" --max-iters 10 --auto --config "$out/config.json" --steps 200 --dt 0.01 --llm-mode auto --model gpt-5.2
 
 # Or use env var when no key file is present
 # export OPENAI_API_KEY="your_key_here"
@@ -159,8 +167,13 @@ cat "$out/factory/evaluation.md"
 **Factory Outputs**
 - Run root (`<out_dir>/`):
   - `evaluation.md`: high-school-friendly evaluation + next steps (LLM-generated when enabled).
+  - `evaluation_llm.md`: raw LLM evaluation output (or local fallback).
   - `evaluation_input.json`: structured summary of the run (for reproducibility).
+  - `evaluation_history.json`: best-vs-prior-best comparison over all previous local attempts under `results/`.
   - `evaluation_prompt.txt`: the exact prompt used to generate `evaluation.md`.
+  - `evaluation.tex`: reproducible LaTeX evaluation (exact equation text + ICs + metrics).
+  - `evaluation.pdf`: built when `pdflatex` is available (best-effort).
+  - `evaluation_pdf_error.txt`: present only if `pdflatex` is available but fails.
   - `evaluation_error.txt`: only present if the LLM call failed and a fallback was used.
 - Per iteration (`<out_dir>/run_###/`):
   - `traj.csv` and `traj.json` sidecar.

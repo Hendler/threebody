@@ -195,6 +195,18 @@ enum Commands {
         #[arg(long)]
         lasso_alphas: Option<String>,
     },
+    /// Run an end-to-end workflow and write artifacts under a single directory.
+    Quickstart {
+        /// Output directory root (defaults to `results/quickstart_<timestamp>/`).
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+        /// Steps to simulate per run.
+        #[arg(long, default_value_t = 200)]
+        steps: usize,
+        /// Max factory iterations (default: 10).
+        #[arg(long, default_value_t = 10, hide = true)]
+        max_iters: usize,
+    },
     /// Run the LLM-assisted factory loop (ICs -> sim -> discovery -> judge).
     #[command(alias = "experiment")]
     Factory {
@@ -425,6 +437,13 @@ fn main() -> anyhow::Result<()> {
                 solver_settings,
             )?;
         }
+        Commands::Quickstart {
+            out_dir,
+            steps,
+            max_iters,
+        } => {
+            run_quickstart(out_dir, steps, max_iters)?;
+        }
         Commands::Factory {
             out_dir,
             max_iters,
@@ -496,6 +515,124 @@ fn main() -> anyhow::Result<()> {
             )?;
         }
     }
+    Ok(())
+}
+
+fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize) -> anyhow::Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let out_dir = out_dir.unwrap_or_else(|| {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        std::path::Path::new("results").join(format!("quickstart_{ts}"))
+    });
+    fs::create_dir_all(&out_dir)?;
+
+    let config_path = out_dir.join("config.json");
+    let ic_path = out_dir.join("ic.json");
+    let traj_csv = out_dir.join("traj.csv");
+    let top_eq = out_dir.join("top_equations.json");
+
+    // Emit config + ICs (mirrors example-config/example-ic).
+    fs::write(&config_path, serde_json::to_string_pretty(&Config::default())?)?;
+    fs::write(
+        &ic_path,
+        serde_json::to_string_pretty(&initial_conditions_from_preset("three-body")?)?,
+    )?;
+
+    // Baseline simulate + discover.
+    run_simulation(
+        Some(config_path.clone()),
+        traj_csv.clone(),
+        steps,
+        0.01,
+        "standard".to_string(),
+        "three-body".to_string(),
+        Some(ic_path.clone()),
+        None,
+        false,
+        false,
+        false,
+        "csv".to_string(),
+        false,
+        false,
+    )?;
+
+    let solver_settings = DiscoverySolverSettings {
+        solver: DiscoverySolver::Stls,
+        normalize: true,
+        stls_thresholds: Vec::new(),
+        stls_ridge_lambda: 1e-8,
+        stls_max_iter: 25,
+        lasso_alphas: Vec::new(),
+        lasso_max_iter: 2000,
+        lasso_tol: 1e-6,
+    };
+    run_discovery(
+        50,
+        20,
+        42,
+        top_eq.clone(),
+        traj_csv.clone(),
+        Some(traj_csv.with_extension("json")),
+        None,
+        false,
+        "gpt-5.2".to_string(),
+        None,
+        "mse".to_string(),
+        "euler".to_string(),
+        solver_settings.clone(),
+    )?;
+
+    let factory_dir = out_dir.join("factory");
+    run_factory(
+        factory_dir.clone(),
+        max_iters,
+        true,
+        Some(config_path.clone()),
+        steps,
+        0.01,
+        "standard".to_string(),
+        "three-body".to_string(),
+        false,
+        false,
+        false,
+        50,
+        20,
+        42,
+        "mse".to_string(),
+        "euler".to_string(),
+        solver_settings,
+        "auto".to_string(),
+        "gpt-5.2".to_string(),
+        None,
+    )?;
+
+    // Copy the most important factory artifacts to the quickstart root for convenience.
+    for name in [
+        "evaluation.md",
+        "evaluation.tex",
+        "evaluation_history.json",
+        "evaluation_input.json",
+        "evaluation_prompt.txt",
+        "evaluation_llm.md",
+        "evaluation.pdf",
+        "evaluation_pdf_error.txt",
+    ] {
+        let src = factory_dir.join(name);
+        if src.exists() {
+            let _ = fs::copy(&src, out_dir.join(name));
+        }
+    }
+
+    println!("Quickstart complete: {}", out_dir.display());
+    println!("Key outputs:");
+    println!("- {}/evaluation.md", out_dir.display());
+    println!("- {}/evaluation.tex (and .pdf if built)", out_dir.display());
+    println!("- {}/factory/run_###/report.md", out_dir.display());
+    println!("- {}/top_equations.json", out_dir.display());
     Ok(())
 }
 
@@ -2183,7 +2320,7 @@ fn run_factory(
     eval_notes.push(format!("seed={}", seed));
     eval_notes.push(format!("auto={}", auto));
     eval_notes.push(format!("llm_mode={}", llm_mode_label(llm_mode)));
-    if matches!(llm_mode, LlmMode::OpenAI) {
+    if matches!(llm_mode, LlmMode::OpenAI | LlmMode::Auto) {
         eval_notes.push(format!("llm_model={}", model));
     }
     let eval_input = FactoryEvaluationInput {
@@ -2191,43 +2328,549 @@ fn run_factory(
         notes: eval_notes,
         iterations: evaluation_iterations,
     };
+    let eval_input_path = out_dir.join("evaluation_input.json");
+    fs::write(&eval_input_path, serde_json::to_string_pretty(&eval_input)?)?;
+
+    let current_best = best_candidate_from_eval_input(&eval_input);
+    let prior_filter = PriorAttemptFilter::from_notes(&eval_input.notes);
+    let prior_best = find_best_prior_attempt(std::path::Path::new("results"), &eval_input_path, &prior_filter)?;
+    let best_ic: Option<InitialConditionSpec> = current_best
+        .as_ref()
+        .and_then(|b| fs::read_to_string(out_dir.join(&b.run_id).join("initial_conditions.json")).ok())
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+
+    #[derive(serde::Serialize)]
+    struct HistoryAttempt {
+        factory_dir: String,
+        eval_input: String,
+        run_id: String,
+        regime: String,
+        equation_text: String,
+        metrics: CandidateMetrics,
+    }
+
+    #[derive(serde::Serialize)]
+    struct HistoryDelta {
+        rollout_rmse: Option<f64>,
+        mse: Option<f64>,
+        complexity: Option<i64>,
+    }
+
+    #[derive(serde::Serialize)]
+    struct EvaluationHistory {
+        version: String,
+        comparator: String,
+        current: Option<HistoryAttempt>,
+        prior_best: Option<HistoryAttempt>,
+        delta: Option<HistoryDelta>,
+    }
+
+    let current_attempt = current_best.as_ref().map(|b| HistoryAttempt {
+        factory_dir: out_dir.display().to_string(),
+        eval_input: eval_input_path.display().to_string(),
+        run_id: b.run_id.clone(),
+        regime: b.regime.clone(),
+        equation_text: b.candidate.equation_text.clone(),
+        metrics: b.candidate.metrics.clone(),
+    });
+    let prior_attempt = prior_best.as_ref().map(|p| HistoryAttempt {
+        factory_dir: p.factory_dir.display().to_string(),
+        eval_input: p.eval_input_path.display().to_string(),
+        run_id: p.best.run_id.clone(),
+        regime: p.best.regime.clone(),
+        equation_text: p.best.candidate.equation_text.clone(),
+        metrics: p.best.candidate.metrics.clone(),
+    });
+    let delta = match (current_best.as_ref(), prior_best.as_ref()) {
+        (Some(c), Some(p)) => {
+            let curr_roll = c.candidate.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+            let prior_roll = p.best.candidate.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+            let rollout_rmse = (curr_roll.is_finite() && prior_roll.is_finite()).then_some(curr_roll - prior_roll);
+            let mse = (c.candidate.metrics.mse.is_finite() && p.best.candidate.metrics.mse.is_finite())
+                .then_some(c.candidate.metrics.mse - p.best.candidate.metrics.mse);
+            let complexity = Some(c.candidate.metrics.complexity as i64 - p.best.candidate.metrics.complexity as i64);
+            Some(HistoryDelta {
+                rollout_rmse,
+                mse,
+                complexity,
+            })
+        }
+        _ => None,
+    };
+    let history = EvaluationHistory {
+        version: "v1".to_string(),
+        comparator: "rollout_rmse -> mse -> complexity (prior filtered by steps/dt when present)".to_string(),
+        current: current_attempt,
+        prior_best: prior_attempt,
+        delta,
+    };
     fs::write(
-        out_dir.join("evaluation_input.json"),
-        serde_json::to_string_pretty(&eval_input)?,
+        out_dir.join("evaluation_history.json"),
+        serde_json::to_string_pretty(&history)?,
     )?;
+
+    let eval_tex_path = out_dir.join("evaluation.tex");
+    let eval_tex = render_evaluation_tex(
+        &eval_input,
+        current_best.as_ref(),
+        prior_best.as_ref(),
+        best_ic.as_ref(),
+    );
+    fs::write(&eval_tex_path, eval_tex)?;
+
+    // Best-effort PDF build when pdflatex is available.
+    fn find_pdflatex() -> Option<PathBuf> {
+        for candidate in ["pdflatex", "/Library/TeX/texbin/pdflatex"] {
+            let ok = std::process::Command::new(candidate)
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if ok {
+                return Some(PathBuf::from(candidate));
+            }
+        }
+        None
+    }
+
+    if let Some(pdflatex) = find_pdflatex() {
+        let output = std::process::Command::new(&pdflatex)
+            .current_dir(&out_dir)
+            .args(["-interaction=nonstopmode", "evaluation.tex"])
+            .output();
+        match output {
+            Ok(out) => {
+                if !out.status.success() && !out_dir.join("evaluation.pdf").exists() {
+                    let mut msg = String::new();
+                    msg.push_str("pdflatex failed\n");
+                    msg.push_str("stdout:\n");
+                    msg.push_str(&String::from_utf8_lossy(&out.stdout));
+                    msg.push_str("\nstderr:\n");
+                    msg.push_str(&String::from_utf8_lossy(&out.stderr));
+                    fs::write(out_dir.join("evaluation_pdf_error.txt"), msg)?;
+                }
+            }
+            Err(err) => {
+                if !out_dir.join("evaluation.pdf").exists() {
+                    fs::write(
+                        out_dir.join("evaluation_pdf_error.txt"),
+                        format!("failed to run pdflatex: {err}"),
+                    )?;
+                }
+            }
+        }
+    }
 
     let eval_prompt_path = out_dir.join("evaluation_prompt.txt");
     let eval_md_path = out_dir.join("evaluation.md");
+    let eval_llm_md_path = out_dir.join("evaluation_llm.md");
+    let exec_md = render_executive_summary_md(&eval_input, current_best.as_ref(), prior_best.as_ref());
+
+    let mut raw_md = String::new();
+    let prompt_text: String;
     if let Some(client) = llm_client.as_ref() {
         match client.explain_factory_evaluation(&eval_input) {
             Ok(res) => {
-                fs::write(&eval_prompt_path, res.prompt)?;
-                fs::write(&eval_md_path, res.value)?;
+                prompt_text = res.prompt;
+                raw_md = res.value;
             }
             Err(err) => {
                 eprintln!("LLM evaluation failed: {}", err);
                 fs::write(out_dir.join("evaluation_error.txt"), err.to_string())?;
                 let fallback = MockLlm.explain_factory_evaluation(&eval_input)?;
-                fs::write(&eval_prompt_path, fallback.prompt)?;
-                let mut md = String::new();
-                md.push_str("<!-- WARNING: LLM evaluation failed; using local fallback. -->\n\n");
-                md.push_str(&fallback.value);
-                fs::write(&eval_md_path, md)?;
+                prompt_text = fallback.prompt;
+                raw_md.push_str("<!-- WARNING: LLM evaluation failed; using local fallback. -->\n\n");
+                raw_md.push_str(&fallback.value);
             }
         }
     } else {
-        let mut md = String::new();
-        md.push_str("# Factory Evaluation\n\n");
-        md.push_str("LLM evaluation was disabled (`--llm-mode off`).\n\n");
-        md.push_str("Open per-run reports in `run_###/report.md` and compare:\n");
-        md.push_str("- `mse` (lower is better)\n");
-        md.push_str("- `rollout_rmse` (lower is better)\n");
-        md.push_str("- `divergence_time` (higher is better)\n");
-        md.push_str("- `complexity` (lower is simpler)\n");
-        fs::write(&eval_md_path, md)?;
+        prompt_text = "LLM evaluation disabled (`--llm-mode off`).".to_string();
+        raw_md.push_str("# Factory Evaluation\n\n");
+        raw_md.push_str("LLM evaluation was disabled (`--llm-mode off`).\n\n");
+        raw_md.push_str("Open per-run reports in `run_###/report.md` and compare:\n");
+        raw_md.push_str("- `mse` (lower is better)\n");
+        raw_md.push_str("- `rollout_rmse` (lower is better)\n");
+        raw_md.push_str("- `divergence_time` (higher is better)\n");
+        raw_md.push_str("- `complexity` (lower is simpler)\n");
     }
+
+    fs::write(&eval_prompt_path, prompt_text)?;
+    fs::write(&eval_llm_md_path, &raw_md)?;
+    let mut combined = exec_md;
+    combined.push_str(&raw_md);
+    fs::write(&eval_md_path, combined)?;
+
     println!("Factory evaluation written -> {}", eval_md_path.display());
     Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct BestFactoryCandidate {
+    run_id: String,
+    regime: String,
+    candidate: FactoryEvaluationCandidate,
+}
+
+fn metrics_sort_key(metrics: &CandidateMetrics) -> (f64, f64, usize) {
+    let rollout_rmse = metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+    let rollout_rmse = if rollout_rmse.is_finite() { rollout_rmse } else { f64::INFINITY };
+    let mse = if metrics.mse.is_finite() { metrics.mse } else { f64::INFINITY };
+    (rollout_rmse, mse, metrics.complexity)
+}
+
+fn best_candidate_from_eval_input(input: &FactoryEvaluationInput) -> Option<BestFactoryCandidate> {
+    let mut best: Option<BestFactoryCandidate> = None;
+    let mut best_key: Option<(f64, f64, usize)> = None;
+    for iter in &input.iterations {
+        for cand in &iter.top_candidates {
+            let key = metrics_sort_key(&cand.metrics);
+            if best_key.map_or(true, |bk| key < bk) {
+                best_key = Some(key);
+                best = Some(BestFactoryCandidate {
+                    run_id: iter.run_id.clone(),
+                    regime: iter.regime.clone(),
+                    candidate: cand.clone(),
+                });
+            }
+        }
+    }
+    best
+}
+
+#[derive(Clone, Debug)]
+struct PriorAttemptBest {
+    factory_dir: PathBuf,
+    eval_input_path: PathBuf,
+    best: BestFactoryCandidate,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PriorAttemptFilter {
+    steps: Option<usize>,
+    dt: Option<f64>,
+}
+
+impl PriorAttemptFilter {
+    fn from_notes(notes: &[String]) -> Self {
+        fn find_value<'a>(notes: &'a [String], key: &str) -> Option<&'a str> {
+            let prefix = format!("{key}=");
+            for note in notes {
+                if let Some(rest) = note.strip_prefix(&prefix) {
+                    return Some(rest);
+                }
+            }
+            None
+        }
+
+        let steps = find_value(notes, "steps").and_then(|v| v.parse::<usize>().ok());
+        let dt = find_value(notes, "dt").and_then(|v| v.parse::<f64>().ok());
+        Self { steps, dt }
+    }
+
+    fn matches(&self, input: &FactoryEvaluationInput) -> bool {
+        let other = PriorAttemptFilter::from_notes(&input.notes);
+        if let Some(steps) = self.steps {
+            if other.steps != Some(steps) {
+                return false;
+            }
+        }
+        if let Some(dt) = self.dt {
+            match other.dt {
+                Some(v) if (v - dt).abs() <= 1e-12 => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+fn collect_eval_input_paths(root: &std::path::Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_eval_input_paths(&path, out)?;
+            continue;
+        }
+        if path.file_name().and_then(|s| s.to_str()) == Some("evaluation_input.json") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn find_best_prior_attempt(
+    results_root: &std::path::Path,
+    exclude_eval_input: &std::path::Path,
+    filter: &PriorAttemptFilter,
+) -> anyhow::Result<Option<PriorAttemptBest>> {
+    let mut paths = Vec::new();
+    collect_eval_input_paths(results_root, &mut paths)?;
+    let mut best_prior: Option<PriorAttemptBest> = None;
+    let mut best_key: Option<(f64, f64, usize)> = None;
+
+    for path in paths {
+        if path == exclude_eval_input {
+            continue;
+        }
+        let raw = match fs::read_to_string(&path) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let input: FactoryEvaluationInput = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if !filter.matches(&input) {
+            continue;
+        }
+        let best = match best_candidate_from_eval_input(&input) {
+            Some(v) => v,
+            None => continue,
+        };
+        let key = metrics_sort_key(&best.candidate.metrics);
+        if best_key.map_or(true, |bk| key < bk) {
+            best_key = Some(key);
+            let factory_dir = path.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
+            best_prior = Some(PriorAttemptBest {
+                factory_dir,
+                eval_input_path: path,
+                best,
+            });
+        }
+    }
+
+    Ok(best_prior)
+}
+
+fn escape_latex(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => out.push_str("\\textbackslash{}"),
+            '{' => out.push_str("\\{"),
+            '}' => out.push_str("\\}"),
+            '$' => out.push_str("\\$"),
+            '&' => out.push_str("\\&"),
+            '#' => out.push_str("\\#"),
+            '_' => out.push_str("\\_"),
+            '%' => out.push_str("\\%"),
+            '^' => out.push_str("\\^{}"),
+            '~' => out.push_str("\\~{}"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+fn format_opt_f64(v: Option<f64>) -> String {
+    match v {
+        Some(x) if x.is_finite() => format!("{x:.6}"),
+        Some(_) => "nan".to_string(),
+        None => "n/a".to_string(),
+    }
+}
+
+fn render_evaluation_tex(
+    eval_input: &FactoryEvaluationInput,
+    current_best: Option<&BestFactoryCandidate>,
+    prior_best: Option<&PriorAttemptBest>,
+    best_ic: Option<&InitialConditionSpec>,
+) -> String {
+    let mut tex = String::new();
+    tex.push_str("\\documentclass[11pt]{article}\n");
+    tex.push_str("\\usepackage[margin=1in]{geometry}\n");
+    tex.push_str("\\usepackage{booktabs}\n");
+    tex.push_str("\\usepackage{longtable}\n");
+    tex.push_str("\\usepackage{hyperref}\n");
+    tex.push_str("\\begin{document}\n\n");
+
+    tex.push_str("\\section*{Executive Summary}\n");
+    match current_best {
+        Some(best) => {
+            let m = &best.candidate.metrics;
+            tex.push_str(&format!(
+                "Best run: \\texttt{{{}}} (regime: \\texttt{{{}}}).\\\\\n",
+                escape_latex(&best.run_id),
+                escape_latex(&best.regime)
+            ));
+            tex.push_str(&format!(
+                "Metrics: rollout\\_rmse={}, mse={:.6e}, complexity={}.\\\\\n",
+                format_opt_f64(m.rollout_rmse),
+                m.mse,
+                m.complexity
+            ));
+            if let Some(prior) = prior_best {
+                let pm = &prior.best.candidate.metrics;
+                let curr_roll = m.rollout_rmse.unwrap_or(f64::INFINITY);
+                let prior_roll = pm.rollout_rmse.unwrap_or(f64::INFINITY);
+                if curr_roll.is_finite() && prior_roll.is_finite() {
+                    let delta = curr_roll - prior_roll;
+                    tex.push_str(&format!(
+                        "Compared to previous best ({}): rollout\\_rmse change = {:+.6}.\\\\\n",
+                        escape_latex(&prior.eval_input_path.display().to_string()),
+                        delta
+                    ));
+                }
+            } else {
+                tex.push_str("No prior attempts found under \\texttt{results/}.\\\\\n");
+            }
+        }
+        None => {
+            tex.push_str("No candidates were recorded.\\\\\n");
+        }
+    }
+    tex.push_str("\n");
+
+    tex.push_str("\\section*{Run Notes}\n");
+    if eval_input.notes.is_empty() {
+        tex.push_str("No notes.\\\\\n\n");
+    } else {
+        tex.push_str("\\begin{itemize}\n");
+        for note in &eval_input.notes {
+            tex.push_str(&format!("  \\item \\texttt{{{}}}\n", escape_latex(note)));
+        }
+        tex.push_str("\\end{itemize}\n\n");
+    }
+
+    tex.push_str("\\section*{Best Equation (Exact)}\n");
+    if let Some(best) = current_best {
+        tex.push_str("\\begin{verbatim}\n");
+        tex.push_str(&best.candidate.equation_text);
+        tex.push_str("\n\\end{verbatim}\n\n");
+    } else {
+        tex.push_str("N/A.\n\n");
+    }
+
+    tex.push_str("\\section*{Initial Conditions (Best Run)}\n");
+    if let Some(ic) = best_ic {
+        tex.push_str(&format!(
+            "Barycentric: \\texttt{{{}}}.\\\\\n",
+            if ic.barycentric { "true" } else { "false" }
+        ));
+        tex.push_str(&format!("Notes: \\texttt{{{}}}.\\\\\n\n", escape_latex(&ic.notes)));
+        tex.push_str("\\begin{longtable}{lrrrrrrrr}\n");
+        tex.push_str("\\toprule\n");
+        tex.push_str("Body & m & q & x & y & z & v_x & v_y & v_z\\\\\n");
+        tex.push_str("\\midrule\n");
+        for (i, b) in ic.bodies.iter().enumerate() {
+            tex.push_str(&format!(
+                "{} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6}\\\\\n",
+                i,
+                b.mass,
+                b.charge,
+                b.pos[0],
+                b.pos[1],
+                b.pos[2],
+                b.vel[0],
+                b.vel[1],
+                b.vel[2],
+            ));
+        }
+        tex.push_str("\\bottomrule\n");
+        tex.push_str("\\end{longtable}\n\n");
+    } else {
+        tex.push_str("N/A.\n\n");
+    }
+
+    tex.push_str("\\section*{Comparison to Prior Attempts}\n");
+    if let (Some(best), Some(prior)) = (current_best, prior_best) {
+        let cm = &best.candidate.metrics;
+        let pm = &prior.best.candidate.metrics;
+        tex.push_str("\\begin{tabular}{lrr}\n");
+        tex.push_str("\\toprule\n");
+        tex.push_str("Metric & Prior best & Current\\\\\n");
+        tex.push_str("\\midrule\n");
+        tex.push_str(&format!(
+            "rollout\\_rmse & {} & {}\\\\\n",
+            format_opt_f64(pm.rollout_rmse),
+            format_opt_f64(cm.rollout_rmse)
+        ));
+        tex.push_str(&format!("mse & {:.6e} & {:.6e}\\\\\n", pm.mse, cm.mse));
+        tex.push_str(&format!("complexity & {} & {}\\\\\n", pm.complexity, cm.complexity));
+        tex.push_str("\\bottomrule\n");
+        tex.push_str("\\end{tabular}\n\n");
+        tex.push_str(&format!(
+            "Prior artifact: \\texttt{{{}}}.\\\\\n",
+            escape_latex(&prior.eval_input_path.display().to_string())
+        ));
+    } else {
+        tex.push_str("No prior attempts found (or no candidates in this run).\n\n");
+    }
+
+    tex.push_str("\\end{document}\n");
+    tex
+}
+
+fn render_executive_summary_md(
+    eval_input: &FactoryEvaluationInput,
+    current_best: Option<&BestFactoryCandidate>,
+    prior_best: Option<&PriorAttemptBest>,
+) -> String {
+    let mut md = String::new();
+    md.push_str("# Executive Summary\n\n");
+    md.push_str(&format!("- Iterations: {}\n", eval_input.iterations.len()));
+
+    match current_best {
+        Some(best) => {
+            let m = &best.candidate.metrics;
+            md.push_str(&format!("- Best run: `{}` (regime: `{}`)\n", best.run_id, best.regime));
+            md.push_str(&format!(
+                "- Best metrics: rollout_rmse={}, mse={:.6e}, complexity={}, divergence_time={}\n",
+                format_opt_f64(m.rollout_rmse),
+                m.mse,
+                m.complexity,
+                format_opt_f64(m.divergence_time)
+            ));
+            md.push_str("- Best equation (exact):\n");
+            md.push_str("```text\n");
+            md.push_str(&best.candidate.equation_text);
+            md.push_str("\n```\n");
+        }
+        None => {
+            md.push_str("- No candidate equations were recorded.\n");
+        }
+    }
+
+    md.push_str("\n## What the Metrics Mean (No Math Required)\n");
+    md.push_str("- `rollout_rmse` (lower is better): how far the learned model’s trajectory drifts from the oracle.\n");
+    md.push_str("- `divergence_time` (higher is better): how long the rollout stays “close enough” before blowing up.\n");
+    md.push_str("- `mse` (lower is better): pointwise acceleration-fit error (useful, but not sufficient).\n");
+    md.push_str("- `complexity` (lower is simpler): number of non-zero terms across x/y/z.\n");
+
+    md.push_str("\n## Gains vs Previous Attempts\n");
+    if let (Some(best), Some(prior)) = (current_best, prior_best) {
+        let cm = &best.candidate.metrics;
+        let pm = &prior.best.candidate.metrics;
+        let curr_roll = cm.rollout_rmse.unwrap_or(f64::INFINITY);
+        let prior_roll = pm.rollout_rmse.unwrap_or(f64::INFINITY);
+        if curr_roll.is_finite() && prior_roll.is_finite() {
+            let delta = curr_roll - prior_roll;
+            let verdict = if delta < 0.0 { "improved" } else if delta > 0.0 { "worse" } else { "no change" };
+            md.push_str(&format!(
+                "- Compared to prior best: {verdict} (Δ rollout_rmse = {delta:+.6}).\n"
+            ));
+            md.push_str(&format!(
+                "- Prior best artifact: `{}`\n",
+                prior.eval_input_path.display()
+            ));
+            md.push_str("- Note: this comparison is approximate because each attempt may use different initial conditions.\n");
+        } else {
+            md.push_str("- Prior/current rollout_rmse missing; cannot compute gains.\n");
+        }
+    } else {
+        md.push_str("- No prior attempts found under `results/` (or no candidates in this run).\n");
+    }
+
+    md.push_str("\n## Where to Look Next\n");
+    md.push_str("- `evaluation.tex` (and `evaluation.pdf` if built)\n");
+    md.push_str("- `run_###/report.md` (per-iteration summary)\n");
+    md.push_str("- `run_###/discovery.json` (solver metadata + candidates)\n");
+    md.push_str("\n---\n\n");
+    md
 }
 
 fn parse_csv_f64_list(raw: &str) -> anyhow::Result<Vec<f64>> {
@@ -2353,6 +2996,198 @@ mod tests {
         let flags = stability_flags_for(&eq, "gravity_only");
         assert!(flags.contains(&"em_terms_in_gravity_only".to_string()));
         assert!(flags.contains(&"velocity_terms_in_gravity_only".to_string()));
+    }
+
+    #[test]
+    fn best_candidate_prefers_lower_rollout_rmse() {
+        let input = FactoryEvaluationInput {
+            version: FACTORY_EVALUATION_VERSION.to_string(),
+            notes: vec![],
+            iterations: vec![FactoryEvaluationIteration {
+                iteration: 1,
+                run_id: "run_001".to_string(),
+                regime: "gravity_only".to_string(),
+                solver: DiscoverySolverSummary {
+                    name: "stls".to_string(),
+                    normalize: true,
+                    fitness_heuristic: "mse".to_string(),
+                    stls: None,
+                    lasso: None,
+                    ga: None,
+                },
+                simulation: None,
+                top_candidates: vec![
+                    FactoryEvaluationCandidate {
+                        id: 0,
+                        equation_text: "a = bad".to_string(),
+                        metrics: CandidateMetrics {
+                            mse: 0.0,
+                            complexity: 1,
+                            rollout_rmse: Some(1.0),
+                            divergence_time: None,
+                            stability_flags: vec![],
+                        },
+                    },
+                    FactoryEvaluationCandidate {
+                        id: 1,
+                        equation_text: "a = good".to_string(),
+                        metrics: CandidateMetrics {
+                            mse: 100.0,
+                            complexity: 10,
+                            rollout_rmse: Some(0.1),
+                            divergence_time: None,
+                            stability_flags: vec![],
+                        },
+                    },
+                ],
+                judge: None,
+            }],
+        };
+
+        let best = best_candidate_from_eval_input(&input).unwrap();
+        assert_eq!(best.run_id, "run_001");
+        assert_eq!(best.candidate.equation_text, "a = good");
+    }
+
+    #[test]
+    fn find_best_prior_attempt_scans_results_tree() {
+        let root = unique_temp_path("results_root", "dir");
+        if root.exists() {
+            let _ = fs::remove_dir_all(&root);
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let run1_dir = root.join("quickstart_a").join("factory");
+        let run2_dir = root.join("quickstart_b").join("factory");
+        fs::create_dir_all(&run1_dir).unwrap();
+        fs::create_dir_all(&run2_dir).unwrap();
+
+        let mk_input = |rollout_rmse: f64| FactoryEvaluationInput {
+            version: FACTORY_EVALUATION_VERSION.to_string(),
+            notes: vec![],
+            iterations: vec![FactoryEvaluationIteration {
+                iteration: 1,
+                run_id: "run_001".to_string(),
+                regime: "gravity_only".to_string(),
+                solver: DiscoverySolverSummary {
+                    name: "stls".to_string(),
+                    normalize: true,
+                    fitness_heuristic: "mse".to_string(),
+                    stls: None,
+                    lasso: None,
+                    ga: None,
+                },
+                simulation: None,
+                top_candidates: vec![FactoryEvaluationCandidate {
+                    id: 0,
+                    equation_text: "a = 0".to_string(),
+                    metrics: CandidateMetrics {
+                        mse: 1.0,
+                        complexity: 1,
+                        rollout_rmse: Some(rollout_rmse),
+                        divergence_time: None,
+                        stability_flags: vec![],
+                    },
+                }],
+                judge: None,
+            }],
+        };
+
+        fs::write(
+            run1_dir.join("evaluation_input.json"),
+            serde_json::to_string_pretty(&mk_input(0.9)).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            run2_dir.join("evaluation_input.json"),
+            serde_json::to_string_pretty(&mk_input(0.1)).unwrap(),
+        )
+        .unwrap();
+
+        let exclude = root.join("current").join("factory").join("evaluation_input.json");
+        let best = find_best_prior_attempt(&root, &exclude, &PriorAttemptFilter::default())
+            .unwrap()
+            .unwrap();
+        assert!(best.eval_input_path.starts_with(&run2_dir));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn latex_escape_escapes_special_chars() {
+        let s = r"results/run_001/a_b%";
+        let escaped = escape_latex(s);
+        assert!(escaped.contains(r"\_"));
+        assert!(escaped.contains(r"\%"));
+    }
+
+    #[test]
+    fn render_evaluation_tex_includes_required_sections() {
+        let eval_input = FactoryEvaluationInput {
+            version: FACTORY_EVALUATION_VERSION.to_string(),
+            notes: vec!["steps=5".to_string()],
+            iterations: vec![FactoryEvaluationIteration {
+                iteration: 1,
+                run_id: "run_001".to_string(),
+                regime: "gravity_only".to_string(),
+                solver: DiscoverySolverSummary {
+                    name: "stls".to_string(),
+                    normalize: true,
+                    fitness_heuristic: "mse".to_string(),
+                    stls: None,
+                    lasso: None,
+                    ga: None,
+                },
+                simulation: None,
+                top_candidates: vec![FactoryEvaluationCandidate {
+                    id: 0,
+                    equation_text: "ax=+1*grav_x".to_string(),
+                    metrics: CandidateMetrics {
+                        mse: 1.0,
+                        complexity: 1,
+                        rollout_rmse: Some(0.1),
+                        divergence_time: None,
+                        stability_flags: vec![],
+                    },
+                }],
+                judge: None,
+            }],
+        };
+        let best = best_candidate_from_eval_input(&eval_input).unwrap();
+        let ic = InitialConditionSpec {
+            bodies: vec![
+                threebody_discover::BodyInit {
+                    mass: 1.0,
+                    charge: 0.0,
+                    pos: [0.0, 0.0, 0.0],
+                    vel: [0.0, 0.0, 0.0],
+                },
+                threebody_discover::BodyInit {
+                    mass: 1.0,
+                    charge: 0.0,
+                    pos: [1.0, 0.0, 0.0],
+                    vel: [0.0, 0.0, 0.0],
+                },
+                threebody_discover::BodyInit {
+                    mass: 1.0,
+                    charge: 0.0,
+                    pos: [0.0, 1.0, 0.0],
+                    vel: [0.0, 0.0, 0.0],
+                },
+            ],
+            barycentric: true,
+            notes: "test".to_string(),
+        };
+        let tex = render_evaluation_tex(&eval_input, Some(&best), None, Some(&ic));
+        for needle in [
+            "\\section*{Executive Summary}",
+            "\\section*{Best Equation (Exact)}",
+            "\\section*{Initial Conditions (Best Run)}",
+            "\\section*{Comparison to Prior Attempts}",
+        ] {
+            assert!(tex.contains(needle), "missing {needle}");
+        }
+        assert!(tex.contains("ax=+1*grav_x"));
     }
 
     #[test]

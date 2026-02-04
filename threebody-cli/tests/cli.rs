@@ -12,6 +12,7 @@ fn help_includes_commands() {
     assert!(stdout.contains("simulate"));
     assert!(stdout.contains("run"));
     assert!(stdout.contains("factory"));
+    assert!(stdout.contains("quickstart"));
 }
 
 #[test]
@@ -183,6 +184,11 @@ fn factory_runs_once_with_mock_llm() {
     assert!(trace.exists());
     let eval_md = tmp_dir.join("evaluation.md");
     assert!(eval_md.exists());
+    assert!(tmp_dir.join("evaluation_llm.md").exists());
+    assert!(tmp_dir.join("evaluation_prompt.txt").exists());
+    assert!(tmp_dir.join("evaluation_input.json").exists());
+    assert!(tmp_dir.join("evaluation_history.json").exists());
+    assert!(tmp_dir.join("evaluation.tex").exists());
 }
 
 #[test]
@@ -306,7 +312,48 @@ fn quick_start_flow_runs() {
     assert!(out.status.success(), "experiment failed: {:?}", out);
     assert!(factory_dir.join("run_001").join("report.json").exists());
     assert!(factory_dir.join("evaluation.md").exists());
+    assert!(factory_dir.join("evaluation_llm.md").exists());
+    assert!(factory_dir.join("evaluation_input.json").exists());
+    assert!(factory_dir.join("evaluation_history.json").exists());
+    assert!(factory_dir.join("evaluation.tex").exists());
 }
+
+#[test]
+fn quickstart_command_runs() {
+    let exe = env!("CARGO_BIN_EXE_threebody-cli");
+    let tmp_dir = env::temp_dir().join(format!("threebody_quickstart_cmd_{}", std::process::id()));
+    if tmp_dir.exists() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+    fs::create_dir_all(&tmp_dir).expect("create temp dir");
+
+    let out = Command::new(exe)
+        .current_dir(&tmp_dir)
+        .args([
+            "quickstart",
+            "--out-dir",
+            tmp_dir.to_str().unwrap(),
+            "--steps",
+            "5",
+            "--max-iters",
+            "1",
+        ])
+        .output()
+        .expect("quickstart");
+    assert!(out.status.success(), "quickstart failed: {:?}", out);
+
+    assert!(tmp_dir.join("config.json").exists());
+    assert!(tmp_dir.join("ic.json").exists());
+    assert!(tmp_dir.join("traj.csv").exists());
+    assert!(tmp_dir.join("traj.json").exists());
+    assert!(tmp_dir.join("top_equations.json").exists());
+
+    let factory_dir = tmp_dir.join("factory");
+    assert!(factory_dir.join("run_001").join("report.json").exists());
+    assert!(factory_dir.join("evaluation.md").exists());
+    assert!(factory_dir.join("evaluation.tex").exists());
+    assert!(factory_dir.join("evaluation_history.json").exists());
+ }
 
 #[test]
 fn discover_accepts_explicit_input_and_sidecar_paths() {
