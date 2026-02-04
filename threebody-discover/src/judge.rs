@@ -170,11 +170,45 @@ pub struct JudgeRecommendations {
     pub next_ga_heuristic: Option<String>,
     pub next_discovery_solver: Option<String>,
     pub next_normalize: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_opt_f64_or_auto")]
     pub next_stls_threshold: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_opt_f64_or_auto")]
     pub next_ridge_lambda: Option<f64>,
+    #[serde(default, deserialize_with = "deserialize_opt_f64_or_auto")]
     pub next_lasso_alpha: Option<f64>,
     pub next_search_directions: Vec<String>,
     pub notes: String,
+}
+
+fn deserialize_opt_f64_or_auto<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    use serde::de;
+
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(v) = v else {
+        return Ok(None);
+    };
+    match v {
+        serde_json::Value::Number(num) => num
+            .as_f64()
+            .ok_or_else(|| de::Error::custom("expected f64-compatible number"))
+            .map(Some),
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Ok(None);
+            }
+            let lowered = trimmed.to_lowercase();
+            if lowered == "auto" || lowered == "none" || lowered == "null" {
+                return Ok(None);
+            }
+            lowered.parse::<f64>().map(Some).map_err(de::Error::custom)
+        }
+        _ => Err(de::Error::custom("expected number, string, or null")),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -254,6 +288,11 @@ impl JudgeResponse {
                 if !v.is_finite() || v < 0.0 {
                     return Err("invalid solver hyperparameter".to_string());
                 }
+            }
+        }
+        if let Some(ic) = self.recommendations.next_initial_conditions.as_ref() {
+            if ic.bodies.len() != 3 {
+                return Err("invalid next_initial_conditions (expected exactly 3 bodies)".to_string());
             }
         }
         Ok(())
@@ -364,6 +403,7 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
         "mass=[{:.3},{:.3}], charge=[{:.3},{:.3}], pos=[{:.3},{:.3}], vel=[{:.3},{:.3}], min_pair_dist>={:.3}, barycentric_recommended={}\n",
         b.mass_min, b.mass_max, b.charge_min, b.charge_max, b.pos_min, b.pos_max, b.vel_min, b.vel_max, b.min_pair_dist, b.recommend_barycentric
     ));
+    prompt.push_str("If you provide next_initial_conditions, it MUST include exactly 3 bodies and respect these bounds (including min_pair_dist). Otherwise set next_initial_conditions to null.\n");
 
     if !input.notes.is_empty() {
         prompt.push_str("\nAdditional notes:\n");
@@ -376,6 +416,7 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     prompt.push_str("Allowed next_rollout_integrator: \"euler\" or \"leapfrog\".\n");
     prompt.push_str("Allowed next_ga_heuristic: \"mse\" or \"mse_parsimony\".\n");
     prompt.push_str("Allowed next_discovery_solver: \"stls\", \"lasso\", or \"ga\".\n");
+    prompt.push_str("All numeric hyperparameters MUST be numbers or null. Do NOT output strings like \"auto\".\n");
     prompt.push_str("{\n");
     prompt.push_str("  \"version\": \"v1\",\n");
     prompt.push_str("  \"ranking\": [0,1,2],\n");
@@ -383,7 +424,7 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     prompt.push_str("    {\"id\":0,\"total\":3.5,\"components\":{\"fidelity\":3,\"parsimony\":4,\"physical_plausibility\":3,\"regime_consistency\":4,\"stability_risk\":3},\"rationale\":\"...\",\"flags\":[\"...\"]}\n");
     prompt.push_str("  ],\n");
     prompt.push_str("  \"recommendations\": {\n");
-    prompt.push_str("    \"next_initial_conditions\": {\"bodies\":[{\"mass\":1.0,\"charge\":0.0,\"pos\":[0,0,0],\"vel\":[0,0,0]}],\"barycentric\":true,\"notes\":\"...\"},\n");
+    prompt.push_str("    \"next_initial_conditions\": {\"bodies\":[{\"mass\":1.0,\"charge\":0.0,\"pos\":[0,0,0],\"vel\":[0,0,0]}, ... x3],\"barycentric\":true,\"notes\":\"...\"},\n");
     prompt.push_str("    \"next_rollout_integrator\": \"euler\",\n");
     prompt.push_str("    \"next_ga_heuristic\": \"mse\",\n");
     prompt.push_str("    \"next_discovery_solver\": \"stls\",\n");
@@ -612,6 +653,48 @@ mod tests {
     }
 
     #[test]
+    fn judge_response_deserializes_auto_numeric_hyperparams_as_none() {
+        let json = r#"
+{
+  "version": "v1",
+  "ranking": [0],
+  "scores": [
+    {
+      "id": 0,
+      "total": 1.0,
+      "components": {
+        "fidelity": 1.0,
+        "parsimony": 1.0,
+        "physical_plausibility": 1.0,
+        "regime_consistency": 1.0,
+        "stability_risk": 1.0
+      },
+      "rationale": "ok",
+      "flags": []
+    }
+  ],
+  "recommendations": {
+    "next_initial_conditions": null,
+    "next_rollout_integrator": "leapfrog",
+    "next_ga_heuristic": "mse",
+    "next_discovery_solver": "stls",
+    "next_normalize": true,
+    "next_stls_threshold": "auto",
+    "next_ridge_lambda": "1e-8",
+    "next_lasso_alpha": null,
+    "next_search_directions": [],
+    "notes": ""
+  },
+  "summary": "ok"
+}
+"#;
+        let resp: JudgeResponse = serde_json::from_str(json).expect("should deserialize");
+        assert!(resp.recommendations.next_stls_threshold.is_none());
+        assert_eq!(resp.recommendations.next_ridge_lambda, Some(1e-8));
+        assert!(resp.recommendations.next_lasso_alpha.is_none());
+    }
+
+    #[test]
     fn ic_prompt_contains_bounds() {
         let request = IcRequest {
             bounds: IcBounds {
@@ -757,6 +840,55 @@ mod tests {
         let prompt = build_judge_prompt(&input);
         assert!(prompt.contains("INCUMBENT_BEST_EQUATION"));
         assert!(prompt.contains("ax=+1*grav_x"));
+    }
+
+    #[test]
+    fn judge_prompt_requires_three_body_next_initial_conditions() {
+        let rubric = Rubric::default_rubric();
+        let input = JudgeInput {
+            rubric: rubric.clone(),
+            regime: "gravity_only".to_string(),
+            dataset: DatasetSummary {
+                n_samples: 1,
+                target_description: "a_x".to_string(),
+                feature_names: vec!["grav_x".to_string()],
+                feature_descriptions: vec![FeatureDescription {
+                    name: "grav_x".to_string(),
+                    description: "gravity basis x-component".to_string(),
+                    tags: vec!["gravity".to_string()],
+                }],
+            },
+            simulation: None,
+            candidates: vec![CandidateSummary {
+                id: 0,
+                equation: Equation { terms: vec![] },
+                equation_text: "0".to_string(),
+                metrics: CandidateMetrics {
+                    mse: 1.0,
+                    complexity: 0,
+                    rollout_rmse: None,
+                    divergence_time: None,
+                    stability_flags: vec![],
+                },
+                notes: vec![],
+            }],
+            ic_bounds: IcBounds {
+                mass_min: 0.1,
+                mass_max: 10.0,
+                charge_min: -1.0,
+                charge_max: 1.0,
+                pos_min: -1.0,
+                pos_max: 1.0,
+                vel_min: -1.0,
+                vel_max: 1.0,
+                min_pair_dist: 0.2,
+                recommend_barycentric: true,
+            },
+            notes: vec![],
+        };
+        let prompt = build_judge_prompt(&input);
+        assert!(prompt.contains("exactly 3 bodies"));
+        assert!(prompt.contains("... x3"));
     }
 
     #[test]

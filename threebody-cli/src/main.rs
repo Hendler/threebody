@@ -298,6 +298,15 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         require_llm: bool,
     },
+    /// Verify OpenAI-compatible LLM connectivity and JSON validity.
+    LlmCheck {
+        /// LLM model name.
+        #[arg(long, default_value = "gpt-5.2")]
+        model: String,
+        /// OpenAI API key file (overrides OPENAI_API_KEY).
+        #[arg(long)]
+        openai_key_file: Option<PathBuf>,
+    },
     /// Generate a LaTeX (and optionally PDF) findings report from `results/best_results.json`.
     Findings {
         /// Results directory (contains `best_results.json`).
@@ -535,6 +544,9 @@ fn main() -> anyhow::Result<()> {
                 require_llm,
             )?;
         }
+        Commands::LlmCheck { model, openai_key_file } => {
+            run_llm_check(model, openai_key_file)?;
+        }
         Commands::Findings {
             results_dir,
             out_tex,
@@ -543,6 +555,113 @@ fn main() -> anyhow::Result<()> {
             run_findings(results_dir, out_tex, !no_pdf)?;
         }
     }
+    Ok(())
+}
+
+fn run_llm_check(model: String, openai_key_file: Option<PathBuf>) -> anyhow::Result<()> {
+    let client = OpenAIClient::from_env_or_file(&model, openai_key_file.as_deref())
+        .map_err(|e| anyhow::anyhow!("failed to initialize OpenAI client: {e}"))?;
+    let api_style = std::env::var("THREEBODY_OPENAI_API_STYLE")
+        .or_else(|_| std::env::var("OPENAI_API_STYLE"))
+        .unwrap_or_else(|_| "auto".to_string());
+
+    println!("LLM check:");
+    println!("- base_url={}", client.base_url);
+    println!("- model={}", client.model);
+    println!("- api_style={}", api_style);
+
+    let bounds = default_ic_bounds();
+    let preflight = IcRequest {
+        bounds: bounds.clone(),
+        regime: "gravity_only".to_string(),
+        notes: vec!["llm_check=true".to_string()],
+        seed: Some(1),
+    };
+    let ic = client
+        .propose_initial_conditions(&preflight)
+        .map_err(|e| anyhow::anyhow!("propose_initial_conditions failed: {e}"))?;
+    system_from_ic(&ic.value, &bounds).map_err(|e| anyhow::anyhow!("IC output invalid: {e}"))?;
+    println!("- propose_initial_conditions: ok");
+
+    let judge_input = JudgeInput {
+        rubric: Rubric::default_rubric(),
+        regime: "gravity_only".to_string(),
+        dataset: DatasetSummary {
+            n_samples: 1,
+            target_description: "a_x".to_string(),
+            feature_names: vec!["grav_x".to_string()],
+            feature_descriptions: vec![FeatureDescription {
+                name: "grav_x".to_string(),
+                description: "gravity basis x-component".to_string(),
+                tags: vec!["gravity".to_string()],
+            }],
+        },
+        simulation: None,
+        candidates: vec![CandidateSummary {
+            id: 0,
+            equation: threebody_discover::Equation { terms: vec![] },
+            equation_text: "0".to_string(),
+            metrics: CandidateMetrics {
+                mse: 1.0,
+                complexity: 0,
+                rollout_rmse: None,
+                divergence_time: None,
+                stability_flags: vec![],
+            },
+            notes: vec![],
+        }],
+        ic_bounds: bounds.clone(),
+        notes: vec!["llm_check=true".to_string()],
+    };
+    let judge = client
+        .judge_candidates(&judge_input)
+        .map_err(|e| anyhow::anyhow!("judge_candidates failed: {e}"))?;
+    let mut judge_resp = judge.value;
+    sanitize_judge_recommendations(&mut judge_resp.recommendations, &bounds);
+    judge_resp
+        .validate(&judge_input)
+        .map_err(|e| anyhow::anyhow!("judge response invalid: {e}"))?;
+    println!("- judge_candidates: ok");
+
+    let eval_input = FactoryEvaluationInput {
+        version: FACTORY_EVALUATION_VERSION.to_string(),
+        notes: vec!["llm_check=true".to_string()],
+        iterations: vec![FactoryEvaluationIteration {
+            iteration: 1,
+            run_id: "run_001".to_string(),
+            regime: "gravity_only".to_string(),
+            solver: DiscoverySolverSummary {
+                name: "stls".to_string(),
+                normalize: true,
+                fitness_heuristic: "mse".to_string(),
+                stls: None,
+                lasso: None,
+                ga: None,
+            },
+            simulation: None,
+            top_candidates: vec![FactoryEvaluationCandidate {
+                id: 0,
+                equation_text: "ax=+1*grav_x ; ay=+1*grav_y ; az=0".to_string(),
+                metrics: CandidateMetrics {
+                    mse: 1.0,
+                    complexity: 2,
+                    rollout_rmse: Some(0.1),
+                    divergence_time: Some(1.0),
+                    stability_flags: vec![],
+                },
+            }],
+            judge: None,
+        }],
+    };
+    let explainer = client
+        .explain_factory_evaluation(&eval_input)
+        .map_err(|e| anyhow::anyhow!("explain_factory_evaluation failed: {e}"))?;
+    if explainer.value.trim().is_empty() {
+        anyhow::bail!("explain_factory_evaluation returned empty response");
+    }
+    println!("- explain_factory_evaluation: ok");
+
+    println!("LLM check OK.");
     Ok(())
 }
 
@@ -574,6 +693,10 @@ fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize, requ
         lasso_tol: 1e-6,
     };
 
+    let llm_model = std::env::var("THREEBODY_LLM_MODEL")
+        .or_else(|_| std::env::var("OPENAI_MODEL"))
+        .unwrap_or_else(|_| "gpt-5.2".to_string());
+
     let factory_dir = out_dir.join("factory");
     run_factory(
         factory_dir.clone(),
@@ -594,7 +717,7 @@ fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize, requ
         "euler".to_string(),
         solver_settings,
         "auto".to_string(),
-        "gpt-5.2".to_string(),
+        llm_model,
         None,
         require_llm,
     )?;
@@ -1038,7 +1161,8 @@ fn run_discovery(
             Ok(result) => {
                 judge_prompt = Some(result.prompt);
                 judge_response = Some(result.response);
-                let resp = result.value;
+                let mut resp = result.value;
+                sanitize_judge_recommendations(&mut resp.recommendations, &judge_input.ic_bounds);
                 if resp.validate(&judge_input).is_ok() {
                     Some(resp)
                 } else {
@@ -1293,6 +1417,16 @@ fn default_ic_bounds() -> IcBounds {
         vel_max: 1.5,
         min_pair_dist: 0.2,
         recommend_barycentric: true,
+    }
+}
+
+fn sanitize_judge_recommendations(rec: &mut threebody_discover::JudgeRecommendations, bounds: &IcBounds) {
+    let Some(spec) = rec.next_initial_conditions.as_ref() else {
+        return;
+    };
+    if let Err(err) = system_from_ic(spec, bounds) {
+        eprintln!("Ignoring invalid LLM next_initial_conditions recommendation ({err}).");
+        rec.next_initial_conditions = None;
     }
 }
 
@@ -2253,7 +2387,8 @@ fn run_factory(
                 Ok(result) => {
                     judge_prompt = Some(result.prompt);
                     judge_response = Some(result.response);
-                    let resp = result.value;
+                    let mut resp = result.value;
+                    sanitize_judge_recommendations(&mut resp.recommendations, &ic_bounds);
                     if resp.validate(&judge_input).is_ok() {
                         Some(resp)
                     } else {
@@ -4077,6 +4212,42 @@ mod tests {
         let flags = stability_flags_for(&eq, "gravity_only");
         assert!(flags.contains(&"em_terms_in_gravity_only".to_string()));
         assert!(flags.contains(&"velocity_terms_in_gravity_only".to_string()));
+    }
+
+    #[test]
+    fn sanitize_judge_recommendations_drops_invalid_next_initial_conditions() {
+        let bounds = default_ic_bounds();
+        let mut rec = threebody_discover::JudgeRecommendations {
+            next_initial_conditions: Some(InitialConditionSpec {
+                bodies: vec![
+                    threebody_discover::judge::BodyInit {
+                        mass: 1.0,
+                        charge: 0.0,
+                        pos: [0.0, 0.0, 0.0],
+                        vel: [0.0, 0.0, 0.0],
+                    },
+                    threebody_discover::judge::BodyInit {
+                        mass: 1.0,
+                        charge: 0.0,
+                        pos: [1.0, 0.0, 0.0],
+                        vel: [0.0, 0.0, 0.0],
+                    },
+                ],
+                barycentric: true,
+                notes: "invalid: only two bodies".to_string(),
+            }),
+            next_rollout_integrator: None,
+            next_ga_heuristic: None,
+            next_discovery_solver: None,
+            next_normalize: None,
+            next_stls_threshold: None,
+            next_ridge_lambda: None,
+            next_lasso_alpha: None,
+            next_search_directions: vec![],
+            notes: String::new(),
+        };
+        sanitize_judge_recommendations(&mut rec, &bounds);
+        assert!(rec.next_initial_conditions.is_none());
     }
 
     #[test]

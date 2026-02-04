@@ -25,8 +25,8 @@ quickstart steps="200":
   out="results/quickstart_${ts}"
   mkdir -p "$out"
 
-  echo "Running quickstart: out_dir=$out steps={{steps}} max_iters=10 llm_mode=auto"
-  cargo run -p threebody-cli -- quickstart --out-dir "$out" --steps "{{steps}}" --max-iters 10
+  echo "Running quickstart: out_dir=$out steps={{steps}} max_iters=10 llm_mode=auto require_llm=true"
+  cargo run -p threebody-cli -- quickstart --out-dir "$out" --steps "{{steps}}" --max-iters 10 --require-llm
 
   echo "Quickstart complete: $out"
 
@@ -47,6 +47,9 @@ quickstart10 steps="200":
 
 findings:
   cargo run -p threebody-cli -- findings --results-dir results --out-tex results/findings.tex
+
+llm-check:
+  cargo run -p threebody-cli -- llm-check
 
 test:
   cargo test

@@ -129,6 +129,14 @@ pub struct OpenAIClient {
     pub api_key: String,
     pub model: String,
     pub base_url: String,
+    api_style: OpenAIApiStyle,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OpenAIApiStyle {
+    Auto,
+    Responses,
+    ChatCompletions,
 }
 
 impl OpenAIClient {
@@ -153,55 +161,234 @@ impl OpenAIClient {
         let base_url = env::var("OPENAI_BASE_URL")
             .or_else(|_| env::var("THREEBODY_OPENAI_BASE_URL"))
             .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
+
+        let api_style = env::var("THREEBODY_OPENAI_API_STYLE")
+            .or_else(|_| env::var("OPENAI_API_STYLE"))
+            .ok()
+            .map(|raw| match raw.trim().to_lowercase().as_str() {
+                "auto" => Ok(OpenAIApiStyle::Auto),
+                "responses" => Ok(OpenAIApiStyle::Responses),
+                "chat" | "chat_completions" | "chat-completions" => Ok(OpenAIApiStyle::ChatCompletions),
+                other => Err(LlmError(format!(
+                    "invalid OPENAI_API_STYLE={other} (expected auto|responses|chat)"
+                ))),
+            })
+            .transpose()?
+            .unwrap_or(OpenAIApiStyle::Auto);
         Ok(Self {
             api_key,
             model: model.to_string(),
             base_url,
+            api_style,
         })
     }
 
     fn request(&self, prompt: &str) -> Result<String, LlmError> {
-        #[derive(Serialize)]
-        struct Req<'a> {
-            model: &'a str,
-            input: &'a str,
-        }
-        #[derive(Deserialize)]
-        struct ContentItem {
-            text: Option<String>,
-        }
-        #[derive(Deserialize)]
-        struct OutputItem {
-            content: Option<Vec<ContentItem>>,
-        }
-        #[derive(Deserialize)]
-        struct Resp {
-            output: Option<Vec<OutputItem>>,
+        #[derive(Debug)]
+        enum OpenAIRequestError {
+            Transport(String),
+            Http { status: u16, body: String },
+            Parse(String),
         }
 
-        let url = format!("{}/responses", self.base_url);
+        impl OpenAIRequestError {
+            fn should_try_chat_fallback(&self) -> bool {
+                match self {
+                    OpenAIRequestError::Http { status, .. } => matches!(*status, 404 | 405 | 410 | 501),
+                    OpenAIRequestError::Parse(_) => true,
+                    OpenAIRequestError::Transport(_) => false,
+                }
+            }
+        }
+
+        impl fmt::Display for OpenAIRequestError {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                match self {
+                    OpenAIRequestError::Transport(msg) => write!(f, "transport error: {msg}"),
+                    OpenAIRequestError::Http { status, body } => write!(f, "http error: status={status} body={body}"),
+                    OpenAIRequestError::Parse(msg) => write!(f, "parse error: {msg}"),
+                }
+            }
+        }
+
+        fn truncate_body(s: &str) -> String {
+            const LIMIT: usize = 2000;
+            if s.chars().count() <= LIMIT {
+                return s.to_string();
+            }
+            let mut out = String::new();
+            for (i, ch) in s.chars().enumerate() {
+                if i >= LIMIT {
+                    break;
+                }
+                out.push(ch);
+            }
+            out.push('…');
+            out
+        }
+
+        fn request_responses(
+            client: &reqwest::blocking::Client,
+            base_url: &str,
+            api_key: &str,
+            model: &str,
+            prompt: &str,
+        ) -> Result<String, OpenAIRequestError> {
+            #[derive(Serialize)]
+            struct Req<'a> {
+                model: &'a str,
+                input: &'a str,
+            }
+            #[derive(Deserialize)]
+            struct ContentItem {
+                text: Option<String>,
+            }
+            #[derive(Deserialize)]
+            struct OutputItem {
+                content: Option<Vec<ContentItem>>,
+            }
+            #[derive(Deserialize)]
+            struct Resp {
+                output: Option<Vec<OutputItem>>,
+            }
+
+            let url = format!("{base_url}/responses");
+            let resp = client
+                .post(url)
+                .bearer_auth(api_key)
+                .json(&Req { model, input: prompt })
+                .send()
+                .map_err(|e| OpenAIRequestError::Transport(e.to_string()))?;
+            let status = resp.status();
+            let body_text = resp
+                .text()
+                .map_err(|e| OpenAIRequestError::Transport(e.to_string()))?;
+            if !status.is_success() {
+                return Err(OpenAIRequestError::Http {
+                    status: status.as_u16(),
+                    body: truncate_body(&body_text),
+                });
+            }
+            let parsed: Resp =
+                serde_json::from_str(&body_text).map_err(|e| OpenAIRequestError::Parse(e.to_string()))?;
+            let Some(output) = parsed.output else {
+                return Err(OpenAIRequestError::Parse("missing output array".to_string()));
+            };
+            for out in output {
+                if let Some(content) = out.content {
+                    for item in content {
+                        if let Some(text) = item.text {
+                            return Ok(text);
+                        }
+                    }
+                }
+            }
+            Err(OpenAIRequestError::Parse(
+                "missing response text in output/content".to_string(),
+            ))
+        }
+
+        fn request_chat_completions(
+            client: &reqwest::blocking::Client,
+            base_url: &str,
+            api_key: &str,
+            model: &str,
+            prompt: &str,
+        ) -> Result<String, OpenAIRequestError> {
+            #[derive(Serialize)]
+            struct Message<'a> {
+                role: &'a str,
+                content: &'a str,
+            }
+            #[derive(Serialize)]
+            struct Req<'a> {
+                model: &'a str,
+                messages: [Message<'a>; 1],
+            }
+            #[derive(Deserialize)]
+            struct ChatMessage {
+                content: Option<String>,
+            }
+            #[derive(Deserialize)]
+            struct Choice {
+                message: Option<ChatMessage>,
+            }
+            #[derive(Deserialize)]
+            struct Resp {
+                choices: Option<Vec<Choice>>,
+            }
+
+            let url = format!("{base_url}/chat/completions");
+            let resp = client
+                .post(url)
+                .bearer_auth(api_key)
+                .json(&Req {
+                    model,
+                    messages: [Message {
+                        role: "user",
+                        content: prompt,
+                    }],
+                })
+                .send()
+                .map_err(|e| OpenAIRequestError::Transport(e.to_string()))?;
+            let status = resp.status();
+            let body_text = resp
+                .text()
+                .map_err(|e| OpenAIRequestError::Transport(e.to_string()))?;
+            if !status.is_success() {
+                return Err(OpenAIRequestError::Http {
+                    status: status.as_u16(),
+                    body: truncate_body(&body_text),
+                });
+            }
+            let parsed: Resp =
+                serde_json::from_str(&body_text).map_err(|e| OpenAIRequestError::Parse(e.to_string()))?;
+            let Some(choices) = parsed.choices else {
+                return Err(OpenAIRequestError::Parse("missing choices array".to_string()));
+            };
+            for c in choices {
+                if let Some(m) = c.message {
+                    if let Some(content) = m.content {
+                        return Ok(content);
+                    }
+                }
+            }
+            Err(OpenAIRequestError::Parse(
+                "missing message content in choices".to_string(),
+            ))
+        }
+
         let client = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(|e| LlmError(e.to_string()))?;
-        let resp = client
-            .post(url)
-            .bearer_auth(&self.api_key)
-            .json(&Req {
-                model: &self.model,
-                input: prompt,
-            })
-            .send()
-            .map_err(|e| LlmError(e.to_string()))?;
-        let body: Resp = resp.json().map_err(|e| LlmError(e.to_string()))?;
-        let text = body
-            .output
-            .and_then(|mut out| out.pop())
-            .and_then(|o| o.content)
-            .and_then(|mut c| c.pop())
-            .and_then(|c| c.text)
-            .ok_or_else(|| LlmError("missing response text".to_string()))?;
-        Ok(text)
+
+        match self.api_style {
+            OpenAIApiStyle::Responses => {
+                request_responses(&client, &self.base_url, &self.api_key, &self.model, prompt)
+                    .map_err(|e| LlmError(e.to_string()))
+            }
+            OpenAIApiStyle::ChatCompletions => request_chat_completions(
+                &client,
+                &self.base_url,
+                &self.api_key,
+                &self.model,
+                prompt,
+            )
+            .map_err(|e| LlmError(e.to_string())),
+            OpenAIApiStyle::Auto => match request_responses(&client, &self.base_url, &self.api_key, &self.model, prompt) {
+                Ok(text) => Ok(text),
+                Err(err) if err.should_try_chat_fallback() => request_chat_completions(
+                    &client,
+                    &self.base_url,
+                    &self.api_key,
+                    &self.model,
+                    prompt,
+                )
+                .map_err(|e2| LlmError(format!("responses failed: {err}; chat failed: {e2}"))),
+                Err(err) => Err(LlmError(err.to_string())),
+            },
+        }
     }
 }
 
@@ -443,12 +630,14 @@ fn parse_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, LlmError>
 
 #[cfg(test)]
 mod tests {
-    use super::{AutoLlmClient, LlmClient, MockLlm, OpenAIClient};
+    use super::{AutoLlmClient, LlmClient, MockLlm, OpenAIClient, OpenAIApiStyle};
     use crate::judge::{
         CandidateMetrics, CandidateSummary, DatasetSummary, FactoryEvaluationCandidate, FactoryEvaluationInput,
         FactoryEvaluationIteration, FeatureDescription, IcBounds, IcRequest, JudgeInput, Rubric,
     };
     use crate::equation::Equation;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -561,6 +750,7 @@ mod tests {
             api_key: "sk-test".to_string(),
             model: "gpt-test".to_string(),
             base_url: "http://127.0.0.1:1".to_string(),
+            api_style: OpenAIApiStyle::Auto,
         };
         let llm = AutoLlmClient {
             primary: Some(primary),
@@ -661,5 +851,87 @@ mod tests {
         assert!(out.value.contains("# Factory Evaluation"));
         assert!(out.value.contains("`run_002`"));
         assert!(out.value.to_lowercase().contains("next steps"));
+    }
+
+    #[test]
+    fn openai_client_request_uses_responses_api_when_available() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            let mut reader = BufReader::new(&mut stream);
+            reader.read_line(&mut line).unwrap();
+            assert!(line.contains("POST /v1/responses "), "unexpected request: {line}");
+
+            let body = r#"{"output":[{"content":[{"text":"ok-from-responses"}]}]}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.as_bytes().len(),
+                body
+            );
+            stream.write_all(resp.as_bytes()).unwrap();
+        });
+
+        let client = OpenAIClient {
+            api_key: "sk-test".to_string(),
+            model: "gpt-test".to_string(),
+            base_url: format!("http://{addr}/v1"),
+            api_style: OpenAIApiStyle::Responses,
+        };
+        let out = client.request("prompt").unwrap();
+        assert_eq!(out, "ok-from-responses");
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn openai_client_request_falls_back_to_chat_completions_on_404() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = std::thread::spawn(move || {
+            // 1) /responses -> 404
+            {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                let mut reader = BufReader::new(&mut stream);
+                reader.read_line(&mut line).unwrap();
+                assert!(line.contains("POST /v1/responses "), "unexpected request: {line}");
+                let body = "not found";
+                let resp = format!(
+                    "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.as_bytes().len(),
+                    body
+                );
+                stream.write_all(resp.as_bytes()).unwrap();
+            }
+            // 2) /chat/completions -> 200
+            {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                let mut reader = BufReader::new(&mut stream);
+                reader.read_line(&mut line).unwrap();
+                assert!(
+                    line.contains("POST /v1/chat/completions "),
+                    "unexpected request: {line}"
+                );
+                let body = r#"{"choices":[{"message":{"content":"ok-from-chat"}}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.as_bytes().len(),
+                    body
+                );
+                stream.write_all(resp.as_bytes()).unwrap();
+            }
+        });
+
+        let client = OpenAIClient {
+            api_key: "sk-test".to_string(),
+            model: "gpt-test".to_string(),
+            base_url: format!("http://{addr}/v1"),
+            api_style: OpenAIApiStyle::Auto,
+        };
+        let out = client.request("prompt").unwrap();
+        assert_eq!(out, "ok-from-chat");
+        handle.join().unwrap();
     }
 }

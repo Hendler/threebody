@@ -100,8 +100,9 @@ The intended flow is:
 2. Run a simulation from that config and produce a CSV.
 3. Inspect or visualize outputs, and then feed them into discovery.
 
-Fastest path (uses `just`):
+Fastest path (uses `just`; requires a reachable LLM endpoint):
 ```bash
+just llm-check
 just quickstart
 ```
 What it does:
@@ -122,7 +123,7 @@ just quickstart10 1000
 What it does:
 - Runs the full quickstart workflow 10 times (each quickstart has 10 factory iterations).
 - Updates `results/best_results.md` after every run.
-- Requires a reachable LLM endpoint (OpenAI by default). Set `.openai_key` or `OPENAI_API_KEY`. To use a local OpenAI-compatible endpoint, set `OPENAI_BASE_URL` (e.g. `http://localhost:11434/v1`).
+- Requires a reachable LLM endpoint (OpenAI by default). Set `.openai_key` or `OPENAI_API_KEY`. To use a local OpenAI-compatible endpoint, set `OPENAI_BASE_URL` (e.g. `http://localhost:11434/v1`). If your endpoint only supports Chat Completions, set `OPENAI_API_STYLE=chat`. If your endpoint needs a different model name, set `THREEBODY_LLM_MODEL`.
 - Writes an aggregated findings report to `results/findings.tex` (and `results/findings.pdf` when `pdflatex` is available). Each run also copies a timestamped PDF snapshot (e.g. `results/findings_<unix_seconds>.pdf`).
 
 What to open first (novice-friendly):
@@ -135,8 +136,11 @@ Commands:
 # Create an output directory (recommended: keep artifacts out of repo root)
 out="results/manual_$(date +%Y%m%d_%H%M%S)"; mkdir -p "$out"
 
-# One-command quickstart (recommended)
-cargo run -p threebody-cli -- quickstart --out-dir "$out" --steps 200
+# Verify LLM connectivity (recommended before long runs)
+cargo run -p threebody-cli -- llm-check
+
+# One-command quickstart (recommended; fails if LLM is unreachable)
+cargo run -p threebody-cli -- quickstart --out-dir "$out" --steps 200 --require-llm
 
 # Generate a starter config + initial conditions
 cargo run -p threebody-cli -- example-config --out "$out/config.json"
