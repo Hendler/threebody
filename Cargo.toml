@@ -1,0 +1,6 @@
+[workspace]
+members = [
+  "threebody-core",
+  "threebody-cli",
+]
+resolver = "2"
