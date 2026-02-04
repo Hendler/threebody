@@ -66,12 +66,16 @@ mod tests {
                 max_accel: 0.0,
                 dt_ratio: 0.0,
             },
+            t: 0.0,
+            dt: 0.1,
         };
         SimResult {
             steps: vec![step],
             encounter: None,
             encounter_action: None,
             warnings: vec!["warn".to_string()],
+            terminated_early: false,
+            termination_reason: None,
         }
     }
 

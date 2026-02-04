@@ -11,6 +11,7 @@ pub fn csv_header(cfg: &Config) -> Vec<String> {
     let mut header = Vec::new();
     header.push("step".to_string());
     header.push("t".to_string());
+    header.push("dt".to_string());
     push_vec3_group(&mut header, "r", 3);
     push_vec3_group(&mut header, "v", 3);
     push_vec3_group(&mut header, "a", 3);
@@ -49,12 +50,7 @@ fn push_vec3_group(header: &mut Vec<String>, prefix: &str, count: usize) {
     }
 }
 
-pub fn write_csv<W: Write>(
-    mut writer: W,
-    steps: &[SimStep],
-    cfg: &Config,
-    dt: f64,
-) -> io::Result<()> {
+pub fn write_csv<W: Write>(mut writer: W, steps: &[SimStep], cfg: &Config) -> io::Result<()> {
     let header = csv_header(cfg);
     writeln!(writer, "{}", header.join(","))?;
 
@@ -68,15 +64,15 @@ pub fn write_csv<W: Write>(
     };
 
     for (idx, step) in steps.iter().enumerate() {
-        let t = dt * idx as f64;
         let acc = compute_accel(&step.system, &force_cfg);
         let fields = compute_fields(&step.system, &force_cfg);
         let diagnostics = compute_diagnostics(&step.system, cfg.constants.g, cfg.constants.k_e, cfg.softening);
-        let regime = compute_regime(&step.system, &acc, dt);
+        let regime = compute_regime(&step.system, &acc, step.dt);
 
         let mut row = Vec::with_capacity(header.len());
         row.push(idx.to_string());
-        row.push(t.to_string());
+        row.push(step.t.to_string());
+        row.push(step.dt.to_string());
         push_vec3_values(&mut row, &step.system.state.pos);
         push_vec3_values(&mut row, &step.system.state.vel);
         push_vec3_values(&mut row, &acc);

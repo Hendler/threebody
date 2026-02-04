@@ -218,7 +218,7 @@ fn run_simulation(
     }
 
     let mut csv_file = fs::File::create(&output)?;
-    write_csv(&mut csv_file, &result.steps, &cfg, dt)?;
+    write_csv(&mut csv_file, &result.steps, &cfg)?;
 
     let header = threebody_core::output::csv::csv_header(&cfg);
     let sidecar = build_sidecar(&cfg, &header, &result);

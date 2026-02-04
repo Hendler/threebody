@@ -33,6 +33,9 @@ pub struct IntegratorConfig {
     pub atol: f64,
     pub dt_min: f64,
     pub dt_max: f64,
+    pub adaptive: bool,
+    pub max_rejects: usize,
+    pub safety: f64,
 }
 
 impl Default for IntegratorConfig {
@@ -44,6 +47,9 @@ impl Default for IntegratorConfig {
             atol: 1e-12,
             dt_min: 1e-6,
             dt_max: 0.1,
+            adaptive: false,
+            max_rejects: 8,
+            safety: 0.9,
         }
     }
 }
@@ -140,6 +146,9 @@ impl Config {
         }
         if self.integrator.rtol < 0.0 || self.integrator.atol < 0.0 {
             return Err("tolerances must be >= 0".to_string());
+        }
+        if !(0.0..=1.0).contains(&self.integrator.safety) {
+            return Err("safety must be within [0,1]".to_string());
         }
         if self.close_encounter.r_min < 0.0 {
             return Err("close_encounter.r_min must be >= 0".to_string());

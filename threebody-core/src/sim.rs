@@ -16,6 +16,8 @@ pub struct SimStep {
     pub system: System,
     pub diagnostics: Diagnostics,
     pub regime: RegimeDiagnostics,
+    pub t: f64,
+    pub dt: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -24,6 +26,8 @@ pub struct SimResult {
     pub encounter: Option<EncounterEvent>,
     pub encounter_action: Option<CloseEncounterAction>,
     pub warnings: Vec<String>,
+    pub terminated_early: bool,
+    pub termination_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -45,6 +49,10 @@ pub fn simulate(
     let mut encounter = None;
     let mut encounter_action = None;
     let warnings = cfg.warnings();
+    let mut terminated_early = false;
+    let mut termination_reason = None;
+    let mut t = 0.0;
+    let mut dt = options.dt;
 
     for step in 0..=options.steps {
         let force_cfg = ForceConfig {
@@ -56,7 +64,7 @@ pub fn simulate(
             enable_em: local_cfg.enable_em,
         };
         let acc = compute_accel(&system, &force_cfg);
-        let regime = compute_regime(&system, &acc, options.dt);
+        let regime = compute_regime(&system, &acc, dt);
         let diagnostics =
             compute_diagnostics(&system, local_cfg.constants.g, local_cfg.constants.k_e, local_cfg.softening);
         if encounter.is_none() && regime.min_pair_dist < cfg.close_encounter.r_min {
@@ -71,6 +79,8 @@ pub fn simulate(
                         system,
                         diagnostics,
                         regime,
+                        t,
+                        dt,
                     });
                     break;
                 }
@@ -90,12 +100,42 @@ pub fn simulate(
             system,
             diagnostics,
             regime,
+            t,
+            dt,
         });
 
         if step == options.steps {
             break;
         }
-        system = active_integrator.step(&system, options.dt, &local_cfg);
+        if local_cfg.integrator.adaptive
+            && matches!(local_cfg.integrator.kind, crate::config::IntegratorKind::Rk45)
+        {
+            let mut rejects = 0;
+            loop {
+                let (next, err_norm, dt_suggested) =
+                    crate::integrators::rk45::step_with_error(&system, dt, &local_cfg);
+                if err_norm <= 1.0 {
+                    system = next;
+                    t += dt;
+                    dt = dt_suggested
+                        .clamp(local_cfg.integrator.dt_min, local_cfg.integrator.dt_max);
+                    break;
+                }
+                dt = dt_suggested.clamp(local_cfg.integrator.dt_min, local_cfg.integrator.dt_max);
+                rejects += 1;
+                if rejects >= local_cfg.integrator.max_rejects {
+                    terminated_early = true;
+                    termination_reason = Some("max_rejects_exceeded".to_string());
+                    break;
+                }
+            }
+            if terminated_early {
+                break;
+            }
+        } else {
+            system = active_integrator.step(&system, dt, &local_cfg);
+            t += dt;
+        }
     }
 
     SimResult {
@@ -103,6 +143,8 @@ pub fn simulate(
         encounter,
         encounter_action,
         warnings,
+        terminated_early,
+        termination_reason,
     }
 }
 
@@ -148,5 +190,30 @@ mod tests {
             result.encounter_action,
             Some(crate::config::CloseEncounterAction::StopAndReport)
         );
+    }
+
+    #[test]
+    fn adaptive_rk45_adjusts_dt() {
+        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(0.0, 0.0)];
+        let pos = [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::zero()];
+        let vel = [Vec3::new(0.0, 0.7, 0.0), Vec3::new(0.0, -0.7, 0.0), Vec3::zero()];
+        let system = System::new(bodies, State::new(pos, vel));
+
+        let mut cfg = Config::default();
+        cfg.integrator.kind = crate::config::IntegratorKind::Rk45;
+        cfg.integrator.adaptive = true;
+        cfg.integrator.dt_max = 0.1;
+        cfg.integrator.dt_min = 1e-6;
+        let options = SimOptions { steps: 2, dt: 0.1 };
+        let integrator = crate::integrators::rk45::Rk45;
+
+        let result = simulate(system, &cfg, &integrator, None, options);
+        assert!(!result.terminated_early);
+        assert!(result.steps.len() >= 2);
+        let dt0 = result.steps[0].dt;
+        let dt1 = result.steps[1].dt;
+        assert!(dt0 > 0.0);
+        assert!(dt1 >= cfg.integrator.dt_min);
+        assert!(dt1 <= cfg.integrator.dt_max);
     }
 }
