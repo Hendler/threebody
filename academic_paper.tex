@@ -142,6 +142,9 @@ with high forward-prediction fidelity over a time horizon, minimal equation comp
 
 This is fundamentally different from ``solving the three-body problem in closed form.'' The goal is regime-specific compact predictive structure. Related work extends sparse discovery to spatiotemporal systems and PDE settings.\cite{Rudy2017}
 
+\subsection{Vector targets and component-wise discovery}
+In implementation, we fit acceleration components separately (e.g., $a_{i,x}$, $a_{i,y}$, $a_{i,z}$) using a shared feature library, then combine the component equations into a vector-valued model. This preserves interpretability while enabling full trajectory rollout evaluation.
+
 \subsection{Why we fit acceleration directly}
 Classical system identification often estimates $\dot{x}$ from measurements; in chaotic systems this introduces strong noise amplification. We avoid this by training on simulator-provided $a_i(t)$ rather than differentiating $v_i(t)$.
 
@@ -185,7 +188,7 @@ Editorial uncertainty: STLS can be sensitive to collinearity and scaling; our cu
 \subsection{What counts as ``predicts well''}
 Pointwise acceleration fit is not sufficient. We evaluate:
 \begin{itemize}
-\item Rollout accuracy: integrate the discovered model forward and compare trajectory error against the oracle.
+\item Rollout accuracy: integrate the discovered model forward and compare trajectory error (e.g., position RMSE) against the oracle.
 \item Stability and failure modes (blow-ups, divergence time).
 \item Generalization to held-out initial conditions within the intended regime.
 \end{itemize}
@@ -193,7 +196,7 @@ Pointwise acceleration fit is not sufficient. We evaluate:
 Editorial uncertainty: In chaotic regimes, long-horizon point prediction is not meaningful\cite{Lorenz1963}; evaluation should shift toward short-horizon deterministic accuracy, ensemble/statistical predictions, and qualitative invariants and manifold structure. We are not yet fully implementing those alternative evaluation regimes.
 
 \subsection{LLM-assisted interpretation (optional)}
-We add an optional LLM judge layer to interpret candidate equations and propose next experiments. The LLM does \emph{not} generate equations and does \emph{not} override numeric ranking; it is a supplemental reviewer that produces a structured scorecard and narrative synthesis. The rubric is explicit and machine-readable, with component scores for (i) predictive fidelity, (ii) parsimony, (iii) physical plausibility, (iv) regime consistency, and (v) stability risk. We pass only evidence summaries (equation forms, numeric metrics, regime diagnostics) and require JSON-only output to preserve determinism. When enabled, the LLM may also propose the next initial conditions within strict bounds; proposals are validated and clipped before use. All prompts and responses are logged as reproducibility artifacts.
+We add an optional LLM judge layer to interpret candidate equations and propose next experiments. The LLM does \emph{not} generate equations and does \emph{not} override numeric ranking; it is a supplemental reviewer that produces a structured scorecard and narrative synthesis. The rubric is explicit and machine-readable, with component scores for (i) predictive fidelity, (ii) parsimony, (iii) physical plausibility, (iv) regime consistency, and (v) stability risk. Evidence passed to the judge includes equation forms plus numeric metrics (MSE, rollout RMSE, divergence time) and regime diagnostics. We require JSON-only output to preserve determinism. When enabled, the LLM may also propose the next initial conditions within strict bounds; proposals are validated and clipped before use. All prompts and responses are logged as reproducibility artifacts.
 
 \section{System Integration and Reproducibility}
 \subsection{CLI-driven workflow}

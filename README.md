@@ -72,7 +72,7 @@ Outputs:
 - Learns sparse, interpretable models of acceleration from simulator output.
 - Uses structured feature libraries (relative positions, distances, cross products, etc.).
 - Fits via sequential thresholded least squares (SINDy / STLS).
-- Evaluates models by rollout accuracy, stability, and generalization within a regime.
+- Evaluates models by rollout accuracy (position RMSE), divergence time, stability, and generalization within a regime.
 
 **Accuracy / Truth Mode**
 - Adaptive RK45 with step rejection and strict tolerances.
@@ -82,7 +82,7 @@ Outputs:
 **LLM Judge + Factory Loop (Optional)**
 - The LLM is a supplemental judge, not a generator. It scores candidates with a fixed rubric (fidelity, parsimony, physical plausibility, regime consistency, stability risk) and outputs JSON only.
 - The LLM can propose initial conditions within strict bounds to drive the `factory` loop.
-- Prompts and responses are logged for reproducibility; numeric metrics remain the primary ranking.
+- Prompts and responses are logged for reproducibility; numeric metrics (MSE, rollout RMSE, divergence time) remain the primary ranking.
 - Requires an API key in `OPENAI_API_KEY` for `--llm-mode openai`. Offline and `--llm-mode mock` are supported.
 
 **Status**
@@ -119,7 +119,7 @@ cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --m
 **Factory Outputs (Per Iteration)**
 - `traj.csv` and `traj.json` sidecar.
 - `initial_conditions.json` and `ic_request.json`.
-- `discovery.json` with numeric top-3 candidates.
+- `discovery.json` with `top3_x/top3_y/top3_z` and `vector_candidates`.
 - `judge_input.json` plus `judge_prompt.txt` and `judge_response.txt` (when LLM is enabled).
 - `report.json` and `report.md` summaries.
 

@@ -1192,3 +1192,37 @@ fn initial_conditions_from_preset(preset: &str) -> anyhow::Result<InitialConditi
         notes: format!("preset:{preset}"),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use threebody_discover::Equation;
+
+    #[test]
+    fn vector_dataset_includes_all_bodies() {
+        let cfg = Config::default();
+        let system = preset_system("two-body").unwrap();
+        let result = simulate_with_cfg(system, &cfg, SimOptions { steps: 2, dt: 0.01 });
+        let library = FeatureLibrary::default_physics();
+        let vec_data = build_vector_dataset(&result, &cfg, &library.features);
+        let expected = result.steps.len() * 3;
+        assert_eq!(vec_data.samples.len(), expected);
+        assert_eq!(vec_data.targets.len(), expected);
+    }
+
+    #[test]
+    fn rollout_metrics_are_finite() {
+        let cfg = Config::default();
+        let system = preset_system("two-body").unwrap();
+        let result = simulate_with_cfg(system, &cfg, SimOptions { steps: 3, dt: 0.01 });
+        let library = FeatureLibrary::default_physics();
+        let vec_data = build_vector_dataset(&result, &cfg, &library.features);
+        let model = VectorModel {
+            eq_x: Equation { terms: vec![] },
+            eq_y: Equation { terms: vec![] },
+            eq_z: Equation { terms: vec![] },
+        };
+        let (rmse, _div) = rollout_metrics(&model, &vec_data.feature_names, &result, &cfg);
+        assert!(rmse.is_finite());
+    }
+}

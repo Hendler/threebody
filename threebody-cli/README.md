@@ -42,3 +42,4 @@ export OPENAI_API_KEY="your_key_here"
 cargo run -p threebody-cli -- discover --llm --model gpt-5
 cargo run -p threebody-cli -- factory --llm-mode openai --model gpt-5 --max-iters 1 --auto
 ```
+The LLM judge receives equation forms plus numeric metrics (MSE, rollout RMSE, divergence time) and emits JSON-only scorecards.
