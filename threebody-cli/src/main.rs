@@ -1,15 +1,18 @@
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use threebody_core::config::{Config, IntegratorKind};
+use threebody_core::diagnostics::compute_diagnostics;
 use threebody_core::frames::to_barycentric;
 use threebody_core::forces::{compute_accel, ForceConfig};
 use threebody_core::integrators::{boris::Boris, implicit_midpoint::ImplicitMidpoint, leapfrog::Leapfrog, rk45::Rk45, Integrator};
 use threebody_core::math::vec3::Vec3;
 use threebody_core::output::csv::write_csv;
+use threebody_core::output::parse::{parse_header, require_columns};
 use threebody_core::output::sidecar::{build_sidecar, write_sidecar};
+use threebody_core::regime::compute_regime;
 use threebody_core::sim::{simulate, SimOptions};
 use threebody_core::state::{Body, State, System};
 use threebody_discover::ga::DiscoveryConfig;
@@ -123,6 +126,15 @@ enum Commands {
         /// Output JSON path.
         #[arg(long, default_value = "top_equations.json")]
         out: PathBuf,
+        /// Input CSV path (defaults to ./traj.csv).
+        #[arg(long, default_value = "traj.csv")]
+        input: PathBuf,
+        /// Sidecar JSON path (defaults to <input>.json).
+        #[arg(long)]
+        sidecar: Option<PathBuf>,
+        /// Discover from a single body only (0, 1, or 2). If omitted, uses all bodies.
+        #[arg(long)]
+        body: Option<usize>,
         /// Enable LLM ranking/interpretation.
         #[arg(long)]
         llm: bool,
@@ -132,6 +144,9 @@ enum Commands {
         /// Fitness heuristic: mse | mse_parsimony.
         #[arg(long, default_value = "mse")]
         fitness: String,
+        /// Rollout integrator for evaluation: euler | leapfrog.
+        #[arg(long, default_value = "euler")]
+        rollout_integrator: String,
     },
     /// Run the LLM-assisted factory loop (ICs -> sim -> discovery -> judge).
     Factory {
@@ -271,11 +286,27 @@ fn main() -> anyhow::Result<()> {
             population,
             seed,
             out,
+            input,
+            sidecar,
+            body,
             llm,
             model,
             fitness,
+            rollout_integrator,
         } => {
-            run_discovery(runs, population, seed, out, llm, model, fitness)?;
+            run_discovery(
+                runs,
+                population,
+                seed,
+                out,
+                input,
+                sidecar,
+                body,
+                llm,
+                model,
+                fitness,
+                rollout_integrator,
+            )?;
         }
         Commands::Factory {
             out_dir,
@@ -458,13 +489,17 @@ fn run_discovery(
     population: usize,
     seed: u64,
     out: PathBuf,
+    input: PathBuf,
+    sidecar_path: Option<PathBuf>,
+    body: Option<usize>,
     llm: bool,
     model: String,
     fitness: String,
+    rollout_integrator: String,
 ) -> anyhow::Result<()> {
-    let dataset = discovery_dataset();
     let library = FeatureLibrary::default_physics();
     let fitness = parse_fitness_heuristic(&fitness)?;
+    let rollout_integrator = parse_rollout_integrator(&rollout_integrator)?;
     let cfg = DiscoveryConfig {
         runs,
         population,
@@ -474,13 +509,93 @@ fn run_discovery(
     };
     let llm_client = if llm { Some(OpenAIClient::from_env(&model)?) } else { None };
 
-    let topk = run_search(&dataset, &library, &cfg);
-    let candidates: Vec<_> = topk.entries.iter().map(|e| e.equation.clone()).collect();
-    let grid_topk = grid_search(&candidates, &dataset);
+    if let Some(b) = body {
+        if b > 2 {
+            anyhow::bail!("--body must be 0, 1, or 2");
+        }
+    }
+    if !input.exists() {
+        anyhow::bail!("input CSV not found: {}", input.display());
+    }
+
+    let sidecar_path = sidecar_path.unwrap_or_else(|| input.with_extension("json"));
+    if !sidecar_path.exists() {
+        anyhow::bail!(
+            "sidecar JSON not found: {} (expected alongside CSV)",
+            sidecar_path.display()
+        );
+    }
+    let sidecar_json = fs::read_to_string(&sidecar_path)?;
+    let sidecar: threebody_core::output::sidecar::Sidecar = serde_json::from_str(&sidecar_json)?;
+    let sim_cfg = sidecar.config;
+    sim_cfg.validate().map_err(anyhow::Error::msg)?;
+
+    let init = sidecar
+        .initial_state
+        .ok_or_else(|| anyhow::anyhow!("sidecar missing initial_state; rerun simulate to regenerate"))?;
+    let mut bodies = [Body::new(0.0, 0.0); 3];
+    for i in 0..3 {
+        bodies[i] = Body::new(init.mass[i], init.charge[i]);
+    }
+    let steps = load_steps_from_csv(&input, bodies, &sim_cfg)?;
+    let result = threebody_core::sim::SimResult {
+        steps,
+        encounter: None,
+        encounter_action: None,
+        warnings: sidecar.warnings.clone(),
+        terminated_early: false,
+        termination_reason: None,
+        stats: sidecar.sim_stats,
+    };
+
+    let regime = if sim_cfg.enable_em { "em_quasistatic" } else { "gravity_only" };
+
+    let vector_data = build_vector_dataset(&result, &sim_cfg, &library.features, body);
+    let [dataset_x, dataset_y, dataset_z] = component_datasets(&vector_data);
+
+    let topk_x = run_search(&dataset_x, &library, &cfg);
+    let topk_y = run_search(&dataset_y, &library, &cfg);
+    let topk_z = run_search(&dataset_z, &library, &cfg);
+
+    let vector_candidates = build_vector_candidates(
+        &topk_x.entries,
+        &topk_y.entries,
+        &topk_z.entries,
+        &vector_data.feature_names,
+        &result,
+        &sim_cfg,
+        regime,
+        rollout_integrator,
+    );
+
+    let grid_x = grid_search(
+        &topk_x.entries.iter().map(|e| e.equation.clone()).collect::<Vec<_>>(),
+        &dataset_x,
+    );
+    let grid_y = grid_search(
+        &topk_y.entries.iter().map(|e| e.equation.clone()).collect::<Vec<_>>(),
+        &dataset_y,
+    );
+    let grid_z = grid_search(
+        &topk_z.entries.iter().map(|e| e.equation.clone()).collect::<Vec<_>>(),
+        &dataset_z,
+    );
+
+    let simulation = build_sim_summary(&result, rollout_integrator);
+    let dataset_summary = build_dataset_summary(
+        &vector_data.feature_names,
+        &library,
+        vector_data.samples.len(),
+        "accel_components_body_all",
+    );
+    let judge_input = build_judge_input_from_candidates(
+        dataset_summary.clone(),
+        vector_candidates.clone(),
+        Some(simulation.clone()),
+        regime,
+    );
 
     let judge = if let Some(client) = llm_client.as_ref() {
-        let judge_input =
-            build_judge_input_from_entries(&dataset, &library, &topk.entries, None, "toy_dataset", "x");
         client.judge_candidates(&judge_input).ok().map(|r| r.value)
     } else {
         None
@@ -488,31 +603,147 @@ fn run_discovery(
 
     #[derive(serde::Serialize)]
     struct Output {
-        top3: Vec<threebody_discover::EquationScore>,
-        grid_top3: Vec<threebody_discover::EquationScore>,
+        input_csv: String,
+        sidecar_json: String,
+        regime: String,
+        config: Config,
+        dataset: DatasetSummary,
+        simulation: SimulationSummary,
+        top3: Vec<CandidateSummary>,
+        component_top3: ComponentTop3,
+        grid_top3: ComponentTop3,
         judge: Option<JudgeResponse>,
     }
 
+    #[derive(serde::Serialize)]
+    struct ComponentTop3 {
+        x: Vec<threebody_discover::EquationScore>,
+        y: Vec<threebody_discover::EquationScore>,
+        z: Vec<threebody_discover::EquationScore>,
+    }
+
     let output = Output {
-        top3: topk.entries.clone(),
-        grid_top3: grid_topk.entries.clone(),
+        input_csv: input.display().to_string(),
+        sidecar_json: sidecar_path.display().to_string(),
+        regime: regime.to_string(),
+        config: sim_cfg,
+        dataset: dataset_summary,
+        simulation,
+        top3: vector_candidates,
+        component_top3: ComponentTop3 {
+            x: topk_x.entries.clone(),
+            y: topk_y.entries.clone(),
+            z: topk_z.entries.clone(),
+        },
+        grid_top3: ComponentTop3 {
+            x: grid_x.entries.clone(),
+            y: grid_y.entries.clone(),
+            z: grid_z.entries.clone(),
+        },
         judge,
     };
+
     let json = serde_json::to_string_pretty(&output)?;
     fs::write(out, json)?;
     Ok(())
 }
 
-fn discovery_dataset() -> Dataset {
-    let feature_names = vec!["x".to_string(), "x2".to_string()];
-    let mut samples = Vec::new();
-    let mut targets = Vec::new();
-    for i in 1..=5 {
-        let x = i as f64;
-        samples.push(vec![x, x * x]);
-        targets.push(x);
+fn load_steps_from_csv(input: &PathBuf, bodies: [Body; 3], cfg: &Config) -> anyhow::Result<Vec<threebody_core::sim::SimStep>> {
+    const REQUIRED: [&str; 20] = [
+        "t",
+        "dt",
+        "r1_x",
+        "r1_y",
+        "r1_z",
+        "r2_x",
+        "r2_y",
+        "r2_z",
+        "r3_x",
+        "r3_y",
+        "r3_z",
+        "v1_x",
+        "v1_y",
+        "v1_z",
+        "v2_x",
+        "v2_y",
+        "v2_z",
+        "v3_x",
+        "v3_y",
+        "v3_z",
+    ];
+
+    let file = fs::File::open(input)?;
+    let mut reader = io::BufReader::new(file);
+    let mut header_line = String::new();
+    let n = reader.read_line(&mut header_line)?;
+    if n == 0 {
+        anyhow::bail!("empty CSV: {}", input.display());
     }
-    Dataset::new(feature_names, samples, targets)
+    let header = parse_header(&header_line);
+    let map = require_columns(&header, &REQUIRED).map_err(anyhow::Error::msg)?;
+
+    let force_cfg = ForceConfig {
+        g: cfg.constants.g,
+        k_e: cfg.constants.k_e,
+        mu_0: cfg.constants.mu_0,
+        epsilon: cfg.softening,
+        enable_gravity: cfg.enable_gravity,
+        enable_em: cfg.enable_em,
+    };
+
+    let mut steps = Vec::new();
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let cols: Vec<&str> = line.split(',').collect();
+        let get = |name: &str| -> anyhow::Result<&str> {
+            let idx = *map
+                .get(name)
+                .ok_or_else(|| anyhow::anyhow!("missing column in header: {name}"))?;
+            cols.get(idx)
+                .copied()
+                .ok_or_else(|| anyhow::anyhow!("row {} missing column: {name}", line_no + 2))
+        };
+        let parse_f64 = |name: &str| -> anyhow::Result<f64> {
+            let raw = get(name)?;
+            raw.parse::<f64>()
+                .map_err(|e| anyhow::anyhow!("row {} invalid {name}={raw:?}: {e}", line_no + 2))
+        };
+
+        let t = parse_f64("t")?;
+        let dt = parse_f64("dt")?;
+
+        let pos = [
+            Vec3::new(parse_f64("r1_x")?, parse_f64("r1_y")?, parse_f64("r1_z")?),
+            Vec3::new(parse_f64("r2_x")?, parse_f64("r2_y")?, parse_f64("r2_z")?),
+            Vec3::new(parse_f64("r3_x")?, parse_f64("r3_y")?, parse_f64("r3_z")?),
+        ];
+        let vel = [
+            Vec3::new(parse_f64("v1_x")?, parse_f64("v1_y")?, parse_f64("v1_z")?),
+            Vec3::new(parse_f64("v2_x")?, parse_f64("v2_y")?, parse_f64("v2_z")?),
+            Vec3::new(parse_f64("v3_x")?, parse_f64("v3_y")?, parse_f64("v3_z")?),
+        ];
+
+        let system = System::new(bodies, State::new(pos, vel));
+        let acc = compute_accel(&system, &force_cfg);
+        let diagnostics = compute_diagnostics(&system, cfg);
+        let regime = compute_regime(&system, &acc, dt);
+        steps.push(threebody_core::sim::SimStep {
+            system,
+            diagnostics,
+            regime,
+            t,
+            dt,
+        });
+    }
+
+    if steps.is_empty() {
+        anyhow::bail!("no data rows in CSV: {}", input.display());
+    }
+    Ok(steps)
 }
 
 fn build_judge_input_from_entries(
@@ -677,6 +908,7 @@ fn build_vector_dataset(
     result: &threebody_core::sim::SimResult,
     cfg: &Config,
     feature_names: &[String],
+    body_filter: Option<usize>,
 ) -> VectorDataset {
     let mut samples = Vec::new();
     let mut targets = Vec::new();
@@ -692,6 +924,11 @@ fn build_vector_dataset(
         let system = &step.system;
         let acc = compute_accel(system, &force_cfg);
         for body in 0..3 {
+            if let Some(only) = body_filter {
+                if body != only {
+                    continue;
+                }
+            }
             let features = compute_feature_vector(system, body, cfg, feature_names);
             samples.push(features);
             targets.push([acc[body].x, acc[body].y, acc[body].z]);
@@ -1186,7 +1423,7 @@ fn run_factory(
         write_sidecar(&mut sidecar_file, &sidecar)?;
 
         let library = FeatureLibrary::default_physics();
-        let vector_data = build_vector_dataset(&result, &cfg, &library.features);
+        let vector_data = build_vector_dataset(&result, &cfg, &library.features, None);
         let [dataset_x, dataset_y, dataset_z] = component_datasets(&vector_data);
         let disc_cfg = DiscoveryConfig {
             runs,
@@ -1450,7 +1687,7 @@ mod tests {
         let system = preset_system("two-body").unwrap();
         let result = simulate_with_cfg(system, &cfg, SimOptions { steps: 2, dt: 0.01 });
         let library = FeatureLibrary::default_physics();
-        let vec_data = build_vector_dataset(&result, &cfg, &library.features);
+        let vec_data = build_vector_dataset(&result, &cfg, &library.features, None);
         let expected = result.steps.len() * 3;
         assert_eq!(vec_data.samples.len(), expected);
         assert_eq!(vec_data.targets.len(), expected);
@@ -1462,7 +1699,7 @@ mod tests {
         let system = preset_system("two-body").unwrap();
         let result = simulate_with_cfg(system, &cfg, SimOptions { steps: 3, dt: 0.01 });
         let library = FeatureLibrary::default_physics();
-        let vec_data = build_vector_dataset(&result, &cfg, &library.features);
+        let vec_data = build_vector_dataset(&result, &cfg, &library.features, None);
         let model = VectorModel {
             eq_x: Equation { terms: vec![] },
             eq_y: Equation { terms: vec![] },
