@@ -131,13 +131,13 @@ enum Commands {
     },
     /// Run the equation discovery loop.
     Discover {
-        /// Number of GA runs.
+        /// GA runs (only used with --solver ga).
         #[arg(long, default_value_t = 50)]
         runs: usize,
-        /// Population size.
+        /// GA population size (only used with --solver ga).
         #[arg(long, default_value_t = 20)]
         population: usize,
-        /// Random seed.
+        /// GA random seed (only used with --solver ga).
         #[arg(long, default_value_t = 42)]
         seed: u64,
         /// Output JSON path.
@@ -228,13 +228,13 @@ enum Commands {
         /// Disable gravity.
         #[arg(long)]
         no_gravity: bool,
-        /// Number of GA runs.
+        /// GA runs (only used with --solver ga).
         #[arg(long, default_value_t = 50)]
         runs: usize,
-        /// Population size.
+        /// GA population size (only used with --solver ga).
         #[arg(long, default_value_t = 20)]
         population: usize,
-        /// Random seed.
+        /// Random seed (used for IC proposals; also used with --solver ga).
         #[arg(long, default_value_t = 42)]
         seed: u64,
         /// Fitness heuristic: mse | mse_parsimony.

@@ -100,6 +100,11 @@ The intended flow is:
 2. Run a simulation from that config and produce a CSV.
 3. Inspect or visualize outputs, and then feed them into discovery.
 
+Fastest path (uses `just`):
+```bash
+just quickstart
+```
+
 Commands:
 ```bash
 # Generate a starter config
@@ -123,14 +128,21 @@ cargo run -p threebody-cli -- discover --solver stls --out top_equations.json
 # Or run the GA baseline:
 # cargo run -p threebody-cli -- discover --solver ga --runs 50 --population 20 --out top_equations.json
 
+# Try LASSO instead:
+# cargo run -p threebody-cli -- discover --solver lasso --out top_equations.json
+
+# Optional: override the solver path explicitly
+# cargo run -p threebody-cli -- discover --solver stls --stls-thresholds 0.01,0.05,0.1 --out top_equations.json
+# cargo run -p threebody-cli -- discover --solver lasso --lasso-alphas 0.1,0.01,0.001 --out top_equations.json
+
 # If your simulation output isn't named traj.csv/traj.json, pass explicit paths:
 # cargo run -p threebody-cli -- discover --input run.csv --sidecar run.json --out top_equations.json
 
 # Run one factory/experiment iteration with a mock LLM (no API key needed)
-cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode mock --rollout-integrator euler --fitness mse
+cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode mock --solver stls --rollout-integrator euler --fitness mse
 
 # Run one factory iteration with OpenAI (uses .openai_key by default if present)
-cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5 --rollout-integrator leapfrog --fitness mse_parsimony
+cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5 --solver stls --rollout-integrator leapfrog --fitness mse_parsimony
 
 # Or override with a key file (ignores OPENAI_API_KEY and .openai_key)
 cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5 --openai-key-file .openai_key
@@ -152,6 +164,42 @@ export OPENAI_API_KEY="your_key_here"
 - `rollout_trace.json` for the best vector candidate under the selected rollout integrator.
 - `judge_input.json` plus `judge_prompt.txt` and `judge_response.txt` (when LLM is enabled).
 - `report.json` and `report.md` summaries.
+
+**How To Spot “Math Improvements” (No Math Required)**
+Discovery produces equations, but you can judge progress using a few plain metrics:
+- **`rollout_rmse`** (lower is better): average trajectory error during rollout vs the oracle.
+- **`divergence_time`** (higher is better): how long the rollout stays “close enough” before drifting away.
+- **`mse`** (lower is better): pointwise acceleration-fit error (useful, but not sufficient alone).
+- **`complexity`** (lower is simpler): number of non-zero terms across x/y/z.
+
+Where to look:
+- Single run: open `top_equations.json` and look at `top3[0].metrics` and `top3[0].equation_text`.
+- Factory run: open `factory_out/run_001/report.md` (human-readable) or `factory_out/run_001/report.json` (structured). Also check `factory_out/run_001/discovery.json` for `solver` metadata.
+
+Practical checklist (for non-math users):
+1. Prefer the model with **lower `rollout_rmse`** and **higher `divergence_time`** on the same regime/config.
+2. If two models are within ~5% on `rollout_rmse`, prefer the **simpler** one (lower `complexity`).
+3. Don’t trust “good `mse`” if rollout is bad—rollout is the real test.
+4. Change only one thing at a time (solver, thresholds/alphas, rollout integrator, EM on/off).
+
+**How To Communicate Improvements (For Non-Math / Non-Physics Stakeholders)**
+Use a short “release-note” style summary plus artifacts:
+- What changed: solver + key settings (from `solver` metadata).
+- What got better: `rollout_rmse`, `divergence_time`, and `complexity` (before/after).
+- Evidence: attach `report.md` and `report.json` (or `top_equations.json` for non-factory runs).
+
+Copy/paste template:
+```text
+Goal/regime: gravity_only | em_quasistatic
+Command: threebody-cli factory/discover (paste exact command)
+Solver: stls/lasso/ga (include normalize + thresholds/alphas)
+Best model (from report):
+  rollout_rmse: <old> -> <new>
+  divergence_time: <old> -> <new>
+  complexity: <old> -> <new>
+Equation (human-readable): <equation_text>
+Artifacts: <paths to report.md/report.json or top_equations.json>
+```
 
 **Implementation Plan (TDD-first, condensed from `todo.md`)**
 1. Create a Cargo workspace with crates `threebody-core` and `threebody-cli`. Tests: placeholder smoke test.

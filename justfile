@@ -18,6 +18,12 @@ simulate-em:
 discover:
   cargo run -p threebody-cli -- discover --solver stls --out top_equations.json
 
+quickstart:
+  cargo run -p threebody-cli -- example-config --out config.json
+  cargo run -p threebody-cli -- example-ic --preset three-body --out ic.json
+  cargo run -p threebody-cli -- simulate --config config.json --ic ic.json --output traj.csv --steps 200 --dt 0.01
+  cargo run -p threebody-cli -- discover --solver stls --out top_equations.json
+
 test:
   cargo test
 

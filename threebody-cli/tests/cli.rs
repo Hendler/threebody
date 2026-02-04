@@ -89,10 +89,8 @@ fn discover_writes_top3() {
         .current_dir(&tmp_dir)
         .args([
             "discover",
-            "--runs",
-            "2",
-            "--population",
-            "4",
+            "--solver",
+            "stls",
             "--out",
             out_path.to_str().unwrap(),
         ])
@@ -101,9 +99,53 @@ fn discover_writes_top3() {
     assert!(output.status.success());
     let json = fs::read_to_string(&out_path).expect("output json");
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let solver = value.get("solver").expect("solver metadata");
+    assert_eq!(solver.get("name").and_then(|v| v.as_str()), Some("stls"));
     assert!(value.get("top3").is_some());
     assert!(value.get("component_top3").is_some());
     assert!(value.get("grid_top3").is_some());
+}
+
+#[test]
+fn discover_solver_ga_still_runs() {
+    let exe = env!("CARGO_BIN_EXE_threebody-cli");
+    let tmp_dir = env::temp_dir().join(format!("threebody_discover_ga_{}", std::process::id()));
+    if tmp_dir.exists() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+    fs::create_dir_all(&tmp_dir).expect("create temp dir");
+
+    let sim = Command::new(exe)
+        .current_dir(&tmp_dir)
+        .args(["simulate", "--steps", "5", "--dt", "0.01"])
+        .output()
+        .expect("run simulate");
+    assert!(sim.status.success(), "simulate failed: {:?}", sim);
+
+    let out_path = tmp_dir.join("out.json");
+    let output = Command::new(exe)
+        .current_dir(&tmp_dir)
+        .args([
+            "discover",
+            "--solver",
+            "ga",
+            "--runs",
+            "2",
+            "--population",
+            "4",
+            "--seed",
+            "1",
+            "--out",
+            out_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("run discover ga");
+    assert!(output.status.success());
+    let json = fs::read_to_string(&out_path).expect("output json");
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let solver = value.get("solver").expect("solver metadata");
+    assert_eq!(solver.get("name").and_then(|v| v.as_str()), Some("ga"));
+    assert!(value.get("top3").is_some());
 }
 
 #[test]
@@ -125,10 +167,6 @@ fn factory_runs_once_with_mock_llm() {
             "5",
             "--dt",
             "0.01",
-            "--runs",
-            "2",
-            "--population",
-            "4",
             "--llm-mode",
             "mock",
         ])
@@ -137,6 +175,10 @@ fn factory_runs_once_with_mock_llm() {
     assert!(output.status.success());
     let report = tmp_dir.join("run_001").join("report.json");
     assert!(report.exists());
+    let json = fs::read_to_string(&report).expect("report json");
+    let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let solver = value.get("solver").expect("solver metadata");
+    assert_eq!(solver.get("name").and_then(|v| v.as_str()), Some("stls"));
     let trace = tmp_dir.join("run_001").join("rollout_trace.json");
     assert!(trace.exists());
 }
@@ -221,10 +263,8 @@ fn quick_start_flow_runs() {
         .current_dir(&tmp_dir)
         .args([
             "discover",
-            "--runs",
-            "2",
-            "--population",
-            "4",
+            "--solver",
+            "stls",
             "--out",
             discover_out.to_str().unwrap(),
         ])
@@ -235,6 +275,8 @@ fn quick_start_flow_runs() {
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert!(value.get("top3").is_some());
     assert!(value.get("judge").is_some());
+    let solver = value.get("solver").expect("solver metadata");
+    assert_eq!(solver.get("name").and_then(|v| v.as_str()), Some("stls"));
 
     let factory_dir = tmp_dir.join("factory_out");
     let out = Command::new(exe)
@@ -297,10 +339,8 @@ fn discover_accepts_explicit_input_and_sidecar_paths() {
         .current_dir(&tmp_dir)
         .args([
             "discover",
-            "--runs",
-            "2",
-            "--population",
-            "4",
+            "--solver",
+            "stls",
             "--input",
             input_csv.to_str().unwrap(),
             "--sidecar",
