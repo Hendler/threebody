@@ -108,11 +108,27 @@ What it does:
 - Creates a timestamped run directory under `results/quickstart_*/`.
 - Runs **10** `factory` iterations with an LLM judge (`--llm-mode auto`) and writes evidence under `results/quickstart_*/factory/run_###/`.
 - Writes a single novice-friendly results file to `results/quickstart_*/RESULTS.md` (and `RESULTS.pdf` when `pdflatex` is available).
+- Updates the global “best so far” index at `results/best_results.md` (and `results/best_results.json`).
 
 Tune simulation length (the only “knob” you should need):
 ```bash
 just quickstart 400
 ```
+
+Run 10 separate quickstarts (recommended when you want the LLM to steer across runs and build confidence):
+```bash
+just quickstart10 1000
+```
+What it does:
+- Runs the full quickstart workflow 10 times (each quickstart has 10 factory iterations).
+- Updates `results/best_results.md` after every run.
+- Requires a reachable LLM endpoint (OpenAI by default). Set `.openai_key` or `OPENAI_API_KEY`. To use a local OpenAI-compatible endpoint, set `OPENAI_BASE_URL` (e.g. `http://localhost:11434/v1`).
+- Writes an aggregated findings report to `results/findings.tex` (and `results/findings.pdf` when `pdflatex` is available). Each run also copies a timestamped PDF snapshot (e.g. `results/findings_<unix_seconds>.pdf`).
+
+What to open first (novice-friendly):
+- Global best: `results/best_results.md`
+- Latest run: `results/quickstart_*/RESULTS.md`
+- Aggregated paper: `results/findings.pdf` (if built) or `results/findings.tex`
 
 Commands:
 ```bash
@@ -149,6 +165,9 @@ cargo run -p threebody-cli -- factory --out-dir "$out/factory" --max-iters 10 --
 
 # Open the high-school-friendly explainer
 cat "$out/factory/evaluation.md"
+
+# Regenerate the aggregated findings report (TeX always; PDF when pdflatex is available)
+cargo run -p threebody-cli -- findings --results-dir results --out-tex results/findings.tex
 
 # Use OpenAI when available, but fall back cleanly when offline
 # cargo run -p threebody-cli -- factory --out-dir "$out/factory" --max-iters 10 --auto --config "$out/config.json" --steps 200 --dt 0.01 --llm-mode auto --model gpt-5.2
@@ -190,6 +209,7 @@ Discovery produces equations, but you can judge progress using a few plain metri
 - **`complexity`** (lower is simpler): number of non-zero terms across x/y/z.
 
 Where to look:
+- Across all runs: start with `results/best_results.md` (single file that stays up to date).
 - Single run: open `top_equations.json` and look at `top3[0].metrics` and `top3[0].equation_text`.
 - Factory run: start with `<out_dir>/evaluation.md`, then open `<out_dir>/run_001/report.md` (human-readable) or `<out_dir>/run_001/report.json` (structured). Also check `<out_dir>/run_001/discovery.json` for `solver` metadata. The CLI default out-dir is `factory_out/`.
 
@@ -203,7 +223,7 @@ Practical checklist (for non-math users):
 Use a short “release-note” style summary plus artifacts:
 - What changed: solver + key settings (from `solver` metadata).
 - What got better: `rollout_rmse`, `divergence_time`, and `complexity` (before/after).
-- Evidence: attach `report.md` and `report.json` (or `top_equations.json` for non-factory runs).
+- Evidence (recommended): attach `results/best_results.md`, the run’s `RESULTS.md`, and the run’s `factory/evaluation_input.json`.
 
 Copy/paste template:
 ```text
@@ -215,7 +235,7 @@ Best model (from report):
   divergence_time: <old> -> <new>
   complexity: <old> -> <new>
 Equation (human-readable): <equation_text>
-Artifacts: <paths to report.md/report.json or top_equations.json>
+Artifacts: results/best_results.md + results/<run>/RESULTS.md + results/<run>/factory/evaluation_input.json
 ```
 
 **Implementation Plan (TDD-first, condensed from `todo.md`)**

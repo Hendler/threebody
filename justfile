@@ -30,6 +30,24 @@ quickstart steps="200":
 
   echo "Quickstart complete: $out"
 
+quickstart10 steps="200":
+  #!/usr/bin/env bash
+  set -euo pipefail
+  steps="{{steps}}"
+
+  echo "Running 10 quickstarts: steps=${steps} max_iters=10 llm_mode=auto"
+  for i in $(seq 1 10); do
+    ts="$(date +%Y%m%d_%H%M%S)"
+    out="results/quickstart_${ts}_${i}"
+    echo "Run $i/10: out_dir=$out"
+    cargo run -p threebody-cli -- quickstart --out-dir "$out" --steps "$steps" --max-iters 10 --require-llm
+  done
+
+  cargo run -p threebody-cli -- findings --results-dir results --out-tex results/findings.tex
+
+findings:
+  cargo run -p threebody-cli -- findings --results-dir results --out-tex results/findings.tex
+
 test:
   cargo test
 

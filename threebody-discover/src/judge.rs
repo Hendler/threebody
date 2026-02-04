@@ -636,6 +636,30 @@ mod tests {
     }
 
     #[test]
+    fn ic_prompt_includes_notes_verbatim() {
+        let request = IcRequest {
+            bounds: IcBounds {
+                mass_min: 0.1,
+                mass_max: 10.0,
+                charge_min: -1.0,
+                charge_max: 1.0,
+                pos_min: -1.0,
+                pos_max: 1.0,
+                vel_min: -1.0,
+                vel_max: 1.0,
+                min_pair_dist: 0.2,
+                recommend_barycentric: true,
+            },
+            regime: "gravity_only".to_string(),
+            notes: vec!["INCUMBENT_BEST_EQUATION: ax=+1*grav_x".to_string()],
+            seed: Some(1),
+        };
+        let prompt = build_ic_prompt(&request);
+        assert!(prompt.contains("INCUMBENT_BEST_EQUATION"));
+        assert!(prompt.contains("ax=+1*grav_x"));
+    }
+
+    #[test]
     fn judge_prompt_mentions_discovery_solver_recommendations() {
         let rubric = Rubric::default_rubric();
         let input = JudgeInput {
@@ -684,6 +708,55 @@ mod tests {
         assert!(prompt.contains("\"stls\""));
         assert!(prompt.contains("\"lasso\""));
         assert!(prompt.contains("\"ga\""));
+    }
+
+    #[test]
+    fn judge_prompt_includes_additional_notes() {
+        let rubric = Rubric::default_rubric();
+        let input = JudgeInput {
+            rubric: rubric.clone(),
+            regime: "gravity_only".to_string(),
+            dataset: DatasetSummary {
+                n_samples: 1,
+                target_description: "a_x".to_string(),
+                feature_names: vec!["grav_x".to_string()],
+                feature_descriptions: vec![FeatureDescription {
+                    name: "grav_x".to_string(),
+                    description: "gravity basis x-component".to_string(),
+                    tags: vec!["gravity".to_string()],
+                }],
+            },
+            simulation: None,
+            candidates: vec![CandidateSummary {
+                id: 0,
+                equation: Equation { terms: vec![] },
+                equation_text: "0".to_string(),
+                metrics: CandidateMetrics {
+                    mse: 1.0,
+                    complexity: 0,
+                    rollout_rmse: None,
+                    divergence_time: None,
+                    stability_flags: vec![],
+                },
+                notes: vec![],
+            }],
+            ic_bounds: IcBounds {
+                mass_min: 0.1,
+                mass_max: 10.0,
+                charge_min: -1.0,
+                charge_max: 1.0,
+                pos_min: -1.0,
+                pos_max: 1.0,
+                vel_min: -1.0,
+                vel_max: 1.0,
+                min_pair_dist: 0.2,
+                recommend_barycentric: true,
+            },
+            notes: vec!["INCUMBENT_BEST_EQUATION: ax=+1*grav_x".to_string()],
+        };
+        let prompt = build_judge_prompt(&input);
+        assert!(prompt.contains("INCUMBENT_BEST_EQUATION"));
+        assert!(prompt.contains("ax=+1*grav_x"));
     }
 
     #[test]

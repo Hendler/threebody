@@ -206,6 +206,9 @@ enum Commands {
         /// Max factory iterations (default: 10).
         #[arg(long, default_value_t = 10, hide = true)]
         max_iters: usize,
+        /// Require a reachable OpenAI-compatible LLM (fail instead of falling back to mock).
+        #[arg(long, default_value_t = false, hide = true)]
+        require_llm: bool,
     },
     /// Run the LLM-assisted factory loop (ICs -> sim -> discovery -> judge).
     #[command(alias = "experiment")]
@@ -291,6 +294,21 @@ enum Commands {
         /// OpenAI API key file (overrides OPENAI_API_KEY).
         #[arg(long)]
         openai_key_file: Option<PathBuf>,
+        /// Require a reachable OpenAI-compatible LLM (fail instead of falling back to mock).
+        #[arg(long, default_value_t = false)]
+        require_llm: bool,
+    },
+    /// Generate a LaTeX (and optionally PDF) findings report from `results/best_results.json`.
+    Findings {
+        /// Results directory (contains `best_results.json`).
+        #[arg(long, default_value = "results")]
+        results_dir: PathBuf,
+        /// Output TeX path.
+        #[arg(long, default_value = "results/findings.tex")]
+        out_tex: PathBuf,
+        /// Do not attempt to build a PDF via pdflatex.
+        #[arg(long)]
+        no_pdf: bool,
     },
 }
 
@@ -441,8 +459,9 @@ fn main() -> anyhow::Result<()> {
             out_dir,
             steps,
             max_iters,
+            require_llm,
         } => {
-            run_quickstart(out_dir, steps, max_iters)?;
+            run_quickstart(out_dir, steps, max_iters, require_llm)?;
         }
         Commands::Factory {
             out_dir,
@@ -472,6 +491,7 @@ fn main() -> anyhow::Result<()> {
             llm_mode,
             model,
             openai_key_file,
+            require_llm,
         } => {
             let solver_settings = DiscoverySolverSettings {
                 solver: parse_discovery_solver(&solver)?,
@@ -512,13 +532,21 @@ fn main() -> anyhow::Result<()> {
                 llm_mode,
                 model,
                 openai_key_file,
+                require_llm,
             )?;
+        }
+        Commands::Findings {
+            results_dir,
+            out_tex,
+            no_pdf,
+        } => {
+            run_findings(results_dir, out_tex, !no_pdf)?;
         }
     }
     Ok(())
 }
 
-fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize) -> anyhow::Result<()> {
+fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize, require_llm: bool) -> anyhow::Result<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let out_dir = out_dir.unwrap_or_else(|| {
@@ -568,6 +596,7 @@ fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize) -> a
         "auto".to_string(),
         "gpt-5.2".to_string(),
         None,
+        require_llm,
     )?;
 
     // Copy a single novice-friendly artifact to the quickstart root.
@@ -580,11 +609,90 @@ fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize) -> a
         let _ = fs::copy(&eval_pdf, out_dir.join("RESULTS.pdf"));
     }
 
+    update_best_results_index_best_effort(std::path::Path::new("results"));
+
     println!("Quickstart complete: {}", out_dir.display());
     println!("Key outputs:");
     println!("- {}/RESULTS.md", out_dir.display());
     println!("- {}/RESULTS.pdf (if built)", out_dir.display());
     println!("- {}/factory/ (evidence + per-iteration artifacts)", out_dir.display());
+    Ok(())
+}
+
+fn run_findings(results_dir: PathBuf, out_tex: PathBuf, build_pdf: bool) -> anyhow::Result<()> {
+    update_best_results_index_best_effort(&results_dir);
+    let index = load_best_results_index(&results_dir)
+        .or_else(|| scan_best_results(&results_dir).ok())
+        .ok_or_else(|| anyhow::anyhow!("no best_results found; run quickstart/factory first"))?;
+
+    if let Some(parent) = out_tex.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let progress = compute_bucket_progress(&results_dir, &index).unwrap_or_default();
+    let tex = render_findings_tex(&index, &progress);
+    fs::write(&out_tex, tex)?;
+    println!("Findings TeX written -> {}", out_tex.display());
+
+    if !build_pdf {
+        return Ok(());
+    }
+    let Some(pdflatex) = find_pdflatex() else {
+        eprintln!("pdflatex not found; skipped findings PDF build.");
+        return Ok(());
+    };
+
+    let tex_dir = out_tex.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let tex_name = out_tex
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid out_tex filename"))?;
+    let output = std::process::Command::new(&pdflatex)
+        .current_dir(tex_dir)
+        .args(["-interaction=nonstopmode", tex_name])
+        .output();
+    let pdf_path = out_tex.with_extension("pdf");
+    match output {
+        Ok(out) => {
+            if !out.status.success() && !pdf_path.exists() {
+                let stem = out_tex
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("findings");
+                let err_path = tex_dir.join(format!("{stem}_pdf_error.txt"));
+                let mut msg = String::new();
+                msg.push_str("pdflatex failed\n");
+                msg.push_str("stdout:\n");
+                msg.push_str(&String::from_utf8_lossy(&out.stdout));
+                msg.push_str("\nstderr:\n");
+                msg.push_str(&String::from_utf8_lossy(&out.stderr));
+                let _ = fs::write(err_path, msg);
+            }
+        }
+        Err(err) => {
+            if !pdf_path.exists() {
+                let stem = out_tex
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("findings");
+                let err_path = tex_dir.join(format!("{stem}_pdf_error.txt"));
+                let _ = fs::write(err_path, format!("failed to run pdflatex: {err}"));
+            }
+        }
+    }
+    if pdf_path.exists() {
+        println!("Findings PDF written -> {}", pdf_path.display());
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let stem = out_tex
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("findings");
+        let stamped = tex_dir.join(format!("{stem}_{secs}.pdf"));
+        let _ = fs::copy(&pdf_path, &stamped);
+        println!("Findings PDF (timestamped) -> {}", stamped.display());
+    }
     Ok(())
 }
 
@@ -1813,14 +1921,34 @@ fn select_llm_client(
     mode: LlmMode,
     model: &str,
     openai_key_file: Option<&std::path::Path>,
+    require_llm: bool,
 ) -> anyhow::Result<Option<Box<dyn LlmClient>>> {
     match mode {
-        LlmMode::Off => Ok(None),
-        LlmMode::Mock => Ok(Some(Box::new(MockLlm))),
-        LlmMode::Auto => Ok(Some(Box::new(AutoLlmClient::from_env_or_file(
-            model,
-            openai_key_file,
-        )))),
+        LlmMode::Off => {
+            if require_llm {
+                anyhow::bail!("LLM required but --llm-mode off was selected");
+            }
+            Ok(None)
+        }
+        LlmMode::Mock => {
+            if require_llm {
+                anyhow::bail!("LLM required but --llm-mode mock was selected");
+            }
+            Ok(Some(Box::new(MockLlm)))
+        }
+        LlmMode::Auto => {
+            if require_llm {
+                Ok(Some(Box::new(OpenAIClient::from_env_or_file(
+                    model,
+                    openai_key_file,
+                )?)))
+            } else {
+                Ok(Some(Box::new(AutoLlmClient::from_env_or_file(
+                    model,
+                    openai_key_file,
+                ))))
+            }
+        }
         LlmMode::OpenAI => Ok(Some(Box::new(OpenAIClient::from_env_or_file(
             model,
             openai_key_file,
@@ -1849,15 +1977,33 @@ fn run_factory(
     llm_mode: String,
     model: String,
     openai_key_file: Option<PathBuf>,
+    require_llm: bool,
 ) -> anyhow::Result<()> {
     fs::create_dir_all(&out_dir)?;
     let mut next_ic: Option<InitialConditionSpec> = None;
     let llm_mode = parse_llm_mode(&llm_mode)?;
-    let llm_client = select_llm_client(llm_mode, &model, openai_key_file.as_deref())?;
+    let llm_client = select_llm_client(llm_mode, &model, openai_key_file.as_deref(), require_llm)?;
     let mut current_fitness = parse_fitness_heuristic(&fitness)?;
     let mut current_rollout = parse_rollout_integrator(&rollout_integrator)?;
     let mut current_solver = solver_settings;
     let mut evaluation_iterations: Vec<FactoryEvaluationIteration> = Vec::new();
+    let incumbent_bucket = BucketKey { steps, dt };
+    let incumbent = load_incumbent_for_bucket(std::path::Path::new("results"), &incumbent_bucket);
+
+    if require_llm {
+        let Some(client) = llm_client.as_ref() else {
+            anyhow::bail!("LLM required but no client is configured");
+        };
+        let preflight = IcRequest {
+            bounds: default_ic_bounds(),
+            regime: "gravity_only".to_string(),
+            notes: vec!["llm_preflight=true".to_string()],
+            seed: Some(seed),
+        };
+        client
+            .propose_initial_conditions(&preflight)
+            .map_err(|e| anyhow::anyhow!("LLM preflight failed: {e}"))?;
+    }
 
     for iter in 0..max_iters {
         let run_id = format!("run_{:03}", iter + 1);
@@ -1867,32 +2013,78 @@ fn run_factory(
         let cfg = build_config(config.clone(), &mode, None, em, no_em, no_gravity)?;
         let regime = if cfg.enable_em { "em_quasistatic" } else { "gravity_only" };
         let ic_bounds = default_ic_bounds();
-        let ic_request = IcRequest {
-            bounds: ic_bounds.clone(),
-            regime: regime.to_string(),
-            notes: vec!["avoid close encounters".to_string(), "prefer bounded motion".to_string()],
-            seed: Some(seed + iter as u64),
-        };
+        let mut ic_notes = vec!["avoid close encounters".to_string(), "prefer bounded motion".to_string()];
+        if let Some(rec) = incumbent.as_ref() {
+            ic_notes.extend(incumbent_prompt_notes(rec));
+        }
 
         let mut ic_prompt = None;
         let mut ic_response = None;
-        let ic_spec = if let Some(spec) = next_ic.take() {
-            spec
-        } else if let Some(client) = llm_client.as_ref() {
-            match client.propose_initial_conditions(&ic_request) {
-                Ok(result) => {
-                    ic_prompt = Some(result.prompt);
-                    ic_response = Some(result.response);
-                    result.value
+        let max_ic_attempts = if require_llm { 3 } else { 1 };
+        let mut ic_request: IcRequest;
+        let mut ic_spec: InitialConditionSpec;
+        let system: System;
+        let mut last_err: Option<String> = None;
+        let mut ic_attempt: usize = 0;
+
+        'ic_loop: loop {
+            ic_attempt += 1;
+            let mut attempt_notes = ic_notes.clone();
+            if let Some(err) = last_err.as_ref() {
+                attempt_notes.push(format!("previous_ic_validation_error={}", single_line(err)));
+            }
+            ic_request = IcRequest {
+                bounds: ic_bounds.clone(),
+                regime: regime.to_string(),
+                notes: attempt_notes,
+                seed: Some(seed + iter as u64 + (ic_attempt as u64).saturating_sub(1)),
+            };
+
+            let candidate = if let Some(spec) = next_ic.take() {
+                spec
+            } else if let Some(client) = llm_client.as_ref() {
+                match client.propose_initial_conditions(&ic_request) {
+                    Ok(result) => {
+                        ic_prompt = Some(result.prompt);
+                        ic_response = Some(result.response);
+                        result.value
+                    }
+                    Err(err) => {
+                        if require_llm {
+                            return Err(anyhow::anyhow!("LLM IC proposal failed: {err}"));
+                        }
+                        eprintln!("LLM IC proposal failed: {}", err);
+                        initial_conditions_from_preset(&preset)?
+                    }
+                }
+            } else if require_llm {
+                anyhow::bail!("LLM required but no client is configured");
+            } else {
+                initial_conditions_from_preset(&preset)?
+            };
+            ic_spec = candidate;
+
+            match system_from_ic(&ic_spec, &ic_bounds) {
+                Ok(sys) => {
+                    system = sys;
+                    break 'ic_loop;
                 }
                 Err(err) => {
-                    eprintln!("LLM IC proposal failed: {}", err);
-                    initial_conditions_from_preset(&preset)?
+                    if !require_llm {
+                        eprintln!("IC validation failed ({err}); falling back to preset.");
+                        ic_spec = initial_conditions_from_preset(&preset)?;
+                        system = preset_system(&preset)?;
+                        break 'ic_loop;
+                    }
+                    last_err = Some(err.to_string());
+                    if ic_attempt >= max_ic_attempts {
+                        anyhow::bail!("IC validation failed after {max_ic_attempts} attempts: {err}");
+                    }
+                    eprintln!("IC validation failed ({err}); retrying with LLM.");
+                    continue 'ic_loop;
                 }
             }
-        } else {
-            initial_conditions_from_preset(&preset)?
-        };
+        }
 
         let ic_request_path = run_dir.join("ic_request.json");
         fs::write(&ic_request_path, serde_json::to_string_pretty(&ic_request)?)?;
@@ -1900,14 +2092,6 @@ fn run_factory(
         fs::write(&ic_spec_path, serde_json::to_string_pretty(&ic_spec)?)?;
         let cfg_path = run_dir.join("config.json");
         fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
-
-        let system = match system_from_ic(&ic_spec, &ic_bounds) {
-            Ok(sys) => sys,
-            Err(err) => {
-                eprintln!("IC validation failed ({err}); falling back to preset.");
-                preset_system(&preset)?
-            }
-        };
 
         let options = SimOptions { steps, dt };
         let result = simulate_with_cfg(system, &cfg, options);
@@ -2023,6 +2207,9 @@ fn run_factory(
             Some(sim_summary.clone()),
             regime,
         );
+        if let Some(rec) = incumbent.as_ref() {
+            judge_input.notes.extend(incumbent_prompt_notes(rec));
+        }
         judge_input
             .notes
             .push(format!("fitness_heuristic={}", current_fitness.as_str()));
@@ -2070,15 +2257,23 @@ fn run_factory(
                     if resp.validate(&judge_input).is_ok() {
                         Some(resp)
                     } else {
+                        if require_llm {
+                            anyhow::bail!("LLM judge response failed validation");
+                        }
                         eprintln!("LLM judge response failed validation");
                         None
                     }
                 }
                 Err(err) => {
+                    if require_llm {
+                        return Err(anyhow::anyhow!("LLM judge failed: {err}"));
+                    }
                     eprintln!("LLM judge failed: {}", err);
                     None
                 }
             }
+        } else if require_llm {
+            anyhow::bail!("LLM required but no client is configured");
         } else {
             None
         };
@@ -2410,20 +2605,6 @@ fn run_factory(
     fs::write(&eval_tex_path, eval_tex)?;
 
     // Best-effort PDF build when pdflatex is available.
-    fn find_pdflatex() -> Option<PathBuf> {
-        for candidate in ["pdflatex", "/Library/TeX/texbin/pdflatex"] {
-            let ok = std::process::Command::new(candidate)
-                .arg("--version")
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false);
-            if ok {
-                return Some(PathBuf::from(candidate));
-            }
-        }
-        None
-    }
-
     if let Some(pdflatex) = find_pdflatex() {
         let output = std::process::Command::new(&pdflatex)
             .current_dir(&out_dir)
@@ -2472,6 +2653,9 @@ fn run_factory(
                 raw_md = res.value;
             }
             Err(err) => {
+                if require_llm {
+                    return Err(anyhow::anyhow!("LLM evaluation failed: {err}"));
+                }
                 eprintln!("LLM evaluation failed: {}", err);
                 fs::write(out_dir.join("evaluation_error.txt"), err.to_string())?;
                 let fallback = MockLlm.explain_factory_evaluation(&eval_input)?;
@@ -2480,6 +2664,8 @@ fn run_factory(
                 raw_md.push_str(&fallback.value);
             }
         }
+    } else if require_llm {
+        anyhow::bail!("LLM required but `--llm-mode off` was selected");
     } else {
         prompt_text = "LLM evaluation disabled (`--llm-mode off`).".to_string();
         raw_md.push_str("# Factory Evaluation\n\n");
@@ -2494,6 +2680,8 @@ fn run_factory(
     fs::write(&eval_prompt_path, prompt_text)?;
     fs::write(&eval_llm_md_path, &raw_md)?;
     fs::write(&eval_md_path, exec_md)?;
+
+    update_best_results_index_best_effort(std::path::Path::new("results"));
 
     println!("Factory evaluation written -> {}", eval_md_path.display());
     Ok(())
@@ -2639,6 +2827,519 @@ fn find_best_prior_attempt(
     }
 
     Ok(best_prior)
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+struct BucketKey {
+    steps: usize,
+    dt: f64,
+}
+
+impl BucketKey {
+    fn matches(&self, other: &BucketKey) -> bool {
+        self.steps == other.steps && (self.dt - other.dt).abs() <= 1e-12
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+struct BestRecord {
+    bucket: BucketKey,
+    run_dir: String,
+    factory_dir: String,
+    eval_input_path: String,
+    run_id: String,
+    regime: String,
+    equation_text: String,
+    metrics: CandidateMetrics,
+    ic: Option<InitialConditionSpec>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+struct BestResultsIndexV1 {
+    version: String,
+    updated_at_utc: String,
+    buckets: Vec<BestRecord>,
+    notes: Vec<String>,
+}
+
+fn updated_at_unix_utc() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("unix_seconds={secs}")
+}
+
+fn bucket_from_notes(notes: &[String]) -> Option<BucketKey> {
+    fn find_value<'a>(notes: &'a [String], key: &str) -> Option<&'a str> {
+        let prefix = format!("{key}=");
+        for note in notes {
+            if let Some(rest) = note.strip_prefix(&prefix) {
+                return Some(rest);
+            }
+        }
+        None
+    }
+    let steps = find_value(notes, "steps").and_then(|v| v.parse::<usize>().ok())?;
+    let dt = find_value(notes, "dt").and_then(|v| v.parse::<f64>().ok())?;
+    Some(BucketKey { steps, dt })
+}
+
+fn collect_factory_eval_input_paths(root: &std::path::Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_factory_eval_input_paths(&path, out)?;
+            continue;
+        }
+        if path.file_name().and_then(|s| s.to_str()) != Some("evaluation_input.json") {
+            continue;
+        }
+        let parent_is_factory = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .and_then(|s| s.to_str())
+            == Some("factory");
+        if parent_is_factory {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn best_record_from_eval_input_path(path: &std::path::Path) -> Option<BestRecord> {
+    let raw = fs::read_to_string(path).ok()?;
+    let input: FactoryEvaluationInput = serde_json::from_str(&raw).ok()?;
+    let bucket = bucket_from_notes(&input.notes)?;
+    let best = best_candidate_from_eval_input(&input)?;
+
+    let factory_dir = path.parent()?.to_path_buf();
+    let run_dir = factory_dir
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf();
+
+    let ic: Option<InitialConditionSpec> = fs::read_to_string(factory_dir.join(&best.run_id).join("initial_conditions.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+
+    Some(BestRecord {
+        bucket,
+        run_dir: run_dir.to_string_lossy().to_string(),
+        factory_dir: factory_dir.to_string_lossy().to_string(),
+        eval_input_path: path.to_string_lossy().to_string(),
+        run_id: best.run_id,
+        regime: best.regime,
+        equation_text: best.candidate.equation_text,
+        metrics: best.candidate.metrics,
+        ic,
+    })
+}
+
+fn scan_best_results(results_root: &std::path::Path) -> anyhow::Result<BestResultsIndexV1> {
+    let mut paths = Vec::new();
+    collect_factory_eval_input_paths(results_root, &mut paths)?;
+    let mut buckets: Vec<BestRecord> = Vec::new();
+
+    for path in paths {
+        let record = match best_record_from_eval_input_path(&path) {
+            Some(v) => v,
+            None => continue,
+        };
+        let key = metrics_sort_key(&record.metrics);
+        let existing_idx = buckets
+            .iter()
+            .position(|e| e.bucket.matches(&record.bucket));
+        if let Some(idx) = existing_idx {
+            let existing_key = metrics_sort_key(&buckets[idx].metrics);
+            if key < existing_key || (key == existing_key && record.eval_input_path < buckets[idx].eval_input_path) {
+                buckets[idx] = record;
+            }
+        } else {
+            buckets.push(record);
+        }
+    }
+
+    buckets.sort_by(|a, b| {
+        a.bucket
+            .steps
+            .cmp(&b.bucket.steps)
+            .then_with(|| a.bucket.dt.partial_cmp(&b.bucket.dt).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| a.eval_input_path.cmp(&b.eval_input_path))
+    });
+
+    Ok(BestResultsIndexV1 {
+        version: "v1".to_string(),
+        updated_at_utc: updated_at_unix_utc(),
+        buckets,
+        notes: vec![
+            "Selection rule: minimize (rollout_rmse, mse, complexity).".to_string(),
+            "Buckets are grouped by (steps, dt).".to_string(),
+            "Only */factory/evaluation_input.json files are considered.".to_string(),
+        ],
+    })
+}
+
+fn format_metric_opt(v: Option<f64>) -> String {
+    match v {
+        Some(x) if x.is_finite() => format!("{x:.6}"),
+        Some(_) => "nan".to_string(),
+        None => "n/a".to_string(),
+    }
+}
+
+fn render_best_results_md(index: &BestResultsIndexV1) -> String {
+    let mut md = String::new();
+    md.push_str("# Best Results (auto-updated)\n\n");
+    md.push_str(&format!("Last updated: `{}`\n\n", index.updated_at_utc));
+
+    md.push_str("## Executive Summary\n\n");
+    md.push_str("- This file is the single top-level place to see the best discovered equations so far.\n");
+    md.push_str("- Comparator: minimize `rollout_rmse`, then `mse`, then `complexity`.\n");
+    md.push_str("- Buckets: grouped by `(steps, dt)` to avoid apples-to-oranges comparisons.\n");
+    if index.buckets.is_empty() {
+        md.push_str("\nNo runs found yet under `results/**/factory/evaluation_input.json`.\n");
+        return md;
+    }
+    md.push_str("\nTracked buckets:\n");
+    for rec in &index.buckets {
+        md.push_str(&format!("- steps={}, dt={}\n", rec.bucket.steps, rec.bucket.dt));
+    }
+
+    md.push_str("\n## Current Incumbents\n\n");
+    for rec in &index.buckets {
+        md.push_str(&format!("### steps={}, dt={}\n\n", rec.bucket.steps, rec.bucket.dt));
+        md.push_str(&format!(
+            "- Best metrics: rollout_rmse={}, mse={:.6e}, complexity={}, divergence_time={}\n",
+            format_metric_opt(rec.metrics.rollout_rmse),
+            rec.metrics.mse,
+            rec.metrics.complexity,
+            format_metric_opt(rec.metrics.divergence_time),
+        ));
+        md.push_str("- Best equation (exact):\n");
+        md.push_str("```text\n");
+        md.push_str(&rec.equation_text);
+        md.push_str("\n```\n\n");
+        md.push_str(&format!("- Evidence: `{}/RESULTS.md`\n", rec.run_dir));
+        md.push_str(&format!("- Raw: `{}`\n\n", rec.eval_input_path));
+    }
+
+    md.push_str("## Next Experiment (for humans and LLMs)\n\n");
+    md.push_str("- Goal: reduce `rollout_rmse` without increasing `complexity`.\n");
+    md.push_str("- If `mse` is tiny but `rollout_rmse` is large, the model fits accelerations but rolls out poorly (instability).\n");
+    md.push_str("- Report improvements by attaching:\n");
+    md.push_str("  - `results/best_results.md`\n");
+    md.push_str("  - the run’s `RESULTS.md`\n");
+    md.push_str("  - the run’s `factory/evaluation_input.json`\n");
+
+    md
+}
+
+#[derive(Clone, Debug)]
+struct BucketProgress {
+    bucket: BucketKey,
+    attempts: usize,
+    first: BestRecord,
+    best: BestRecord,
+}
+
+fn compute_bucket_progress(
+    results_root: &std::path::Path,
+    index: &BestResultsIndexV1,
+) -> anyhow::Result<Vec<BucketProgress>> {
+    let mut paths = Vec::new();
+    collect_factory_eval_input_paths(results_root, &mut paths)?;
+    let mut records: Vec<BestRecord> = Vec::new();
+    for path in paths {
+        if let Some(rec) = best_record_from_eval_input_path(&path) {
+            records.push(rec);
+        }
+    }
+
+    let mut out: Vec<BucketProgress> = Vec::new();
+    for best in &index.buckets {
+        let mut bucket_records: Vec<BestRecord> = records
+            .iter()
+            .filter(|r| r.bucket.matches(&best.bucket))
+            .cloned()
+            .collect();
+        if bucket_records.is_empty() {
+            continue;
+        }
+        bucket_records.sort_by(|a, b| a.eval_input_path.cmp(&b.eval_input_path));
+        let first = bucket_records[0].clone();
+        out.push(BucketProgress {
+            bucket: best.bucket.clone(),
+            attempts: bucket_records.len(),
+            first,
+            best: best.clone(),
+        });
+    }
+    out.sort_by(|a, b| {
+        a.bucket
+            .steps
+            .cmp(&b.bucket.steps)
+            .then_with(|| a.bucket.dt.partial_cmp(&b.bucket.dt).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    Ok(out)
+}
+
+fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) -> String {
+    let mut tex = String::new();
+    tex.push_str("\\documentclass[11pt]{article}\n");
+    tex.push_str("\\usepackage[margin=1in]{geometry}\n");
+    tex.push_str("\\usepackage{amsmath}\n");
+    tex.push_str("\\usepackage{booktabs}\n");
+    tex.push_str("\\usepackage{longtable}\n");
+    tex.push_str("\\usepackage{hyperref}\n");
+    tex.push_str("\\title{Threebody: Best Discovered Equations (Auto-Generated)}\n");
+    tex.push_str(&format!("\\date{{{}}}\n", escape_latex(&index.updated_at_utc)));
+    tex.push_str("\\begin{document}\n");
+    tex.push_str("\\maketitle\n\n");
+
+    tex.push_str("\\section*{Executive Summary}\n");
+    tex.push_str("This report summarizes the best equation(s) discovered by local runs of the threebody system.\\\\\n");
+    tex.push_str("Comparator: minimize rollout\\_rmse, then mse, then complexity (lower is better).\\\\\n");
+    tex.push_str("Buckets are grouped by (steps, dt) to avoid apples-to-oranges comparisons.\\\\\n\n");
+
+    tex.push_str("\\section*{Plain-language context: state of the art}\n");
+    tex.push_str("The modern (``state of the art'') way to discover equations from data usually looks like this:\\\\\n");
+    tex.push_str("\\begin{itemize}\n");
+    tex.push_str("  \\item Choose a menu (a \\emph{library}) of candidate building blocks (e.g., gravity-like terms).\n");
+    tex.push_str("  \\item Fit a sparse combination using sparse regression (STLS/LASSO), so most coefficients become exactly zero.\n");
+    tex.push_str("  \\item Validate the equation by simulating it forward (a \\emph{rollout}) and comparing trajectories, not just instantaneous fit.\n");
+    tex.push_str("\\end{itemize}\n");
+    tex.push_str("In plain terms: a good equation is one that stays accurate \\emph{over time}, not just one that matches one step.\\\\\n\n");
+
+    tex.push_str("\\section*{Did we improve (over local history)?}\n");
+    tex.push_str("For each bucket (steps, dt), we compare the first recorded attempt to the best found so far.\\\\\n");
+    tex.push_str("\\begin{longtable}{lrrrr}\n");
+    tex.push_str("\\toprule\n");
+    tex.push_str("Bucket & Runs & First rollout\\_rmse & Best rollout\\_rmse & Improvement\\\\\n");
+    tex.push_str("\\midrule\n");
+    for p in progress {
+        let first = p.first.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+        let best = p.best.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+        let improvement = if first.is_finite() && best.is_finite() && first > 0.0 {
+            let delta = first - best;
+            if delta.abs() <= 1e-12 {
+                "no change".to_string()
+            } else {
+                format!("{:+.6} ({:+.1}\\%)", delta, (delta / first) * 100.0)
+            }
+        } else {
+            "n/a".to_string()
+        };
+        tex.push_str(&format!(
+            "steps={} dt={} & {} & {} & {} & {}\\\\\n",
+            p.bucket.steps,
+            p.bucket.dt,
+            p.attempts,
+            format_opt_f64(p.first.metrics.rollout_rmse),
+            format_opt_f64(p.best.metrics.rollout_rmse),
+            improvement
+        ));
+    }
+    tex.push_str("\\bottomrule\n");
+    tex.push_str("\\end{longtable}\n\n");
+    tex.push_str("If the improvement says ``no change'', it typically means we are deterministically rediscovering the same law with the same settings, or that the discovery problem is already saturated under the current feature library.\\\\\n\n");
+
+    if index.buckets.is_empty() {
+        tex.push_str("No runs found yet under \\texttt{results/**/factory/evaluation\\_input.json}.\\\\\n\n");
+        tex.push_str("\\end{document}\n");
+        return tex;
+    }
+
+    let highlight = index
+        .buckets
+        .iter()
+        .max_by(|a, b| a.bucket.steps.cmp(&b.bucket.steps).then_with(|| a.bucket.dt.partial_cmp(&b.bucket.dt).unwrap_or(std::cmp::Ordering::Equal)));
+    if let Some(best) = highlight {
+        tex.push_str("\\subsection*{Most stringent bucket (largest steps)}\n");
+        tex.push_str(&format!(
+            "steps={}, dt={}. Best metrics: rollout\\_rmse={}, mse={:.6e}, complexity={}.\\\\\n",
+            best.bucket.steps,
+            best.bucket.dt,
+            format_opt_f64(best.metrics.rollout_rmse),
+            best.metrics.mse,
+            best.metrics.complexity
+        ));
+        tex.push_str("Best equation (exact):\n");
+        tex.push_str("\\begin{verbatim}\n");
+        tex.push_str(&best.equation_text);
+        tex.push_str("\n\\end{verbatim}\n\n");
+    }
+
+    tex.push_str("\\section*{Best Results by Bucket}\n\n");
+    for rec in &index.buckets {
+        tex.push_str(&format!(
+            "\\subsection*{{steps={}, dt={}}}\n",
+            rec.bucket.steps, rec.bucket.dt
+        ));
+        tex.push_str(&format!(
+            "Metrics: rollout\\_rmse={}, mse={:.6e}, complexity={}, divergence\\_time={}.\\\\\n\n",
+            format_opt_f64(rec.metrics.rollout_rmse),
+            rec.metrics.mse,
+            rec.metrics.complexity,
+            format_opt_f64(rec.metrics.divergence_time)
+        ));
+
+        tex.push_str("\\paragraph{Best equation (exact)}\n");
+        tex.push_str("\\begin{verbatim}\n");
+        tex.push_str(&rec.equation_text);
+        tex.push_str("\n\\end{verbatim}\n\n");
+
+        tex.push_str("\\paragraph{Math formula (expanded)}\n");
+        tex.push_str(&render_expanded_math_tex(&rec.equation_text));
+
+        tex.push_str("\\paragraph{Evidence}\\\\\n");
+        tex.push_str(&format!(
+            "Run directory: \\texttt{{{}}}.\\\\\n",
+            escape_latex(&rec.run_dir)
+        ));
+        tex.push_str(&format!(
+            "Eval input: \\texttt{{{}}}.\\\\\n\n",
+            escape_latex(&rec.eval_input_path)
+        ));
+
+        tex.push_str("\\paragraph{Initial conditions (best run)}\n");
+        if let Some(ic) = rec.ic.as_ref() {
+            tex.push_str(&format!(
+                "Barycentric: \\texttt{{{}}}.\\\\\n",
+                if ic.barycentric { "true" } else { "false" }
+            ));
+            tex.push_str(&format!("Notes: \\texttt{{{}}}.\\\\\n\n", escape_latex(&ic.notes)));
+            tex.push_str("\\begin{longtable}{lrrrrrrrr}\n");
+            tex.push_str("\\toprule\n");
+            tex.push_str("Body & m & q & x & y & z & v_x & v_y & v_z\\\\\n");
+            tex.push_str("\\midrule\n");
+            for (i, b) in ic.bodies.iter().enumerate() {
+                tex.push_str(&format!(
+                    "{} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6}\\\\\n",
+                    i,
+                    b.mass,
+                    b.charge,
+                    b.pos[0],
+                    b.pos[1],
+                    b.pos[2],
+                    b.vel[0],
+                    b.vel[1],
+                    b.vel[2],
+                ));
+            }
+            tex.push_str("\\bottomrule\n");
+            tex.push_str("\\end{longtable}\n\n");
+        } else {
+            tex.push_str("N/A.\\\\\n\n");
+        }
+    }
+
+    tex.push_str("\\section*{How to Reproduce}\n");
+    tex.push_str("The simplest workflow runs 10 quickstarts and then regenerates this report:\\\\\n");
+    tex.push_str("\\begin{verbatim}\n");
+    tex.push_str("just quickstart10 1000\n");
+    tex.push_str("cargo run -p threebody-cli -- findings\n");
+    tex.push_str("\\end{verbatim}\n\n");
+
+    tex.push_str("\\section*{How to Report Improvements (Novice-Friendly)}\n");
+    tex.push_str("An improvement is typically a lower rollout\\_rmse at the same (or lower) complexity in the same bucket (steps, dt).\\\\\n");
+    tex.push_str("Attach these files when reporting:\\\\\n");
+    tex.push_str("\\begin{itemize}\n");
+    tex.push_str("  \\item \\texttt{results/best\\_results.md}\n");
+    tex.push_str("  \\item \\texttt{results/<run>/RESULTS.md}\n");
+    tex.push_str("  \\item \\texttt{results/<run>/factory/evaluation\\_input.json}\n");
+    tex.push_str("\\end{itemize}\n\n");
+
+    tex.push_str("\\end{document}\n");
+    tex
+}
+
+fn write_best_results(results_root: &std::path::Path, index: &BestResultsIndexV1) -> anyhow::Result<()> {
+    fs::create_dir_all(results_root)?;
+    let json_path = results_root.join("best_results.json");
+    let md_path = results_root.join("best_results.md");
+    fs::write(&json_path, serde_json::to_string_pretty(index)?)?;
+    fs::write(&md_path, render_best_results_md(index))?;
+    Ok(())
+}
+
+fn update_best_results_index_best_effort(results_root: &std::path::Path) {
+    match scan_best_results(results_root).and_then(|idx| write_best_results(results_root, &idx)) {
+        Ok(_) => {}
+        Err(err) => eprintln!("WARN: failed to update best_results index: {err}"),
+    }
+}
+
+fn truncate_to_chars(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+    let mut out: String = input.chars().take(max_chars).collect();
+    out.push_str("…");
+    out
+}
+
+fn single_line(input: &str) -> String {
+    input
+        .replace(['\r', '\n', '\t'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn find_pdflatex() -> Option<PathBuf> {
+    for candidate in ["pdflatex", "/Library/TeX/texbin/pdflatex"] {
+        let ok = std::process::Command::new(candidate)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if ok {
+            return Some(PathBuf::from(candidate));
+        }
+    }
+    None
+}
+
+fn load_best_results_index(results_root: &std::path::Path) -> Option<BestResultsIndexV1> {
+    let path = results_root.join("best_results.json");
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn load_incumbent_for_bucket(results_root: &std::path::Path, bucket: &BucketKey) -> Option<BestRecord> {
+    if let Some(index) = load_best_results_index(results_root) {
+        if let Some(hit) = index.buckets.into_iter().find(|r| r.bucket.matches(bucket)) {
+            return Some(hit);
+        }
+    }
+    // Fallback: scan the tree (best-effort).
+    if let Ok(index) = scan_best_results(results_root) {
+        if let Some(hit) = index.buckets.into_iter().find(|r| r.bucket.matches(bucket)) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn incumbent_prompt_notes(record: &BestRecord) -> Vec<String> {
+    let eq = truncate_to_chars(&single_line(&record.equation_text), 500);
+    vec![
+        format!("INCUMBENT_BEST_EQUATION: {eq}"),
+        format!(
+            "INCUMBENT_BEST_METRICS: rollout_rmse={}, mse={:.6e}, complexity={}",
+            format_metric_opt(record.metrics.rollout_rmse),
+            record.metrics.mse,
+            record.metrics.complexity
+        ),
+        format!("INCUMBENT_SOURCE_RUN_DIR: {}", record.run_dir),
+        "GOAL: reduce rollout_rmse without increasing complexity.".to_string(),
+    ]
 }
 
 fn escape_latex(input: &str) -> String {
@@ -2882,6 +3583,70 @@ struct IncumbentEvalOnBestRun {
     complexity: usize,
 }
 
+fn render_expanded_math_tex(equation_text: &str) -> String {
+    let usage = basis_usage_from_equation_text(equation_text);
+    let [tx, ty, tz] = parse_vector_equation_terms(equation_text);
+
+    fn render_component(axis: char, terms: &[(f64, String)]) -> String {
+        if terms.is_empty() {
+            return "0".to_string();
+        }
+        let mut out = String::new();
+        for (i, (coeff, feature)) in terms.iter().enumerate() {
+            let sign = if *coeff >= 0.0 { "+" } else { "-" };
+            let abs = coeff.abs();
+            if i == 0 {
+                if sign == "-" {
+                    out.push_str("-");
+                }
+            } else {
+                out.push_str(" ");
+                out.push_str(sign);
+                out.push_str(" ");
+            }
+            let symbol = feature_to_tex_symbol(feature, axis);
+            out.push_str(&format!("{abs:.6}\\,{symbol}"));
+        }
+        out
+    }
+
+    let mut tex = String::new();
+    tex.push_str("\\begin{align*}\n");
+    tex.push_str(&format!(
+        "a_{{i,x}} &\\approx {}\\\\\n",
+        render_component('x', &tx)
+    ));
+    tex.push_str(&format!(
+        "a_{{i,y}} &\\approx {}\\\\\n",
+        render_component('y', &ty)
+    ));
+    tex.push_str(&format!(
+        "a_{{i,z}} &\\approx {}\n",
+        render_component('z', &tz)
+    ));
+    tex.push_str("\\end{align*}\n\n");
+
+    tex.push_str("\\noindent Basis definitions used by the feature library:\n\n");
+    tex.push_str("\\begin{align*}\n");
+    if usage.grav {
+        tex.push_str(
+            "g_i^* &= \\sum_{j\\ne i} m_j\\, \\frac{r_j - r_i}{\\lVert r_j - r_i \\rVert^3} \\quad (\\text{no }G)\\\\\n",
+        );
+    }
+    if usage.elec {
+        tex.push_str("e_i^* &= (q_i/m_i)\\, \\sum_{j\\ne i} q_j\\, \\frac{r_i - r_j}{\\lVert r_i - r_j \\rVert^3} \\quad (\\text{no }k_e)\\\\\n");
+    }
+    if usage.mag {
+        tex.push_str("B_i^* &= (1/4\\pi)\\, \\sum_{j\\ne i} q_j\\, \\frac{v_j \\times (r_i - r_j)}{\\lVert r_i - r_j \\rVert^3} \\quad (\\text{no }\\mu_0)\\\\\n");
+        tex.push_str("b_i^* &= (q_i/m_i)\\, (v_i \\times B_i^*) \\quad (\\text{no }\\mu_0)\\\\\n");
+    }
+    tex.push_str("\\end{align*}\n\n");
+    tex.push_str(
+        "\\noindent\\textbf{Note:} basis terms omit physical constants, so learned coefficients roughly match $G$, $k_e$, and $\\mu_0$ from the config.\n\n",
+    );
+    tex
+}
+
 fn render_evaluation_tex(
     eval_input: &FactoryEvaluationInput,
     current_best: Option<&BestFactoryCandidate>,
@@ -2956,65 +3721,7 @@ fn render_evaluation_tex(
 
     tex.push_str("\\section*{Math Formula (Expanded)}\n");
     if let Some(best) = current_best {
-        let usage = basis_usage_from_equation_text(&best.candidate.equation_text);
-        let [tx, ty, tz] = parse_vector_equation_terms(&best.candidate.equation_text);
-
-        fn render_component(axis: char, terms: &[(f64, String)]) -> String {
-            if terms.is_empty() {
-                return "0".to_string();
-            }
-            let mut out = String::new();
-            for (i, (coeff, feature)) in terms.iter().enumerate() {
-                let sign = if *coeff >= 0.0 { "+" } else { "-" };
-                let abs = coeff.abs();
-                if i == 0 {
-                    if sign == "-" {
-                        out.push_str("-");
-                    }
-                } else {
-                    out.push_str(" ");
-                    out.push_str(sign);
-                    out.push_str(" ");
-                }
-                let symbol = feature_to_tex_symbol(feature, axis);
-                out.push_str(&format!("{abs:.6}\\,{symbol}"));
-            }
-            out
-        }
-
-        tex.push_str("\\begin{align*}\n");
-        tex.push_str(&format!(
-            "a_{{i,x}} &\\approx {}\\\\\n",
-            render_component('x', &tx)
-        ));
-        tex.push_str(&format!(
-            "a_{{i,y}} &\\approx {}\\\\\n",
-            render_component('y', &ty)
-        ));
-        tex.push_str(&format!(
-            "a_{{i,z}} &\\approx {}\n",
-            render_component('z', &tz)
-        ));
-        tex.push_str("\\end{align*}\n\n");
-
-        tex.push_str("\\noindent Basis definitions used by the feature library:\n\n");
-        tex.push_str("\\begin{align*}\n");
-        if usage.grav {
-            tex.push_str(
-                "g_i^* &= \\sum_{j\\ne i} m_j\\, \\frac{r_j - r_i}{\\lVert r_j - r_i \\rVert^3} \\quad (\\text{no }G)\\\\\n",
-            );
-        }
-        if usage.elec {
-            tex.push_str("e_i^* &= (q_i/m_i)\\, \\sum_{j\\ne i} q_j\\, \\frac{r_i - r_j}{\\lVert r_i - r_j \\rVert^3} \\quad (\\text{no }k_e)\\\\\n");
-        }
-        if usage.mag {
-            tex.push_str("B_i^* &= (1/4\\pi)\\, \\sum_{j\\ne i} q_j\\, \\frac{v_j \\times (r_i - r_j)}{\\lVert r_i - r_j \\rVert^3} \\quad (\\text{no }\\mu_0)\\\\\n");
-            tex.push_str("b_i^* &= (q_i/m_i)\\, (v_i \\times B_i^*) \\quad (\\text{no }\\mu_0)\\\\\n");
-        }
-        tex.push_str("\\end{align*}\n\n");
-        tex.push_str(
-            "\\noindent\\textbf{Note:} basis terms omit physical constants, so learned coefficients roughly match $G$, $k_e$, and $\\mu_0$ from the config.\n\n",
-        );
+        tex.push_str(&render_expanded_math_tex(&best.candidate.equation_text));
     } else {
         tex.push_str("N/A.\n\n");
     }
@@ -3562,6 +4269,189 @@ mod tests {
             assert!(tex.contains(needle), "missing {needle}");
         }
         assert!(tex.contains("ax=+1*grav_x"));
+    }
+
+    fn mk_eval_input_with_notes(
+        steps: usize,
+        dt: f64,
+        rollout_rmse: f64,
+        mse: f64,
+        complexity: usize,
+        equation_text: &str,
+    ) -> FactoryEvaluationInput {
+        FactoryEvaluationInput {
+            version: FACTORY_EVALUATION_VERSION.to_string(),
+            notes: vec![format!("steps={steps}"), format!("dt={dt}")],
+            iterations: vec![FactoryEvaluationIteration {
+                iteration: 1,
+                run_id: "run_001".to_string(),
+                regime: "gravity_only".to_string(),
+                solver: DiscoverySolverSummary {
+                    name: "stls".to_string(),
+                    normalize: true,
+                    fitness_heuristic: "mse".to_string(),
+                    stls: None,
+                    lasso: None,
+                    ga: None,
+                },
+                simulation: None,
+                top_candidates: vec![FactoryEvaluationCandidate {
+                    id: 0,
+                    equation_text: equation_text.to_string(),
+                    metrics: CandidateMetrics {
+                        mse,
+                        complexity,
+                        rollout_rmse: Some(rollout_rmse),
+                        divergence_time: None,
+                        stability_flags: vec![],
+                    },
+                }],
+                judge: None,
+            }],
+        }
+    }
+
+    #[test]
+    fn scan_best_results_ignores_non_factory_eval_inputs() {
+        let root = unique_temp_path("best_results_root", "dir");
+        if root.exists() {
+            let _ = fs::remove_dir_all(&root);
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let non_factory = root.join("quickstart_nonfactory");
+        fs::create_dir_all(&non_factory).unwrap();
+        fs::write(
+            non_factory.join("evaluation_input.json"),
+            serde_json::to_string_pretty(&mk_eval_input_with_notes(200, 0.01, 0.9, 1.0, 1, "a=bad")).unwrap(),
+        )
+        .unwrap();
+
+        let factory_dir = root.join("quickstart_factory").join("factory");
+        fs::create_dir_all(&factory_dir).unwrap();
+        fs::write(
+            factory_dir.join("evaluation_input.json"),
+            serde_json::to_string_pretty(&mk_eval_input_with_notes(200, 0.01, 0.1, 1.0, 1, "a=good")).unwrap(),
+        )
+        .unwrap();
+
+        let index = scan_best_results(&root).unwrap();
+        assert_eq!(index.buckets.len(), 1);
+        assert!(index.buckets[0].eval_input_path.contains("quickstart_factory"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_best_results_selects_best_per_bucket() {
+        let root = unique_temp_path("best_results_choose", "dir");
+        if root.exists() {
+            let _ = fs::remove_dir_all(&root);
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let run1_factory = root.join("run1").join("factory");
+        let run2_factory = root.join("run2").join("factory");
+        fs::create_dir_all(&run1_factory).unwrap();
+        fs::create_dir_all(&run2_factory).unwrap();
+
+        fs::write(
+            run1_factory.join("evaluation_input.json"),
+            serde_json::to_string_pretty(&mk_eval_input_with_notes(100, 0.01, 0.9, 1.0, 1, "a=run1")).unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            run2_factory.join("evaluation_input.json"),
+            serde_json::to_string_pretty(&mk_eval_input_with_notes(100, 0.01, 0.1, 2.0, 2, "a=run2")).unwrap(),
+        )
+        .unwrap();
+
+        let index = scan_best_results(&root).unwrap();
+        assert_eq!(index.buckets.len(), 1);
+        assert!(index.buckets[0].eval_input_path.contains("run2"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn render_best_results_md_includes_equation_and_metrics() {
+        let index = BestResultsIndexV1 {
+            version: "v1".to_string(),
+            updated_at_utc: "unix_seconds=0".to_string(),
+            buckets: vec![BestRecord {
+                bucket: BucketKey { steps: 200, dt: 0.01 },
+                run_dir: "results/quickstart_x".to_string(),
+                factory_dir: "results/quickstart_x/factory".to_string(),
+                eval_input_path: "results/quickstart_x/factory/evaluation_input.json".to_string(),
+                run_id: "run_001".to_string(),
+                regime: "gravity_only".to_string(),
+                equation_text: "ax=+1*grav_x".to_string(),
+                metrics: CandidateMetrics {
+                    mse: 1.0,
+                    complexity: 1,
+                    rollout_rmse: Some(0.1),
+                    divergence_time: None,
+                    stability_flags: vec![],
+                },
+                ic: None,
+            }],
+            notes: vec![],
+        };
+        let md = render_best_results_md(&index);
+        assert!(md.contains("Best Results"));
+        assert!(md.contains("ax=+1*grav_x"));
+        assert!(md.contains("rollout_rmse"));
+    }
+
+    #[test]
+    fn render_findings_tex_includes_required_sections_and_equation() {
+        let index = BestResultsIndexV1 {
+            version: "v1".to_string(),
+            updated_at_utc: "unix_seconds=0".to_string(),
+            buckets: vec![BestRecord {
+                bucket: BucketKey { steps: 200, dt: 0.01 },
+                run_dir: "results/quickstart_x".to_string(),
+                factory_dir: "results/quickstart_x/factory".to_string(),
+                eval_input_path: "results/quickstart_x/factory/evaluation_input.json".to_string(),
+                run_id: "run_001".to_string(),
+                regime: "gravity_only".to_string(),
+                equation_text: "ax=+1.000000*grav_x ; ay=0 ; az=0".to_string(),
+                metrics: CandidateMetrics {
+                    mse: 1.0,
+                    complexity: 1,
+                    rollout_rmse: Some(0.1),
+                    divergence_time: None,
+                    stability_flags: vec![],
+                },
+                ic: None,
+            }],
+            notes: vec![],
+        };
+        let tex = render_findings_tex(&index, &[]);
+        assert!(tex.contains("\\section*{Executive Summary}"));
+        assert!(tex.contains("\\section*{Best Results by Bucket}"));
+        assert!(tex.contains("ax=+1.000000*grav_x"));
+    }
+
+    #[test]
+    fn write_best_results_writes_md_and_json() {
+        let root = unique_temp_path("best_results_write", "dir");
+        if root.exists() {
+            let _ = fs::remove_dir_all(&root);
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let index = BestResultsIndexV1 {
+            version: "v1".to_string(),
+            updated_at_utc: "unix_seconds=0".to_string(),
+            buckets: vec![],
+            notes: vec![],
+        };
+        write_best_results(&root, &index).unwrap();
+        assert!(root.join("best_results.md").exists());
+        assert!(root.join("best_results.json").exists());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

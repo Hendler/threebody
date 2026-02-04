@@ -150,10 +150,13 @@ impl OpenAIClient {
         } else {
             env::var("OPENAI_API_KEY").map_err(|_| LlmError("OPENAI_API_KEY missing".to_string()))?
         };
+        let base_url = env::var("OPENAI_BASE_URL")
+            .or_else(|_| env::var("THREEBODY_OPENAI_BASE_URL"))
+            .unwrap_or_else(|_| "https://api.openai.com/v1".to_string());
         Ok(Self {
             api_key,
             model: model.to_string(),
-            base_url: "https://api.openai.com/v1".to_string(),
+            base_url,
         })
     }
 

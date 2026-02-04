@@ -201,6 +201,7 @@ Editorial uncertainty: In chaotic regimes, long-horizon point prediction is not 
 
 \subsection{LLM-assisted interpretation (optional)}
 We add an optional LLM judge layer to interpret candidate equations and propose next experiments. The LLM does \emph{not} generate equations and does \emph{not} override numeric ranking; it is a supplemental reviewer that produces a structured scorecard and narrative synthesis. Concretely, it decides (a) proposed initial conditions within bounds, (b) an interpretable ranking of candidates under a fixed rubric, and (c) next-step recommendations (rollout integrator, discovery solver/hyperparameters, and search directions), while the discovery engine performs coefficient estimation/search (STLS/LASSO or an optional GA baseline). The rubric is explicit and machine-readable, with component scores for (i) predictive fidelity, (ii) parsimony, (iii) physical plausibility, (iv) regime consistency, and (v) stability risk. Evidence passed to the judge includes equation forms plus numeric metrics (MSE, rollout RMSE, divergence time) and regime diagnostics. We require JSON-only output to preserve determinism. When enabled, the LLM may also propose the next initial conditions within strict bounds; proposals are validated and clipped before use. All prompts and responses are logged as reproducibility artifacts.
+To stabilize iterative progress, we additionally maintain a global ``best so far'' ledger over local runs (e.g., \texttt{results/best\_results.md} and \texttt{results/best\_results.json}), grouped by comparable simulation buckets (steps, $dt$). The factory loop can include the incumbent best equation and its metrics in the LLM context as a concrete target to beat, while keeping numeric selection as the source of truth.
 The judge can additionally recommend (a) which rollout integrator to use for evaluation (Euler vs.\ leapfrog), (b) which fitness heuristic to use for candidate selection (MSE vs.\ MSE with a parsimony penalty), and (c) which discovery solver/hyperparameters to try next (STLS/LASSO/GA), enabling controlled ablations without compromising reproducibility.
 
 \section{System Integration and Reproducibility}
@@ -210,6 +211,8 @@ The systems are controlled by CLI:
 \item \textbf{simulate}: produce truth trajectories and diagnostics.
 \item \textbf{discover}: fit sparse equations using a chosen library.
 \item \textbf{factory}: an optional LLM-guided loop that selects initial conditions, runs simulation, performs discovery, and emits a judged report with suggested next runs.
+\item \textbf{quickstart}: a convenience wrapper that runs an end-to-end workflow and writes a novice-friendly summary plus evidence under a single directory.
+\item \textbf{findings}: render an aggregated LaTeX report of best-discovered equations across local runs (from the best-results ledger).
 \item \textbf{predict} (planned): roll out discovered equations and compare to truth.
 \item \textbf{score} (planned): compute quantitative benchmarks.
 \item \textbf{render}: visualization (with robust header-based parsing).
@@ -217,7 +220,7 @@ The systems are controlled by CLI:
 
 \subsection{LLM-guided ``factory'' loop (optional)}
 The factory loop operationalizes a scientific workflow: (1) propose initial conditions, (2) simulate, (3) discover equations, (4) judge results under a fixed rubric, and (5) decide whether to continue. The LLM assists only in steps (1) and (4), and all artifacts (config, initial conditions, prompts, responses, metrics) are saved per iteration to ensure reproducibility and auditability.
-At the end of a run, we additionally render a reproducible evaluation artifact (Markdown and LaTeX) that records the best discovered equations (exact text), the best-run initial conditions, and a best-vs-history comparison over prior local attempts.
+At the end of a run, we additionally render reproducible evaluation artifacts (Markdown and LaTeX) that record the best discovered equations (exact text), the best-run initial conditions, and a best-vs-history comparison over prior local attempts. The global best-results ledger is also updated to capture the current incumbent per simulation bucket.
 
 \subsection{Robust I/O design}
 We explicitly fixed a key fragility: rigid CSV schemas break as output evolves. We therefore parse by header name and extract only needed columns for any given task. This enables rapid iteration.
