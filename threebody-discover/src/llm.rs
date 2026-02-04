@@ -240,7 +240,16 @@ fn build_mock_factory_evaluation_md(input: &FactoryEvaluationInput) -> String {
             match best_run {
                 None => best_run = Some((&iter.run_id, &iter.regime, cand)),
                 Some((_rid, _regime, best)) => {
-                    if cand.metrics.mse.is_finite() && cand.metrics.mse < best.metrics.mse {
+                    let cand_roll = cand.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+                    let best_roll = best.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+                    let cand_mse = if cand.metrics.mse.is_finite() { cand.metrics.mse } else { f64::INFINITY };
+                    let best_mse = if best.metrics.mse.is_finite() { best.metrics.mse } else { f64::INFINITY };
+                    let better = cand_roll < best_roll
+                        || (cand_roll == best_roll && cand_mse < best_mse)
+                        || (cand_roll == best_roll
+                            && cand_mse == best_mse
+                            && cand.metrics.complexity < best.metrics.complexity);
+                    if better {
                         best_run = Some((&iter.run_id, &iter.regime, cand));
                     }
                 }
@@ -446,35 +455,64 @@ mod tests {
         let input = FactoryEvaluationInput {
             version: crate::judge::FACTORY_EVALUATION_VERSION.to_string(),
             notes: vec!["steps=5".to_string(), "dt=0.01".to_string()],
-            iterations: vec![FactoryEvaluationIteration {
-                iteration: 1,
-                run_id: "run_001".to_string(),
-                regime: "gravity_only".to_string(),
-                solver: crate::judge::DiscoverySolverSummary {
-                    name: "stls".to_string(),
-                    normalize: true,
-                    fitness_heuristic: "mse".to_string(),
-                    stls: None,
-                    lasso: None,
-                    ga: None,
-                },
-                simulation: None,
-                top_candidates: vec![FactoryEvaluationCandidate {
-                    id: 0,
-                    equation_text: "a = 0".to_string(),
-                    metrics: CandidateMetrics {
-                        mse: 1.0,
-                        complexity: 0,
-                        rollout_rmse: Some(0.1),
-                        divergence_time: Some(1.0),
-                        stability_flags: vec![],
+            iterations: vec![
+                FactoryEvaluationIteration {
+                    iteration: 1,
+                    run_id: "run_001".to_string(),
+                    regime: "gravity_only".to_string(),
+                    solver: crate::judge::DiscoverySolverSummary {
+                        name: "stls".to_string(),
+                        normalize: true,
+                        fitness_heuristic: "mse".to_string(),
+                        stls: None,
+                        lasso: None,
+                        ga: None,
                     },
-                }],
-                judge: None,
-            }],
+                    simulation: None,
+                    top_candidates: vec![FactoryEvaluationCandidate {
+                        id: 0,
+                        equation_text: "a = bad".to_string(),
+                        metrics: CandidateMetrics {
+                            mse: 1.0,
+                            complexity: 10,
+                            rollout_rmse: Some(0.9),
+                            divergence_time: Some(1.0),
+                            stability_flags: vec![],
+                        },
+                    }],
+                    judge: None,
+                },
+                FactoryEvaluationIteration {
+                    iteration: 2,
+                    run_id: "run_002".to_string(),
+                    regime: "gravity_only".to_string(),
+                    solver: crate::judge::DiscoverySolverSummary {
+                        name: "stls".to_string(),
+                        normalize: true,
+                        fitness_heuristic: "mse".to_string(),
+                        stls: None,
+                        lasso: None,
+                        ga: None,
+                    },
+                    simulation: None,
+                    top_candidates: vec![FactoryEvaluationCandidate {
+                        id: 0,
+                        equation_text: "a = good".to_string(),
+                        metrics: CandidateMetrics {
+                            mse: 1.0,
+                            complexity: 1,
+                            rollout_rmse: Some(0.1),
+                            divergence_time: Some(1.0),
+                            stability_flags: vec![],
+                        },
+                    }],
+                    judge: None,
+                },
+            ],
         };
         let out = llm.explain_factory_evaluation(&input).unwrap();
         assert!(out.value.contains("# Factory Evaluation"));
+        assert!(out.value.contains("`run_002`"));
         assert!(out.value.to_lowercase().contains("next steps"));
     }
 }

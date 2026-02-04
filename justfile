@@ -33,7 +33,7 @@ quickstart:
   factory_dir="$out/factory"
   if [ -f .openai_key ] || [ -n "${OPENAI_API_KEY:-}" ]; then llm_mode=openai; else llm_mode=mock; fi
   echo "Running factory (10 iters): out_dir=$factory_dir llm_mode=$llm_mode"
-  cargo run -p threebody-cli -- factory --out-dir "$factory_dir" --max-iters 10 --auto --config "$out/config.json" --steps 200 --dt 0.01 --llm-mode "$llm_mode" --model gpt-5 --solver stls --rollout-integrator euler --fitness mse
+  cargo run -p threebody-cli -- factory --out-dir "$factory_dir" --max-iters 10 --auto --config "$out/config.json" --preset three-body --steps 200 --dt 0.01 --llm-mode "$llm_mode" --model gpt-5 --solver stls --rollout-integrator euler --fitness mse
 
   if [ -f "$factory_dir/evaluation.md" ]; then cp "$factory_dir/evaluation.md" "$out/evaluation.md"; fi
 
