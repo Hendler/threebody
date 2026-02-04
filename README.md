@@ -66,7 +66,7 @@ Diagnostics:
 Outputs:
 - Wide CSV with positions, velocities, accelerations, fields, potentials, and diagnostics.
 - Robust header-based parsing to avoid schema brittleness.
-- Planned JSON sidecar for full reproducibility metadata.
+- JSON sidecar with config, header hash, warnings, last regime, and dt stats (accepted/rejected/min/max/avg).
 
 **Discovery Engine (Predictor) Overview**
 - Learns sparse, interpretable models of acceleration from simulator output.
@@ -143,7 +143,7 @@ cargo run -p threebody-cli -- discover --runs 50 --population 20 --out top_equat
 4. After step 14: add an EM-suitable integrator (Boris or implicit midpoint). Tests: bounded energy and stable gyration under EM surrogate.
 5. After step 16: add close-encounter policy in config (`soften`, `switch_integrator`, `stop_and_report`). Tests: deterministic triggers.
 6. After step 17: add warning system for leapfrog + EM unless explicitly overridden. Tests: warning emitted.
-7. After step 18: emit a JSON sidecar with config, tolerances, constants, and header hash. Tests: sidecar schema roundtrip.
+7. After step 18: emit a JSON sidecar with config, header hash, warnings, last regime, and dt stats. Tests: sidecar schema roundtrip.
 8. After step 22: add oracle-comparison tests (RK45 vs leapfrog vs EM integrator). Tests: divergence time finite and consistent.
 9. After step 23: add accuracy-per-ms benchmarks with regression thresholds.
 

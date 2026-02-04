@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::regime::RegimeDiagnostics;
-use crate::sim::SimResult;
+use crate::sim::{SimResult, SimStats};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Sidecar {
@@ -14,6 +14,7 @@ pub struct Sidecar {
     pub header_hash: String,
     pub warnings: Vec<String>,
     pub last_regime: Option<RegimeDiagnostics>,
+    pub sim_stats: SimStats,
 }
 
 pub fn build_sidecar(cfg: &Config, header: &[String], result: &SimResult) -> Sidecar {
@@ -24,6 +25,7 @@ pub fn build_sidecar(cfg: &Config, header: &[String], result: &SimResult) -> Sid
         header_hash,
         warnings: result.warnings.clone(),
         last_regime,
+        sim_stats: result.stats,
     }
 }
 
@@ -42,7 +44,7 @@ fn hash_header(header: &[String]) -> String {
 mod tests {
     use super::{build_sidecar, hash_header, Sidecar};
     use crate::config::Config;
-    use crate::sim::{SimResult, SimStep};
+    use crate::sim::{SimResult, SimStats, SimStep};
     use crate::state::{Body, State, System};
     use crate::math::vec3::Vec3;
     use crate::diagnostics::Diagnostics;
@@ -76,6 +78,13 @@ mod tests {
             warnings: vec!["warn".to_string()],
             terminated_early: false,
             termination_reason: None,
+            stats: SimStats {
+                accepted_steps: 1,
+                rejected_steps: 0,
+                dt_min: Some(0.1),
+                dt_max: Some(0.1),
+                dt_avg: Some(0.1),
+            },
         }
     }
 

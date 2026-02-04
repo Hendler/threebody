@@ -4,6 +4,7 @@ use crate::forces::{compute_accel, ForceConfig};
 use crate::integrators::Integrator;
 use crate::regime::{compute_regime, RegimeDiagnostics};
 use crate::state::System;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EncounterEvent {
@@ -20,6 +21,15 @@ pub struct SimStep {
     pub dt: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SimStats {
+    pub accepted_steps: usize,
+    pub rejected_steps: usize,
+    pub dt_min: Option<f64>,
+    pub dt_max: Option<f64>,
+    pub dt_avg: Option<f64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SimResult {
     pub steps: Vec<SimStep>,
@@ -28,6 +38,7 @@ pub struct SimResult {
     pub warnings: Vec<String>,
     pub terminated_early: bool,
     pub termination_reason: Option<String>,
+    pub stats: SimStats,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -53,6 +64,11 @@ pub fn simulate(
     let mut termination_reason = None;
     let mut t = 0.0;
     let mut dt = options.dt;
+    let mut accepted_steps = 0usize;
+    let mut rejected_steps = 0usize;
+    let mut dt_sum = 0.0;
+    let mut dt_min: Option<f64> = None;
+    let mut dt_max: Option<f64> = None;
 
     for step in 0..=options.steps {
         let force_cfg = ForceConfig {
@@ -112,17 +128,29 @@ pub fn simulate(
         {
             let mut rejects = 0;
             loop {
+                let dt_used = dt;
                 let (next, err_norm, dt_suggested) =
-                    crate::integrators::rk45::step_with_error(&system, dt, &local_cfg);
+                    crate::integrators::rk45::step_with_error(&system, dt_used, &local_cfg);
                 if err_norm <= 1.0 {
                     system = next;
-                    t += dt;
+                    t += dt_used;
+                    accepted_steps += 1;
+                    dt_sum += dt_used;
+                    dt_min = Some(match dt_min {
+                        Some(current) => current.min(dt_used),
+                        None => dt_used,
+                    });
+                    dt_max = Some(match dt_max {
+                        Some(current) => current.max(dt_used),
+                        None => dt_used,
+                    });
                     dt = dt_suggested
                         .clamp(local_cfg.integrator.dt_min, local_cfg.integrator.dt_max);
                     break;
                 }
                 dt = dt_suggested.clamp(local_cfg.integrator.dt_min, local_cfg.integrator.dt_max);
                 rejects += 1;
+                rejected_steps += 1;
                 if rejects >= local_cfg.integrator.max_rejects {
                     terminated_early = true;
                     termination_reason = Some("max_rejects_exceeded".to_string());
@@ -135,8 +163,24 @@ pub fn simulate(
         } else {
             system = active_integrator.step(&system, dt, &local_cfg);
             t += dt;
+            accepted_steps += 1;
+            dt_sum += dt;
+            dt_min = Some(match dt_min {
+                Some(current) => current.min(dt),
+                None => dt,
+            });
+            dt_max = Some(match dt_max {
+                Some(current) => current.max(dt),
+                None => dt,
+            });
         }
     }
+
+    let dt_avg = if accepted_steps > 0 {
+        Some(dt_sum / accepted_steps as f64)
+    } else {
+        None
+    };
 
     SimResult {
         steps,
@@ -145,6 +189,13 @@ pub fn simulate(
         warnings,
         terminated_early,
         termination_reason,
+        stats: SimStats {
+            accepted_steps,
+            rejected_steps,
+            dt_min,
+            dt_max,
+            dt_avg,
+        },
     }
 }
 
@@ -215,5 +266,23 @@ mod tests {
         assert!(dt0 > 0.0);
         assert!(dt1 >= cfg.integrator.dt_min);
         assert!(dt1 <= cfg.integrator.dt_max);
+    }
+
+    #[test]
+    fn stats_track_fixed_dt() {
+        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(0.0, 0.0)];
+        let pos = [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::zero()];
+        let vel = [Vec3::zero(); 3];
+        let system = System::new(bodies, State::new(pos, vel));
+        let cfg = Config::default();
+        let options = SimOptions { steps: 3, dt: 0.02 };
+        let integrator = Leapfrog;
+
+        let result = simulate(system, &cfg, &integrator, None, options);
+        assert_eq!(result.stats.accepted_steps, 3);
+        assert_eq!(result.stats.rejected_steps, 0);
+        assert_eq!(result.stats.dt_min, Some(0.02));
+        assert_eq!(result.stats.dt_max, Some(0.02));
+        assert_eq!(result.stats.dt_avg, Some(0.02));
     }
 }
