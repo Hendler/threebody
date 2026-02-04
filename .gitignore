@@ -1,4 +1,9 @@
+academic_paper.aux
+academic_paper.log
+build_paper.sh
+missfont.log
+
+
 target
-.venv/
 .venv/
 factory_out/
