@@ -203,6 +203,38 @@ mod tests {
     }
 
     #[test]
+    fn gravity_and_em_matches_sum_of_modules() {
+        let system = base_system();
+        let cfg = ForceConfig {
+            g: 1.0,
+            k_e: 2.0,
+            mu_0: 0.7,
+            epsilon: 0.0,
+            enable_gravity: true,
+            enable_em: true,
+        };
+        let agg = compute_accel(&system, &cfg);
+        let grav = gravity_accel(&system.bodies, &system.state.pos, cfg.g, cfg.epsilon);
+        let em = em_accel(
+            &system.bodies,
+            &system.state.pos,
+            &system.state.vel,
+            cfg.k_e,
+            cfg.mu_0,
+            cfg.epsilon,
+        );
+        for i in 0..3 {
+            let expected = grav[i] + em[i];
+            assert!(
+                agg[i].approx_eq(expected, 1e-12, 1e-12),
+                "body {i}: agg={:?} expected={:?}",
+                agg[i],
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn flags_toggle_deterministic_outputs() {
         let system = base_system();
         let cfg = ForceConfig {

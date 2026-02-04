@@ -127,6 +127,12 @@ export OPENAI_API_KEY="your_key_here"
 cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5 --rollout-integrator leapfrog --fitness mse_parsimony
 ```
 
+**Paper Build (LaTeX -> PDF)**
+- `pdflatex` is a system dependency (TeX Live / BasicTeX). It is not installed via `uv` or `pip`.
+- macOS (Homebrew): `brew install --cask basictex`, then restart your terminal or run `eval "$(/usr/libexec/path_helper)"`.
+- Build the PDF: `pdflatex -interaction=nonstopmode academic_paper.tex`.
+- Optional: create a local Python environment for tooling with `uv venv .venv`.
+
 **Factory Outputs (Per Iteration)**
 - `traj.csv` and `traj.json` sidecar.
 - `initial_conditions.json` and `ic_request.json`.

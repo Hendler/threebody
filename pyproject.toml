@@ -1,0 +1,7 @@
+[project]
+name = "threebody"
+version = "0.1.0"
+description = "Three-body discovery and LLM-assisted equation search."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
