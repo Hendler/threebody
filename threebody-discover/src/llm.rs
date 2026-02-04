@@ -194,7 +194,7 @@ impl OpenAIClient {
         impl OpenAIRequestError {
             fn should_try_chat_fallback(&self) -> bool {
                 match self {
-                    OpenAIRequestError::Http { status, .. } => matches!(*status, 404 | 405 | 410 | 501),
+                    OpenAIRequestError::Http { status, .. } => matches!(*status, 400 | 404 | 405 | 410 | 501),
                     OpenAIRequestError::Parse(_) => true,
                     OpenAIRequestError::Transport(_) => false,
                 }

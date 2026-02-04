@@ -210,6 +210,33 @@ enum Commands {
         #[arg(long, default_value_t = false, hide = true)]
         require_llm: bool,
     },
+    /// Run a deterministic EM identifiability benchmark suite (sweep + multiple IC templates).
+    BenchEm {
+        /// Results directory root (stores global best index and is scanned for history).
+        #[arg(long, default_value = "results")]
+        results_dir: PathBuf,
+        /// Output directory root (defaults to `results/bench_em_<timestamp>/`).
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+        /// Steps to simulate per case.
+        #[arg(long, default_value_t = 200)]
+        steps: usize,
+        /// Timestep (initial dt; RK45 may adapt in truth mode).
+        #[arg(long, default_value_t = 0.01)]
+        dt: f64,
+        /// Max cases to run (truncates the sweep grid; increase for more coverage).
+        #[arg(long, default_value_t = 24)]
+        max_cases: usize,
+        /// Random seed (controls deterministic IC perturbations).
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        /// Held-out IC rollouts for the selected best EM-heavy equation.
+        #[arg(long, default_value_t = 2)]
+        heldout: usize,
+        /// Do not attempt to build PDFs via pdflatex.
+        #[arg(long)]
+        no_pdf: bool,
+    },
     /// Run the LLM-assisted factory loop (ICs -> sim -> discovery -> judge).
     #[command(alias = "experiment")]
     Factory {
@@ -471,6 +498,27 @@ fn main() -> anyhow::Result<()> {
             require_llm,
         } => {
             run_quickstart(out_dir, steps, max_iters, require_llm)?;
+        }
+        Commands::BenchEm {
+            results_dir,
+            out_dir,
+            steps,
+            dt,
+            max_cases,
+            seed,
+            heldout,
+            no_pdf,
+        } => {
+            run_bench_em(
+                results_dir,
+                out_dir,
+                steps,
+                dt,
+                max_cases,
+                seed,
+                heldout,
+                !no_pdf,
+            )?;
         }
         Commands::Factory {
             out_dir,
@@ -740,6 +788,624 @@ fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize, requ
     println!("- {}/RESULTS.pdf (if built)", out_dir.display());
     println!("- {}/factory/ (evidence + per-iteration artifacts)", out_dir.display());
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BenchEmTemplate {
+    HeadOn,
+    HighAngMomentum,
+    NearCircular,
+    NearCollisionSafe,
+}
+
+impl BenchEmTemplate {
+    fn as_str(&self) -> &'static str {
+        match self {
+            BenchEmTemplate::HeadOn => "head_on",
+            BenchEmTemplate::HighAngMomentum => "high_ang_momentum",
+            BenchEmTemplate::NearCircular => "near_circular",
+            BenchEmTemplate::NearCollisionSafe => "near_collision_safe",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BenchChargePattern {
+    Like,
+    AlternatingSigns,
+}
+
+impl BenchChargePattern {
+    fn as_str(&self) -> &'static str {
+        match self {
+            BenchChargePattern::Like => "like",
+            BenchChargePattern::AlternatingSigns => "alternating_signs",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct BenchEmCase {
+    template: BenchEmTemplate,
+    charge_pattern: BenchChargePattern,
+    charge_scale: f64,
+    velocity_scale: f64,
+}
+
+fn run_bench_em(
+    results_dir: PathBuf,
+    out_dir: Option<PathBuf>,
+    steps: usize,
+    dt: f64,
+    max_cases: usize,
+    seed: u64,
+    heldout: usize,
+    build_pdf: bool,
+) -> anyhow::Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fs::create_dir_all(&results_dir)?;
+    let out_dir = out_dir.unwrap_or_else(|| {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        results_dir.join(format!("bench_em_{ts}"))
+    });
+    fs::create_dir_all(&out_dir)?;
+
+    let factory_dir = out_dir.join("factory");
+    fs::create_dir_all(&factory_dir)?;
+
+    let charge_scales = [0.0, 1.0, 10.0, 100.0];
+    let velocity_scales = [0.5, 1.0, 2.0, 4.0];
+    let templates = [
+        BenchEmTemplate::HeadOn,
+        BenchEmTemplate::HighAngMomentum,
+        BenchEmTemplate::NearCircular,
+        BenchEmTemplate::NearCollisionSafe,
+    ];
+    let patterns = [BenchChargePattern::Like, BenchChargePattern::AlternatingSigns];
+
+    let mut cases = Vec::new();
+    for template in templates {
+        for pattern in patterns {
+            for &cs in &charge_scales {
+                for &vs in &velocity_scales {
+                    cases.push(BenchEmCase {
+                        template,
+                        charge_pattern: pattern,
+                        charge_scale: cs,
+                        velocity_scale: vs,
+                    });
+                }
+            }
+        }
+    }
+
+    // Deterministically shuffle so `--max-cases` samples across the grid.
+    {
+        let mut rng = threebody_discover::ga::Lcg::new(seed);
+        for i in (1..cases.len()).rev() {
+            let j = rng.gen_range_usize(0, i);
+            cases.swap(i, j);
+        }
+    }
+    if max_cases > 0 && cases.len() > max_cases {
+        cases.truncate(max_cases);
+    }
+
+    let mut oracle_cfg = Config::default();
+    oracle_cfg.enable_gravity = true;
+    oracle_cfg.enable_em = true;
+    oracle_cfg.integrator.kind = IntegratorKind::Rk45;
+    oracle_cfg.integrator.adaptive = true;
+    oracle_cfg.integrator.rtol = 1e-12;
+    oracle_cfg.integrator.atol = 1e-14;
+    oracle_cfg.integrator.dt_min = oracle_cfg.integrator.dt_min.min(1e-6);
+    oracle_cfg.integrator.dt_max = oracle_cfg.integrator.dt_max.max(0.05);
+    oracle_cfg.validate().map_err(anyhow::Error::msg)?;
+
+    let library = FeatureLibrary::extended_physics();
+    let rollout_integrator = RolloutIntegrator::Euler;
+
+    let stls_settings = DiscoverySolverSettings {
+        solver: DiscoverySolver::Stls,
+        normalize: true,
+        stls_thresholds: Vec::new(),
+        stls_ridge_lambda: 1e-8,
+        stls_max_iter: 25,
+        lasso_alphas: Vec::new(),
+        lasso_max_iter: 2000,
+        lasso_tol: 1e-6,
+    };
+    let lasso_settings = DiscoverySolverSettings {
+        solver: DiscoverySolver::Lasso,
+        normalize: true,
+        stls_thresholds: Vec::new(),
+        stls_ridge_lambda: 1e-8,
+        stls_max_iter: 25,
+        lasso_alphas: Vec::new(),
+        lasso_max_iter: 2000,
+        lasso_tol: 1e-6,
+    };
+
+    #[derive(Clone, Debug, serde::Serialize)]
+    struct CaseResult {
+        run_id: String,
+        template: String,
+        charge_pattern: String,
+        charge_scale: f64,
+        velocity_scale: f64,
+        sim: SimulationSummary,
+        best_equation_text: String,
+        best_metrics: CandidateMetrics,
+        uses_em_terms: bool,
+        selected_solver: String,
+    }
+
+    let mut suite_cases: Vec<CaseResult> = Vec::new();
+    let mut eval_iterations: Vec<FactoryEvaluationIteration> = Vec::new();
+
+    fn pick_best<'a>(cands: &'a [CandidateSummary]) -> Option<&'a CandidateSummary> {
+        cands.iter().min_by(|a, b| {
+            metrics_sort_key(&a.metrics)
+                .partial_cmp(&metrics_sort_key(&b.metrics))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    }
+
+    for (idx, case) in cases.iter().enumerate() {
+        let run_id = format!("run_{:03}", idx + 1);
+        let run_dir = factory_dir.join(&run_id);
+        fs::create_dir_all(&run_dir)?;
+
+        let (system, ic_spec) = bench_em_initial_conditions(case, seed + idx as u64)?;
+        let result = simulate_with_cfg(system, &oracle_cfg, SimOptions { steps, dt });
+
+        fs::write(run_dir.join("config.json"), serde_json::to_string_pretty(&oracle_cfg)?)?;
+        fs::write(
+            run_dir.join("initial_conditions.json"),
+            serde_json::to_string_pretty(&ic_spec)?,
+        )?;
+
+        let traj_path = run_dir.join("traj.csv");
+        let mut csv_file = fs::File::create(&traj_path)?;
+        write_csv(&mut csv_file, &result.steps, &oracle_cfg)?;
+        let header = threebody_core::output::csv::csv_header(&oracle_cfg);
+        let sidecar = build_sidecar(&oracle_cfg, &header, &result);
+        let mut sidecar_file = fs::File::create(run_dir.join("traj.json"))?;
+        write_sidecar(&mut sidecar_file, &sidecar)?;
+
+        let vector_data = build_vector_dataset(&result, &oracle_cfg, &library.features, None);
+        let [dataset_x, dataset_y, dataset_z] = component_datasets(&vector_data);
+
+        let stls_cfg = StlsConfig {
+            thresholds: stls_settings.stls_thresholds.clone(),
+            ridge_lambda: stls_settings.stls_ridge_lambda,
+            max_iter: stls_settings.stls_max_iter,
+            normalize: stls_settings.normalize,
+        };
+        let lasso_cfg = LassoConfig {
+            alphas: lasso_settings.lasso_alphas.clone(),
+            max_iter: lasso_settings.lasso_max_iter,
+            tol: lasso_settings.lasso_tol,
+            normalize: lasso_settings.normalize,
+        };
+
+        let (stls_topk_x, stls_topk_y, stls_topk_z) = (
+            stls_path_search(&dataset_x, &stls_cfg, FitnessHeuristic::Mse),
+            stls_path_search(&dataset_y, &stls_cfg, FitnessHeuristic::Mse),
+            stls_path_search(&dataset_z, &stls_cfg, FitnessHeuristic::Mse),
+        );
+        let (lasso_topk_x, lasso_topk_y, lasso_topk_z) = (
+            lasso_path_search(&dataset_x, &lasso_cfg, FitnessHeuristic::Mse),
+            lasso_path_search(&dataset_y, &lasso_cfg, FitnessHeuristic::Mse),
+            lasso_path_search(&dataset_z, &lasso_cfg, FitnessHeuristic::Mse),
+        );
+
+        let stls_candidates = build_vector_candidates(
+            &stls_topk_x.entries,
+            &stls_topk_y.entries,
+            &stls_topk_z.entries,
+            &vector_data.feature_names,
+            &result,
+            &oracle_cfg,
+            "em_quasistatic",
+            rollout_integrator,
+        );
+        let lasso_candidates = build_vector_candidates(
+            &lasso_topk_x.entries,
+            &lasso_topk_y.entries,
+            &lasso_topk_z.entries,
+            &vector_data.feature_names,
+            &result,
+            &oracle_cfg,
+            "em_quasistatic",
+            rollout_integrator,
+        );
+
+        let stls_best = pick_best(&stls_candidates);
+        let lasso_best = pick_best(&lasso_candidates);
+        let selected_solver = match (stls_best, lasso_best) {
+            (Some(a), Some(b)) => {
+                if metrics_sort_key(&a.metrics) <= metrics_sort_key(&b.metrics) {
+                    "stls"
+                } else {
+                    "lasso"
+                }
+            }
+            (Some(_), None) => "stls",
+            (None, Some(_)) => "lasso",
+            (None, None) => "stls",
+        };
+        let selected_candidates = if selected_solver == "stls" {
+            stls_candidates.clone()
+        } else {
+            lasso_candidates.clone()
+        };
+
+        let sim_summary = build_sim_summary(&result, &oracle_cfg, rollout_integrator);
+
+        let mut best_equation_text = String::new();
+        let mut best_metrics = CandidateMetrics {
+            mse: f64::INFINITY,
+            complexity: usize::MAX,
+            rollout_rmse: None,
+            divergence_time: None,
+            stability_flags: vec![],
+        };
+        if let Some(best) = pick_best(&selected_candidates) {
+            best_equation_text = best.equation_text.clone();
+            best_metrics = best.metrics.clone();
+        }
+
+        let usage = basis_usage_from_equation_text(&best_equation_text);
+        let uses_em_terms = usage.elec || usage.mag;
+
+        #[derive(serde::Serialize)]
+        struct BenchReport<'a> {
+            template: &'a str,
+            charge_pattern: &'a str,
+            charge_scale: f64,
+            velocity_scale: f64,
+            selected_solver: &'a str,
+            simulation: &'a SimulationSummary,
+            best_equation: &'a str,
+            best_metrics: &'a CandidateMetrics,
+            uses_em_terms: bool,
+        }
+
+        let report_json = serde_json::to_string_pretty(&BenchReport {
+            template: case.template.as_str(),
+            charge_pattern: case.charge_pattern.as_str(),
+            charge_scale: case.charge_scale,
+            velocity_scale: case.velocity_scale,
+            selected_solver,
+            simulation: &sim_summary,
+            best_equation: &best_equation_text,
+            best_metrics: &best_metrics,
+            uses_em_terms,
+        })?;
+        fs::write(run_dir.join("report.json"), report_json)?;
+
+        let mut md = String::new();
+        md.push_str(&format!("# Bench-EM Case {}\n\n", run_id));
+        md.push_str(&format!("- template: `{}`\n", case.template.as_str()));
+        md.push_str(&format!("- charge_pattern: `{}`\n", case.charge_pattern.as_str()));
+        md.push_str(&format!("- charge_scale: {}\n", case.charge_scale));
+        md.push_str(&format!("- velocity_scale: {}\n", case.velocity_scale));
+        md.push_str(&format!("- selected_solver: `{}`\n", selected_solver));
+        md.push_str(&format!(
+            "- mean(|a_em|)/mean(|a_grav|): {}\n",
+            format_opt_f64(sim_summary.mean_abs_accel_ratio_em_over_grav)
+        ));
+        md.push_str("\n## Best equation\n");
+        md.push_str("```text\n");
+        md.push_str(&best_equation_text);
+        md.push_str("\n```\n");
+        md.push_str(&format!(
+            "- metrics: rollout_rmse={}, mse={:.6e}, complexity={}\n",
+            format_opt_f64(best_metrics.rollout_rmse),
+            best_metrics.mse,
+            best_metrics.complexity
+        ));
+        md.push_str(&format!("- uses_em_terms: {}\n", uses_em_terms));
+        fs::write(run_dir.join("report.md"), md)?;
+
+        let discovery_json = serde_json::to_string_pretty(&serde_json::json!({
+            "selected_solver": selected_solver,
+            "stls": {
+                "solver": build_solver_meta(&stls_settings, FitnessHeuristic::Mse, None),
+                "top3_x": stls_topk_x.entries,
+                "top3_y": stls_topk_y.entries,
+                "top3_z": stls_topk_z.entries,
+                "vector_candidates": stls_candidates,
+            },
+            "lasso": {
+                "solver": build_solver_meta(&lasso_settings, FitnessHeuristic::Mse, None),
+                "top3_x": lasso_topk_x.entries,
+                "top3_y": lasso_topk_y.entries,
+                "top3_z": lasso_topk_z.entries,
+                "vector_candidates": lasso_candidates,
+            },
+        }))?;
+        fs::write(run_dir.join("discovery.json"), discovery_json)?;
+
+        let solver_summary = DiscoverySolverSummary {
+            name: selected_solver.to_string(),
+            normalize: true,
+            fitness_heuristic: "mse".to_string(),
+            stls: (selected_solver == "stls").then(|| StlsSolverSummary {
+                auto_thresholds: true,
+                thresholds: Vec::new(),
+                ridge_lambda: 1e-8,
+                max_iter: 25,
+            }),
+            lasso: (selected_solver == "lasso").then(|| LassoSolverSummary {
+                auto_alphas: true,
+                alphas: Vec::new(),
+                max_iter: 2000,
+                tol: 1e-6,
+            }),
+            ga: None,
+        };
+
+        let mut top_candidates = selected_candidates.clone();
+        top_candidates.sort_by(|a, b| {
+            a.metrics
+                .mse
+                .partial_cmp(&b.metrics.mse)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let top_candidates = top_candidates
+            .into_iter()
+            .take(3)
+            .map(|c| FactoryEvaluationCandidate {
+                id: c.id,
+                equation_text: c.equation_text,
+                metrics: c.metrics,
+            })
+            .collect::<Vec<_>>();
+
+        eval_iterations.push(FactoryEvaluationIteration {
+            iteration: idx + 1,
+            run_id: run_id.clone(),
+            regime: "em_quasistatic".to_string(),
+            solver: solver_summary,
+            simulation: Some(sim_summary.clone()),
+            top_candidates,
+            judge: None,
+        });
+
+        suite_cases.push(CaseResult {
+            run_id,
+            template: case.template.as_str().to_string(),
+            charge_pattern: case.charge_pattern.as_str().to_string(),
+            charge_scale: case.charge_scale,
+            velocity_scale: case.velocity_scale,
+            sim: sim_summary,
+            best_equation_text,
+            best_metrics,
+            uses_em_terms,
+            selected_solver: selected_solver.to_string(),
+        });
+    }
+
+    let mut notes = Vec::new();
+    notes.push("bench_em=true".to_string());
+    notes.push(format!("steps={steps}"));
+    notes.push(format!("dt={dt}"));
+    notes.push(format!("seed={seed}"));
+    notes.push(format!("max_cases={}", suite_cases.len()));
+    notes.push("mode=truth".to_string());
+    notes.push("regime=em_quasistatic".to_string());
+
+    let eval_input = FactoryEvaluationInput {
+        version: FACTORY_EVALUATION_VERSION.to_string(),
+        notes,
+        iterations: eval_iterations,
+    };
+    let eval_input_path = factory_dir.join("evaluation_input.json");
+    fs::write(&eval_input_path, serde_json::to_string_pretty(&eval_input)?)?;
+
+    // Render a deterministic novice summary for this benchmark run.
+    let current_best = best_candidate_from_eval_input(&eval_input);
+    let prior_filter = PriorAttemptFilter::from_notes(&eval_input.notes);
+    let prior_best = find_best_prior_attempt(&results_dir, &eval_input_path, &prior_filter)?;
+    let best_ic: Option<InitialConditionSpec> = current_best
+        .as_ref()
+        .and_then(|b| fs::read_to_string(factory_dir.join(&b.run_id).join("initial_conditions.json")).ok())
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+    let incumbent_on_best_run = (|| -> anyhow::Result<Option<IncumbentEvalOnBestRun>> {
+        let (best, prior) = match (current_best.as_ref(), prior_best.as_ref()) {
+            (Some(b), Some(p)) => (b, p),
+            _ => return Ok(None),
+        };
+        let best_run_dir = factory_dir.join(&best.run_id);
+        let oracle = match load_oracle_run_from_dir(&best_run_dir) {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        let incumbent_model = match vector_model_from_equation_text(&prior.best.candidate.equation_text) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let complexity = incumbent_model.eq_x.complexity()
+            + incumbent_model.eq_y.complexity()
+            + incumbent_model.eq_z.complexity();
+        let feature_names = FeatureLibrary::default_physics().features;
+        let (rmse, div) = rollout_metrics(
+            &incumbent_model,
+            &feature_names,
+            &oracle.result,
+            &oracle.cfg,
+            rollout_integrator,
+        );
+        Ok(Some(IncumbentEvalOnBestRun {
+            equation_text: prior.best.candidate.equation_text.clone(),
+            rollout_rmse: rmse,
+            divergence_time: div,
+            complexity,
+        }))
+    })()?;
+
+    let exec_md = render_executive_summary_md(
+        &eval_input,
+        current_best.as_ref(),
+        prior_best.as_ref(),
+        best_ic.as_ref(),
+        incumbent_on_best_run.as_ref(),
+    );
+    fs::write(factory_dir.join("evaluation.md"), &exec_md)?;
+    fs::write(out_dir.join("RESULTS.md"), &exec_md)?;
+
+    // LaTeX evaluation (best effort; mirrors factory).
+    let eval_tex = render_evaluation_tex(
+        &eval_input,
+        current_best.as_ref(),
+        prior_best.as_ref(),
+        best_ic.as_ref(),
+    );
+    fs::write(factory_dir.join("evaluation.tex"), eval_tex)?;
+    if build_pdf {
+        if let Some(pdflatex) = find_pdflatex() {
+            let _ = std::process::Command::new(&pdflatex)
+                .current_dir(&factory_dir)
+                .args(["-interaction=nonstopmode", "evaluation.tex"])
+                .output();
+            let pdf = factory_dir.join("evaluation.pdf");
+            if pdf.exists() {
+                let _ = fs::copy(&pdf, out_dir.join("RESULTS.pdf"));
+            }
+        }
+    }
+
+    #[derive(serde::Serialize)]
+    struct Suite<'a> {
+        version: &'a str,
+        generated_at_utc: String,
+        steps: usize,
+        dt: f64,
+        seed: u64,
+        heldout: usize,
+        cases: &'a [CaseResult],
+    }
+    let suite = Suite {
+        version: "v1",
+        generated_at_utc: updated_at_unix_utc(),
+        steps,
+        dt,
+        seed,
+        heldout,
+        cases: &suite_cases,
+    };
+    fs::write(out_dir.join("suite.json"), serde_json::to_string_pretty(&suite)?)?;
+
+    // Update global best index for the results directory.
+    update_best_results_index_best_effort(&results_dir);
+
+    println!("Bench-EM complete: {}", out_dir.display());
+    println!("Key outputs:");
+    println!("- {}/RESULTS.md", out_dir.display());
+    println!("- {}/suite.json", out_dir.display());
+    println!("- {}/factory/ (evidence per case)", out_dir.display());
+    Ok(())
+}
+
+fn bench_em_initial_conditions(case: &BenchEmCase, seed: u64) -> anyhow::Result<(System, InitialConditionSpec)> {
+    let base_charge = 0.01;
+    let q = base_charge * case.charge_scale;
+    let charges = match case.charge_pattern {
+        BenchChargePattern::Like => [q, q, q],
+        BenchChargePattern::AlternatingSigns => [q, -q, q],
+    };
+
+    let (pos, vel) = match case.template {
+        BenchEmTemplate::HeadOn => {
+            let pos = [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.8, 0.0)];
+            let v = 0.3 * case.velocity_scale;
+            let vel = [Vec3::new(v, 0.0, 0.0), Vec3::new(-v, 0.0, 0.0), Vec3::zero()];
+            (pos, vel)
+        }
+        BenchEmTemplate::HighAngMomentum => {
+            let pos = [Vec3::new(-0.9, 0.0, 0.0), Vec3::new(0.9, 0.0, 0.0), Vec3::new(0.0, 1.6, 0.0)];
+            let v = 0.3 * case.velocity_scale;
+            let vel = [Vec3::new(0.0, v, 0.0), Vec3::new(0.0, -v, 0.0), Vec3::zero()];
+            (pos, vel)
+        }
+        BenchEmTemplate::NearCircular => {
+            let r = 1.0 / 3.0_f64.sqrt();
+            let pos = [
+                Vec3::new(r, 0.0, 0.0),
+                Vec3::new(-0.5 * r, 0.5, 0.0),
+                Vec3::new(-0.5 * r, -0.5, 0.0),
+            ];
+            let v = 0.3 * case.velocity_scale;
+            let vel = [
+                Vec3::new(0.0, v, 0.0),
+                Vec3::new(-0.866_025_403_784_438_6 * v, -0.5 * v, 0.0),
+                Vec3::new(0.866_025_403_784_438_6 * v, -0.5 * v, 0.0),
+            ];
+            (pos, vel)
+        }
+        BenchEmTemplate::NearCollisionSafe => {
+            let pos = [Vec3::new(-0.35, 0.0, 0.0), Vec3::new(0.35, 0.0, 0.0), Vec3::new(0.0, 1.2, 0.0)];
+            let v = 0.3 * case.velocity_scale;
+            let vel = [Vec3::new(v, 0.0, 0.0), Vec3::new(-v, 0.0, 0.0), Vec3::zero()];
+            (pos, vel)
+        }
+    };
+
+    let mut bodies = [Body::new(1.0, 0.0); 3];
+    for i in 0..3 {
+        bodies[i] = Body::new(1.0, charges[i]);
+    }
+    let mut system = System::new(bodies, State::new(pos, vel));
+
+    // Small deterministic perturbation to avoid perfectly symmetric degeneracy in some grids.
+    let mut rng = threebody_discover::ga::Lcg::new(seed);
+    let jitter = 0.02;
+    for i in 0..3 {
+        system.state.pos[i].x += rng.gen_range_f64(-jitter, jitter);
+        system.state.pos[i].y += rng.gen_range_f64(-jitter, jitter);
+        system.state.vel[i].x += rng.gen_range_f64(-jitter, jitter) * 0.1;
+        system.state.vel[i].y += rng.gen_range_f64(-jitter, jitter) * 0.1;
+    }
+    system = to_barycentric(system);
+
+    let bounds = default_ic_bounds();
+    let min_dist = min_pair_distance(&system.state.pos);
+    if min_dist < bounds.min_pair_dist {
+        anyhow::bail!(
+            "generated IC too close: min_pair_dist={} (min allowed {})",
+            min_dist,
+            bounds.min_pair_dist
+        );
+    }
+
+    let ic_spec = InitialConditionSpec {
+        bodies: system
+            .bodies
+            .iter()
+            .zip(system.state.pos.iter().zip(system.state.vel.iter()))
+            .map(|(b, (p, v))| threebody_discover::BodyInit {
+                mass: b.mass,
+                charge: b.charge,
+                pos: [p.x, p.y, p.z],
+                vel: [v.x, v.y, v.z],
+            })
+            .collect(),
+        barycentric: true,
+        notes: format!(
+            "bench_em template={} pattern={} charge_scale={} velocity_scale={}",
+            case.template.as_str(),
+            case.charge_pattern.as_str(),
+            case.charge_scale,
+            case.velocity_scale
+        ),
+    };
+    Ok((system, ic_spec))
 }
 
 fn run_findings(results_dir: PathBuf, out_tex: PathBuf, build_pdf: bool) -> anyhow::Result<()> {
@@ -1103,7 +1769,7 @@ fn run_discovery(
         &dataset_z,
     );
 
-    let simulation = build_sim_summary(&result, rollout_integrator);
+    let simulation = build_sim_summary(&result, &sim_cfg, rollout_integrator);
     let dataset_summary = build_dataset_summary(
         &vector_data.feature_names,
         &library,
@@ -1548,19 +2214,28 @@ fn compute_feature_vector(
     cfg: &Config,
     feature_names: &[String],
 ) -> Vec<f64> {
-    fn softened_inv_r3(r2: f64, epsilon: f64) -> f64 {
+    fn softened_inv_r3_r4(r2: f64, epsilon: f64) -> (f64, f64) {
         if r2 == 0.0 {
-            return 0.0;
+            return (0.0, 0.0);
         }
         let soft2 = if epsilon == 0.0 { r2 } else { r2 + epsilon * epsilon };
         let r = soft2.sqrt();
-        1.0 / (r * r * r)
+        if r == 0.0 || !r.is_finite() {
+            return (0.0, 0.0);
+        }
+        let inv_r = 1.0 / r;
+        let inv_r3 = inv_r * inv_r * inv_r;
+        let inv_r4 = inv_r3 * inv_r;
+        (inv_r3, inv_r4)
     }
 
     let epsilon = cfg.softening;
     let mut grav = Vec3::zero(); // Σ m_j (r_j - r_i) / |r|^3  (no G)
+    let mut grav_r4 = Vec3::zero(); // Σ m_j (r_j - r_i) / |r|^4 (no G)
     let mut elec = Vec3::zero(); // (q_i/m_i) Σ q_j (r_i - r_j) / |r|^3 (no k_e)
+    let mut elec_r4 = Vec3::zero(); // (q_i/m_i) Σ q_j (r_i - r_j) / |r|^4 (no k_e)
     let mut mag = Vec3::zero(); // (q_i/m_i) (v_i × B_basis) where B_basis=(1/4π)Σ q_j(v_j×(r_i-r_j))/|r|^3 (no μ0)
+    let mut mag_r4 = Vec3::zero(); // same, with |r|^4 scaling
 
     if cfg.enable_gravity {
         for j in 0..3 {
@@ -1568,8 +2243,9 @@ fn compute_feature_vector(
                 continue;
             }
             let r_ji = system.state.pos[j] - system.state.pos[body];
-            let inv_r3 = softened_inv_r3(r_ji.norm_sq(), epsilon);
+            let (inv_r3, inv_r4) = softened_inv_r3_r4(r_ji.norm_sq(), epsilon);
             grav = grav + r_ji * (system.bodies[j].mass * inv_r3);
+            grav_r4 = grav_r4 + r_ji * (system.bodies[j].mass * inv_r4);
         }
     }
 
@@ -1579,7 +2255,9 @@ fn compute_feature_vector(
         if qi != 0.0 && mi != 0.0 {
             let q_over_m = qi / mi;
             let mut e_basis = Vec3::zero();
+            let mut e_basis_r4 = Vec3::zero();
             let mut b_basis = Vec3::zero();
+            let mut b_basis_r4 = Vec3::zero();
             let inv_4pi = 1.0 / (4.0 * std::f64::consts::PI);
             for j in 0..3 {
                 if j == body {
@@ -1587,33 +2265,80 @@ fn compute_feature_vector(
                 }
                 // Use (r_i - r_j) to match the electrostatic field direction.
                 let r = system.state.pos[body] - system.state.pos[j];
-                let inv_r3 = softened_inv_r3(r.norm_sq(), epsilon);
+                let (inv_r3, inv_r4) = softened_inv_r3_r4(r.norm_sq(), epsilon);
                 let qj = system.bodies[j].charge;
                 e_basis = e_basis + r * (qj * inv_r3);
+                e_basis_r4 = e_basis_r4 + r * (qj * inv_r4);
 
                 // Magnetic basis uses v_j × (r_i - r_j).
                 let vj_cross_r = system.state.vel[j].cross(r);
                 b_basis = b_basis + vj_cross_r * (qj * inv_r3 * inv_4pi);
+                b_basis_r4 = b_basis_r4 + vj_cross_r * (qj * inv_r4 * inv_4pi);
             }
             elec = e_basis * q_over_m;
+            elec_r4 = e_basis_r4 * q_over_m;
             mag = system.state.vel[body].cross(b_basis) * q_over_m;
+            mag_r4 = system.state.vel[body].cross(b_basis_r4) * q_over_m;
         }
     }
-    feature_names
-        .iter()
-        .map(|name| match name.as_str() {
+
+    const R_GATE: f64 = 0.5;
+    let gate_close = (min_pair_distance(&system.state.pos) < R_GATE) as u8 as f64;
+    let gate_far = 1.0 - gate_close;
+
+    let grav_close = grav * gate_close;
+    let grav_far = grav * gate_far;
+    let elec_close = elec * gate_close;
+    let elec_far = elec * gate_far;
+    let mag_close = mag * gate_close;
+    let mag_far = mag * gate_far;
+
+    let mut out = Vec::with_capacity(feature_names.len());
+    for name in feature_names {
+        let v = match name.as_str() {
             "grav_x" => grav.x,
             "grav_y" => grav.y,
             "grav_z" => grav.z,
+            "grav_r4_x" => grav_r4.x,
+            "grav_r4_y" => grav_r4.y,
+            "grav_r4_z" => grav_r4.z,
             "elec_x" => elec.x,
             "elec_y" => elec.y,
             "elec_z" => elec.z,
+            "elec_r4_x" => elec_r4.x,
+            "elec_r4_y" => elec_r4.y,
+            "elec_r4_z" => elec_r4.z,
             "mag_x" => mag.x,
             "mag_y" => mag.y,
             "mag_z" => mag.z,
+            "mag_r4_x" => mag_r4.x,
+            "mag_r4_y" => mag_r4.y,
+            "mag_r4_z" => mag_r4.z,
+            "gate_close" => gate_close,
+            "gate_far" => gate_far,
+            "grav_close_x" => grav_close.x,
+            "grav_close_y" => grav_close.y,
+            "grav_close_z" => grav_close.z,
+            "grav_far_x" => grav_far.x,
+            "grav_far_y" => grav_far.y,
+            "grav_far_z" => grav_far.z,
+            "elec_close_x" => elec_close.x,
+            "elec_close_y" => elec_close.y,
+            "elec_close_z" => elec_close.z,
+            "elec_far_x" => elec_far.x,
+            "elec_far_y" => elec_far.y,
+            "elec_far_z" => elec_far.z,
+            "mag_close_x" => mag_close.x,
+            "mag_close_y" => mag_close.y,
+            "mag_close_z" => mag_close.z,
+            "mag_far_x" => mag_far.x,
+            "mag_far_y" => mag_far.y,
+            "mag_far_z" => mag_far.z,
             _ => 0.0,
-        })
-        .collect()
+        };
+        out.push(v);
+    }
+    out
 }
 
 #[derive(Clone)]
@@ -1817,7 +2542,34 @@ fn build_vector_candidates(
     candidates
 }
 
-fn build_sim_summary(result: &threebody_core::sim::SimResult, rollout_integrator: RolloutIntegrator) -> SimulationSummary {
+fn build_sim_summary(
+    result: &threebody_core::sim::SimResult,
+    cfg: &Config,
+    rollout_integrator: RolloutIntegrator,
+) -> SimulationSummary {
+    fn mean_abs_accel(
+        result: &threebody_core::sim::SimResult,
+        force_cfg: &ForceConfig,
+    ) -> Option<f64> {
+        if result.steps.is_empty() {
+            return None;
+        }
+        let mut sum = 0.0f64;
+        let mut count = 0usize;
+        for step in &result.steps {
+            let acc = compute_accel(&step.system, force_cfg);
+            for a in &acc {
+                sum += a.norm();
+                count += 1;
+            }
+        }
+        if count == 0 {
+            None
+        } else {
+            Some(sum / count as f64)
+        }
+    }
+
     let energy_start = result.steps.first().map(|s| s.diagnostics.energy_proxy);
     let energy_end = result.steps.last().map(|s| s.diagnostics.energy_proxy);
     let energy_drift = match (energy_start, energy_end) {
@@ -1841,6 +2593,31 @@ fn build_sim_summary(result: &threebody_core::sim::SimResult, rollout_integrator
             None => step.regime.max_accel,
         });
     }
+
+    let grav_force_cfg = ForceConfig {
+        g: cfg.constants.g,
+        k_e: cfg.constants.k_e,
+        mu_0: cfg.constants.mu_0,
+        epsilon: cfg.softening,
+        enable_gravity: true,
+        enable_em: false,
+    };
+    let em_force_cfg = ForceConfig {
+        g: cfg.constants.g,
+        k_e: cfg.constants.k_e,
+        mu_0: cfg.constants.mu_0,
+        epsilon: cfg.softening,
+        enable_gravity: false,
+        enable_em: true,
+    };
+
+    let mean_abs_accel_grav = cfg.enable_gravity.then(|| mean_abs_accel(result, &grav_force_cfg)).flatten();
+    let mean_abs_accel_em = cfg.enable_em.then(|| mean_abs_accel(result, &em_force_cfg)).flatten();
+    let mean_abs_accel_ratio_em_over_grav = match (mean_abs_accel_em, mean_abs_accel_grav) {
+        (Some(em), Some(grav)) if em.is_finite() && grav.is_finite() && grav > 0.0 => Some(em / grav),
+        _ => None,
+    };
+
     SimulationSummary {
         steps: result.steps.len(),
         energy_start,
@@ -1849,6 +2626,9 @@ fn build_sim_summary(result: &threebody_core::sim::SimResult, rollout_integrator
         min_pair_dist: min_pair,
         max_speed,
         max_accel,
+        mean_abs_accel_grav,
+        mean_abs_accel_em,
+        mean_abs_accel_ratio_em_over_grav,
         dt_min: result.stats.dt_min,
         dt_max: result.stats.dt_max,
         dt_avg: result.stats.dt_avg,
@@ -2328,7 +3108,7 @@ fn run_factory(
             }
         }
 
-        let sim_summary = build_sim_summary(&result, current_rollout);
+        let sim_summary = build_sim_summary(&result, &cfg, current_rollout);
         let dataset_summary = build_dataset_summary(
             &vector_data.feature_names,
             &library,
@@ -2494,6 +3274,18 @@ fn run_factory(
         md.push_str(&format!("- Steps: {}\n", sim_summary.steps));
         md.push_str(&format!("- Energy drift: {:?}\n", sim_summary.energy_drift));
         md.push_str(&format!("- Min pair dist: {:?}\n", sim_summary.min_pair_dist));
+        md.push_str(&format!(
+            "- mean_abs_accel_grav: {}\n",
+            format_opt_f64(sim_summary.mean_abs_accel_grav)
+        ));
+        md.push_str(&format!(
+            "- mean_abs_accel_em: {}\n",
+            format_opt_f64(sim_summary.mean_abs_accel_em)
+        ));
+        md.push_str(&format!(
+            "- mean(|a_em|)/mean(|a_grav|): {}\n",
+            format_opt_f64(sim_summary.mean_abs_accel_ratio_em_over_grav)
+        ));
         if let Some(best_vec) = vector_candidates.first() {
             md.push_str(&format!(
                 "- Best vector model: mse={:.6}, rollout_rmse={:?}\n",
@@ -3146,6 +3938,38 @@ fn render_best_results_md(index: &BestResultsIndexV1) -> String {
         md.push_str(&format!("- steps={}, dt={}\n", rec.bucket.steps, rec.bucket.dt));
     }
 
+    let highlight = index
+        .buckets
+        .iter()
+        .max_by(|a, b| a.bucket.steps.cmp(&b.bucket.steps).then_with(|| {
+            a.bucket
+                .dt
+                .partial_cmp(&b.bucket.dt)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }));
+    if let Some(best) = highlight {
+        md.push_str("\n## Most Realistic / Longest-Horizon Bucket (Largest steps)\n\n");
+        md.push_str(&format!(
+            "- Bucket: steps={}, dt={}\n",
+            best.bucket.steps, best.bucket.dt
+        ));
+        md.push_str(&format!(
+            "- Metrics: rollout_rmse={}, mse={:.6e}, complexity={}, divergence_time={}\n",
+            format_metric_opt(best.metrics.rollout_rmse),
+            best.metrics.mse,
+            best.metrics.complexity,
+            format_metric_opt(best.metrics.divergence_time),
+        ));
+        md.push_str("- Best equation (exact):\n");
+        md.push_str("```text\n");
+        md.push_str(&best.equation_text);
+        md.push_str("\n```\n");
+        md.push_str(&render_expanded_math_md(&best.equation_text));
+        md.push_str(&format!("- Evidence: `{}/RESULTS.md`\n", best.run_dir));
+        md.push_str(&format!("- Raw: `{}`\n", best.eval_input_path));
+        md.push_str("\n");
+    }
+
     md.push_str("\n## Current Incumbents\n\n");
     for rec in &index.buckets {
         md.push_str(&format!("### steps={}, dt={}\n\n", rec.bucket.steps, rec.bucket.dt));
@@ -3167,6 +3991,7 @@ fn render_best_results_md(index: &BestResultsIndexV1) -> String {
     md.push_str("## Next Experiment (for humans and LLMs)\n\n");
     md.push_str("- Goal: reduce `rollout_rmse` without increasing `complexity`.\n");
     md.push_str("- If `mse` is tiny but `rollout_rmse` is large, the model fits accelerations but rolls out poorly (instability).\n");
+    md.push_str("- If EM is enabled but the best equation stays gravity-only, check the EM/gravity signal ratio in `RESULTS.md`.\n");
     md.push_str("- Report improvements by attaching:\n");
     md.push_str("  - `results/best_results.md`\n");
     md.push_str("  - the run’s `RESULTS.md`\n");
@@ -3955,6 +4780,18 @@ fn render_executive_summary_md(
                     md.push_str(&format!("- steps={}\n", sim.steps));
                     md.push_str(&format!("- min_pair_dist={}\n", format_opt_f64(sim.min_pair_dist)));
                     md.push_str(&format!("- energy_drift={}\n", format_opt_f64(sim.energy_drift)));
+                    md.push_str(&format!(
+                        "- mean_abs_accel_grav={}\n",
+                        format_opt_f64(sim.mean_abs_accel_grav)
+                    ));
+                    md.push_str(&format!(
+                        "- mean_abs_accel_em={}\n",
+                        format_opt_f64(sim.mean_abs_accel_em)
+                    ));
+                    md.push_str(&format!(
+                        "- mean(|a_em|)/mean(|a_grav|)={}\n",
+                        format_opt_f64(sim.mean_abs_accel_ratio_em_over_grav)
+                    ));
                     md.push_str(&format!("- rollout_integrator={}\n", sim.rollout_integrator));
                     if !sim.warnings.is_empty() {
                         md.push_str(&format!("- warnings: {}\n", sim.warnings.join("; ")));
@@ -4184,6 +5021,81 @@ mod tests {
             rollout_metrics(&model, &vec_data.feature_names, &result, &cfg, RolloutIntegrator::Leapfrog);
         assert!(rmse_e.is_finite());
         assert!(rmse_l.is_finite());
+    }
+
+    #[test]
+    fn sim_summary_includes_em_signal_ratio_when_em_enabled() {
+        let mut cfg = Config::default();
+        cfg.enable_gravity = true;
+        cfg.enable_em = true;
+        cfg.integrator.kind = IntegratorKind::Leapfrog;
+        cfg.integrator.adaptive = false;
+
+        let bodies = [Body::new(1.0, 1.0), Body::new(1.0, -1.0), Body::new(1.0, 1.0)];
+        let pos = [
+            Vec3::new(-0.6, 0.0, 0.0),
+            Vec3::new(0.6, 0.0, 0.0),
+            Vec3::new(0.0, 0.9, 0.0),
+        ];
+        let vel = [
+            Vec3::new(0.0, 0.2, 0.0),
+            Vec3::new(0.0, -0.2, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+        ];
+        let system = System::new(bodies, State::new(pos, vel));
+        let result = simulate_with_cfg(system, &cfg, SimOptions { steps: 2, dt: 0.01 });
+        let sim = build_sim_summary(&result, &cfg, RolloutIntegrator::Euler);
+
+        let grav = sim.mean_abs_accel_grav.expect("grav mean");
+        let em = sim.mean_abs_accel_em.expect("em mean");
+        let ratio = sim
+            .mean_abs_accel_ratio_em_over_grav
+            .expect("ratio mean");
+        assert!(grav.is_finite() && grav > 0.0);
+        assert!(em.is_finite() && em > 0.0);
+        assert!(ratio.is_finite() && ratio > 0.0);
+    }
+
+    #[test]
+    fn extended_feature_gates_are_consistent() {
+        let mut cfg = Config::default();
+        cfg.enable_gravity = true;
+        cfg.enable_em = true;
+
+        // Force a "close" configuration so gate_close=1.
+        let bodies = [Body::new(1.0, 0.1), Body::new(1.0, -0.1), Body::new(1.0, 0.1)];
+        let pos = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.3, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ];
+        let vel = [Vec3::zero(); 3];
+        let system = System::new(bodies, State::new(pos, vel));
+
+        let feature_names = vec![
+            "grav_x".to_string(),
+            "grav_r4_x".to_string(),
+            "gate_close".to_string(),
+            "gate_far".to_string(),
+            "grav_close_x".to_string(),
+            "grav_far_x".to_string(),
+        ];
+        let feats = compute_feature_vector(&system, 0, &cfg, &feature_names);
+        let idx = |name: &str| feature_names.iter().position(|f| f == name).unwrap();
+
+        let gate_close = feats[idx("gate_close")];
+        let gate_far = feats[idx("gate_far")];
+        assert_eq!(gate_close, 1.0);
+        assert_eq!(gate_far, 0.0);
+
+        let grav_x = feats[idx("grav_x")];
+        let grav_close_x = feats[idx("grav_close_x")];
+        let grav_far_x = feats[idx("grav_far_x")];
+        assert!((grav_x - grav_close_x).abs() < 1e-12);
+        assert_eq!(grav_far_x, 0.0);
+
+        let grav_r4_x = feats[idx("grav_r4_x")];
+        assert!(grav_r4_x.is_finite());
     }
 
     #[test]

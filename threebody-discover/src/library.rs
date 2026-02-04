@@ -23,6 +23,31 @@ impl FeatureLibrary {
         }
     }
 
+    pub fn extended_physics() -> Self {
+        let mut features = Self::default_physics().features;
+
+        for axis in ["x", "y", "z"] {
+            features.push(format!("grav_r4_{axis}"));
+            features.push(format!("elec_r4_{axis}"));
+            features.push(format!("mag_r4_{axis}"));
+        }
+
+        features.push("gate_close".to_string());
+        features.push("gate_far".to_string());
+        for axis in ["x", "y", "z"] {
+            features.push(format!("grav_close_{axis}"));
+            features.push(format!("grav_far_{axis}"));
+            features.push(format!("elec_close_{axis}"));
+            features.push(format!("elec_far_{axis}"));
+            features.push(format!("mag_close_{axis}"));
+            features.push(format!("mag_far_{axis}"));
+        }
+
+        features.sort();
+        features.dedup();
+        Self { features }
+    }
+
     pub fn random_equation(&self, rng: &mut crate::ga::Lcg, max_terms: usize) -> Equation {
         let mut terms = Vec::new();
         let term_count = rng.gen_range_usize(1, max_terms.max(1));
@@ -37,7 +62,66 @@ impl FeatureLibrary {
     pub fn feature_descriptions(&self) -> Vec<FeatureDescription> {
         self.features
             .iter()
-            .map(|name| match name.as_str() {
+            .map(|name| {
+                if let Some(axis) = name.strip_prefix("grav_r4_") {
+                    return FeatureDescription {
+                        name: name.clone(),
+                        description: format!(
+                            "gravity r4 basis {axis}-component: Σ m_j (r_j - r_i)_{axis} / |r_j-r_i|^4 (no G)"
+                        ),
+                        tags: vec!["gravity".to_string(), "distance_scaling".to_string()],
+                    };
+                }
+                if let Some(axis) = name.strip_prefix("elec_r4_") {
+                    return FeatureDescription {
+                        name: name.clone(),
+                        description: format!(
+                            "electric r4 basis {axis}-component: (q_i/m_i) Σ q_j (r_i - r_j)_{axis} / |r_i-r_j|^4 (no k_e)"
+                        ),
+                        tags: vec!["em".to_string(), "electric".to_string(), "distance_scaling".to_string()],
+                    };
+                }
+                if let Some(axis) = name.strip_prefix("mag_r4_") {
+                    return FeatureDescription {
+                        name: name.clone(),
+                        description: format!(
+                            "magnetic r4 basis {axis}-component: (q_i/m_i) (v_i×B_r4)_{{{axis}}} where B_r4=(1/4π)Σ q_j(v_j×(r_i-r_j))/|r|^4 (no μ0)"
+                        ),
+                        tags: vec!["em".to_string(), "magnetic".to_string(), "distance_scaling".to_string()],
+                    };
+                }
+                if name == "gate_close" {
+                    return FeatureDescription {
+                        name: name.clone(),
+                        description: "binary gate: 1 when min_pair_dist < r_gate, else 0 (used for piecewise models)".to_string(),
+                        tags: vec!["gate".to_string()],
+                    };
+                }
+                if name == "gate_far" {
+                    return FeatureDescription {
+                        name: name.clone(),
+                        description: "binary gate: 1 when min_pair_dist >= r_gate, else 0 (used for piecewise models)".to_string(),
+                        tags: vec!["gate".to_string()],
+                    };
+                }
+                for (prefix, tag) in [("grav", "gravity"), ("elec", "electric"), ("mag", "magnetic")] {
+                    if let Some(axis) = name.strip_prefix(&format!("{prefix}_close_")) {
+                        return FeatureDescription {
+                            name: name.clone(),
+                            description: format!("gated ({prefix}) close {axis}-component: gate_close * {prefix}_{axis}"),
+                            tags: vec![tag.to_string(), "gate".to_string()],
+                        };
+                    }
+                    if let Some(axis) = name.strip_prefix(&format!("{prefix}_far_")) {
+                        return FeatureDescription {
+                            name: name.clone(),
+                            description: format!("gated ({prefix}) far {axis}-component: gate_far * {prefix}_{axis}"),
+                            tags: vec![tag.to_string(), "gate".to_string()],
+                        };
+                    }
+                }
+
+                match name.as_str() {
                 "grav_x" => FeatureDescription {
                     name: name.clone(),
                     description: "gravitational basis x-component: Σ m_j (r_j - r_i)_x / |r_j-r_i|^3 (no G)".to_string(),
@@ -88,6 +172,7 @@ impl FeatureLibrary {
                     description: "feature".to_string(),
                     tags: vec![],
                 },
+            }
             })
             .collect()
     }
@@ -104,5 +189,24 @@ mod tests {
         let mut rng = Lcg::new(123);
         let eq = library.random_equation(&mut rng, 3);
         assert!(!eq.terms.is_empty());
+    }
+
+    #[test]
+    fn extended_library_includes_expected_features() {
+        let lib = FeatureLibrary::extended_physics();
+        for f in [
+            "grav_x",
+            "elec_y",
+            "mag_z",
+            "grav_r4_x",
+            "elec_r4_y",
+            "mag_r4_z",
+            "gate_close",
+            "gate_far",
+            "grav_close_x",
+            "grav_far_x",
+        ] {
+            assert!(lib.features.iter().any(|name| name == f), "missing {f}");
+        }
     }
 }

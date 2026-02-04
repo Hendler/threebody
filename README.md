@@ -126,6 +126,20 @@ What it does:
 - Requires a reachable LLM endpoint (OpenAI by default). Set `.openai_key` or `OPENAI_API_KEY`. To use a local OpenAI-compatible endpoint, set `OPENAI_BASE_URL` (e.g. `http://localhost:11434/v1`). If your endpoint only supports Chat Completions, set `OPENAI_API_STYLE=chat`. If your endpoint needs a different model name, set `THREEBODY_LLM_MODEL`.
 - Writes an aggregated findings report to `results/findings.tex` (and `results/findings.pdf` when `pdflatex` is available). Each run also copies a timestamped PDF snapshot (e.g. `results/findings_<unix_seconds>.pdf`).
 
+How to confirm it really used an LLM (and didn’t silently fall back):
+- `just quickstart` / `just quickstart10` run `llm-check` first and will fail fast if the LLM isn’t reachable.
+- Runs created with `--require-llm` do not fall back to the mock; if the run completed, the LLM endpoint was reachable.
+- Evidence is saved per iteration:
+  - `results/<run>/factory/run_###/ic_prompt.txt`, `ic_response.txt`
+  - `results/<run>/factory/run_###/judge_prompt.txt`, `judge_response.txt`
+  - `results/<run>/factory/evaluation_prompt.txt`
+
+EM identifiability benchmark (when EM keeps rediscovering gravity-only):
+```bash
+cargo run -p threebody-cli -- bench-em --steps 200 --dt 0.01 --max-cases 24 --heldout 0 --no-pdf
+```
+This writes `results/bench_em_*/RESULTS.md` plus per-case artifacts under `results/bench_em_*/factory/run_###/`, and logs a simple EM/gravity “signal ratio” to help diagnose when EM terms are detectable.
+
 What to open first (novice-friendly):
 - Global best: `results/best_results.md`
 - Latest run: `results/quickstart_*/RESULTS.md`

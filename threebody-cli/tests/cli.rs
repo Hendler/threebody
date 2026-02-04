@@ -1,6 +1,174 @@
 use std::process::Command;
 use std::{env, fs};
 
+fn start_openai_chat_stub() -> (std::net::SocketAddr, std::thread::JoinHandle<()>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    fn respond(mut stream: TcpStream, content: &str) {
+        let body = serde_json::json!({
+            "choices": [
+                {
+                    "message": {
+                        "content": content
+                    }
+                }
+            ]
+        })
+        .to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(resp.as_bytes());
+    }
+
+    fn extract_prompt(body: &str) -> Option<String> {
+        let v: serde_json::Value = serde_json::from_str(body).ok()?;
+        v.get("messages")?
+            .get(0)?
+            .get("content")?
+            .as_str()
+            .map(|s| s.to_string())
+    }
+
+    fn handle_conn(mut stream: TcpStream) {
+        // Read headers.
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 1024];
+        while !buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            match stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(_) => return,
+            }
+            if buf.len() > 1024 * 1024 {
+                return;
+            }
+        }
+        let header_end = match buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            Some(i) => i + 4,
+            None => return,
+        };
+        let headers = String::from_utf8_lossy(&buf[..header_end]);
+        let mut content_len: usize = 0;
+        for line in headers.lines() {
+            let lower = line.to_ascii_lowercase();
+            if let Some(v) = lower.strip_prefix("content-length:") {
+                content_len = v.trim().parse::<usize>().unwrap_or(0);
+            }
+        }
+
+        // Read body.
+        let mut body_bytes = buf[header_end..].to_vec();
+        while body_bytes.len() < content_len {
+            match stream.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => body_bytes.extend_from_slice(&tmp[..n]),
+                Err(_) => break,
+            }
+        }
+        let body = String::from_utf8_lossy(&body_bytes);
+        let prompt = extract_prompt(&body).unwrap_or_default();
+
+        let ic_json = r#"{"bodies":[{"mass":1.0,"charge":0.0,"pos":[-0.5,0.0,0.0],"vel":[0.0,0.7,0.0]},{"mass":1.0,"charge":0.0,"pos":[0.5,0.0,0.0],"vel":[0.0,-0.7,0.0]},{"mass":0.1,"charge":0.0,"pos":[0.0,0.3,0.0],"vel":[0.0,0.0,0.0]}],"barycentric":true,"notes":"stub"}"#;
+        let judge_json = r#"{
+  "version":"v1",
+  "ranking":[0],
+  "scores":[
+    {
+      "id":0,
+      "total":"auto",
+      "components":{
+        "fidelity":"auto",
+        "parsimony":"auto",
+        "physical_plausibility":"auto",
+        "regime_consistency":"auto",
+        "stability_risk":"auto"
+      },
+      "rationale":"stub judge"
+    }
+  ],
+  "recommendations":{
+    "next_initial_conditions":null,
+    "next_rollout_integrator":null,
+    "next_ga_heuristic":null,
+    "next_discovery_solver":null,
+    "next_normalize":null,
+    "next_stls_threshold":"auto",
+    "next_ridge_lambda":"auto",
+    "next_lasso_alpha":"auto"
+  },
+  "summary":"stub judge ok"
+}"#;
+        let eval_md = r#"# Factory Evaluation (stub)
+
+## What was run
+- stub
+
+## Best result (plain English)
+- stub
+
+## How good is it?
+- stub
+
+## What the numbers mean
+- stub
+
+## Next steps (easy)
+- stub
+
+## Next steps (more advanced)
+- stub
+
+## How to report improvements
+- stub
+"#;
+
+        if prompt.contains("selecting initial conditions") {
+            respond(stream, ic_json);
+        } else if prompt.contains("academic reviewer evaluating candidate equations") {
+            respond(stream, judge_json);
+        } else if prompt.contains("writing a short evaluation of an automated equation-discovery run") {
+            respond(stream, eval_md);
+        } else {
+            respond(stream, "{}");
+        }
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub server");
+    listener
+        .set_nonblocking(true)
+        .expect("set nonblocking");
+    let addr = listener.local_addr().expect("local addr");
+    let running = Arc::new(AtomicBool::new(true));
+    let running_thread = running.clone();
+
+    let handle = thread::spawn(move || {
+        while running_thread.load(Ordering::SeqCst) {
+            match listener.accept() {
+                Ok((stream, _)) => handle_conn(stream),
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    (addr, handle, running)
+}
+
 #[test]
 fn help_includes_commands() {
     let exe = env!("CARGO_BIN_EXE_threebody-cli");
@@ -319,6 +487,49 @@ fn quick_start_flow_runs() {
 }
 
 #[test]
+fn bench_em_writes_suite_and_results() {
+    let exe = env!("CARGO_BIN_EXE_threebody-cli");
+    let tmp_root = env::temp_dir().join(format!("threebody_bench_em_{}", std::process::id()));
+    if tmp_root.exists() {
+        let _ = fs::remove_dir_all(&tmp_root);
+    }
+    fs::create_dir_all(&tmp_root).expect("create temp dir");
+
+    let results_dir = tmp_root.join("results");
+    let out_dir = results_dir.join("bench_out");
+
+    let output = Command::new(exe)
+        .args([
+            "bench-em",
+            "--results-dir",
+            results_dir.to_str().unwrap(),
+            "--out-dir",
+            out_dir.to_str().unwrap(),
+            "--steps",
+            "2",
+            "--dt",
+            "0.01",
+            "--max-cases",
+            "1",
+            "--heldout",
+            "0",
+            "--no-pdf",
+        ])
+        .output()
+        .expect("run bench-em");
+    assert!(
+        output.status.success(),
+        "bench-em failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(out_dir.join("RESULTS.md").exists());
+    assert!(out_dir.join("suite.json").exists());
+    assert!(out_dir.join("factory").join("evaluation_input.json").exists());
+    assert!(out_dir.join("factory").join("run_001").join("report.md").exists());
+}
+
+#[test]
 fn quickstart_command_runs() {
     let exe = env!("CARGO_BIN_EXE_threebody-cli");
     let tmp_dir = env::temp_dir().join(format!("threebody_quickstart_cmd_{}", std::process::id()));
@@ -351,6 +562,56 @@ fn quickstart_command_runs() {
     assert!(factory_dir.join("evaluation.tex").exists());
     assert!(factory_dir.join("evaluation_history.json").exists());
  }
+
+#[test]
+fn quickstart_command_runs_with_require_llm_against_stub() {
+    use std::net::TcpStream;
+    use std::sync::atomic::Ordering;
+
+    let (addr, handle, running) = start_openai_chat_stub();
+
+    let exe = env!("CARGO_BIN_EXE_threebody-cli");
+    let tmp_dir = env::temp_dir().join(format!(
+        "threebody_quickstart_cmd_llm_{}",
+        std::process::id()
+    ));
+    if tmp_dir.exists() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+    fs::create_dir_all(&tmp_dir).expect("create temp dir");
+
+    let base_url = format!("http://{}/v1", addr);
+    let out = Command::new(exe)
+        .current_dir(&tmp_dir)
+        .env("OPENAI_API_KEY", "sk-test")
+        .env("OPENAI_BASE_URL", base_url)
+        .env("OPENAI_API_STYLE", "chat")
+        .args([
+            "quickstart",
+            "--out-dir",
+            tmp_dir.to_str().unwrap(),
+            "--steps",
+            "5",
+            "--max-iters",
+            "1",
+            "--require-llm",
+        ])
+        .output()
+        .expect("quickstart require-llm");
+
+    // Shut down stub server thread.
+    running.store(false, Ordering::SeqCst);
+    let _ = TcpStream::connect(addr);
+    handle.join().expect("join stub server");
+
+    assert!(
+        out.status.success(),
+        "quickstart require-llm failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(tmp_dir.join("RESULTS.md").exists());
+    assert!(tmp_dir.join("factory").join("evaluation_llm.md").exists());
+}
 
 #[test]
 fn discover_accepts_explicit_input_and_sidecar_paths() {

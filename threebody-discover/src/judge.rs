@@ -90,6 +90,12 @@ pub struct SimulationSummary {
     pub min_pair_dist: Option<f64>,
     pub max_speed: Option<f64>,
     pub max_accel: Option<f64>,
+    #[serde(default)]
+    pub mean_abs_accel_grav: Option<f64>,
+    #[serde(default)]
+    pub mean_abs_accel_em: Option<f64>,
+    #[serde(default)]
+    pub mean_abs_accel_ratio_em_over_grav: Option<f64>,
     pub dt_min: Option<f64>,
     pub dt_max: Option<f64>,
     pub dt_avg: Option<f64>,
@@ -147,17 +153,36 @@ pub struct JudgeInput {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ScoreComponents {
+    #[serde(default, deserialize_with = "deserialize_f64_or_auto_default")]
     pub fidelity: f64,
+    #[serde(default, deserialize_with = "deserialize_f64_or_auto_default")]
     pub parsimony: f64,
+    #[serde(default, deserialize_with = "deserialize_f64_or_auto_default")]
     pub physical_plausibility: f64,
+    #[serde(default, deserialize_with = "deserialize_f64_or_auto_default")]
     pub regime_consistency: f64,
+    #[serde(default, deserialize_with = "deserialize_f64_or_auto_default")]
     pub stability_risk: f64,
+}
+
+impl Default for ScoreComponents {
+    fn default() -> Self {
+        Self {
+            fidelity: 0.0,
+            parsimony: 0.0,
+            physical_plausibility: 0.0,
+            regime_consistency: 0.0,
+            stability_risk: 0.0,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct JudgeScore {
     pub id: usize,
+    #[serde(default, deserialize_with = "deserialize_f64_or_auto_default")]
     pub total: f64,
+    #[serde(default)]
     pub components: ScoreComponents,
     #[serde(default)]
     pub rationale: String,
@@ -215,10 +240,47 @@ where
     }
 }
 
+fn deserialize_f64_or_auto_default<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    use serde::de;
+
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(v) = v else {
+        return Ok(0.0);
+    };
+    match v {
+        serde_json::Value::Number(num) => num
+            .as_f64()
+            .ok_or_else(|| de::Error::custom("expected f64-compatible number"))
+            .map(|x| if x.is_finite() { x } else { 0.0 }),
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return Ok(0.0);
+            }
+            let lowered = trimmed.to_lowercase();
+            if lowered == "auto" || lowered == "none" || lowered == "null" || lowered == "nan" {
+                return Ok(0.0);
+            }
+            lowered
+                .parse::<f64>()
+                .map(|x| if x.is_finite() { x } else { 0.0 })
+                .map_err(de::Error::custom)
+        }
+        serde_json::Value::Null => Ok(0.0),
+        _ => Err(de::Error::custom("expected number, string, or null")),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct JudgeResponse {
     pub version: String,
+    #[serde(default)]
     pub ranking: Vec<usize>,
+    #[serde(default)]
     pub scores: Vec<JudgeScore>,
     pub recommendations: JudgeRecommendations,
     #[serde(default)]
@@ -309,6 +371,8 @@ pub fn build_ic_prompt(request: &IcRequest) -> String {
     let mut prompt = String::new();
     prompt.push_str("You are selecting initial conditions for a 3-body simulation.\n");
     prompt.push_str("Return ONLY valid JSON that matches the schema below. No extra text.\n");
+    prompt.push_str("The `bodies` array MUST contain exactly 3 bodies (no more, no less).\n");
+    prompt.push_str("Do NOT use ellipses (`...`) or comments in JSON.\n");
     prompt.push_str("Constraints:\n");
     prompt.push_str(&format!(
         "- mass in [{:.3}, {:.3}]\n- charge in [{:.3}, {:.3}]\n- position components in [{:.3}, {:.3}]\n- velocity components in [{:.3}, {:.3}]\n- minimum pair distance >= {:.3}\n",
@@ -325,7 +389,15 @@ pub fn build_ic_prompt(request: &IcRequest) -> String {
         }
     }
     prompt.push_str("Schema:\n");
-    prompt.push_str("{\"bodies\":[{\"mass\":1.0,\"charge\":0.0,\"pos\":[0,0,0],\"vel\":[0,0,0]}, ... x3],\"barycentric\":true,\"notes\":\"...\"}\n");
+    prompt.push_str("{\n");
+    prompt.push_str("  \"bodies\": [\n");
+    prompt.push_str("    {\"mass\": 1.0, \"charge\": 0.0, \"pos\": [0.0, 0.0, 0.0], \"vel\": [0.0, 0.0, 0.0]},\n");
+    prompt.push_str("    {\"mass\": 1.0, \"charge\": 0.0, \"pos\": [0.0, 0.0, 0.0], \"vel\": [0.0, 0.0, 0.0]},\n");
+    prompt.push_str("    {\"mass\": 1.0, \"charge\": 0.0, \"pos\": [0.0, 0.0, 0.0], \"vel\": [0.0, 0.0, 0.0]}\n");
+    prompt.push_str("  ],\n");
+    prompt.push_str("  \"barycentric\": true,\n");
+    prompt.push_str("  \"notes\": \"...\"\n");
+    prompt.push_str("}\n");
     prompt.push_str("Output JSON only.\n");
     prompt
 }
@@ -369,7 +441,7 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     if let Some(sim) = &input.simulation {
         prompt.push_str("Simulation summary:\n");
         prompt.push_str(&format!(
-            "steps={}, energy_start={:?}, energy_end={:?}, energy_drift={:?}, min_pair_dist={:?}, max_speed={:?}, max_accel={:?}, dt_min={:?}, dt_max={:?}, dt_avg={:?}\n",
+            "steps={}, energy_start={:?}, energy_end={:?}, energy_drift={:?}, min_pair_dist={:?}, max_speed={:?}, max_accel={:?}, mean_abs_accel_grav={:?}, mean_abs_accel_em={:?}, mean_abs_accel_ratio_em_over_grav={:?}, dt_min={:?}, dt_max={:?}, dt_avg={:?}\n",
             sim.steps,
             sim.energy_start,
             sim.energy_end,
@@ -377,6 +449,9 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
             sim.min_pair_dist,
             sim.max_speed,
             sim.max_accel,
+            sim.mean_abs_accel_grav,
+            sim.mean_abs_accel_em,
+            sim.mean_abs_accel_ratio_em_over_grav,
             sim.dt_min,
             sim.dt_max,
             sim.dt_avg
@@ -422,6 +497,7 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     prompt.push_str("Allowed next_ga_heuristic: \"mse\" or \"mse_parsimony\".\n");
     prompt.push_str("Allowed next_discovery_solver: \"stls\", \"lasso\", or \"ga\".\n");
     prompt.push_str("All numeric hyperparameters MUST be numbers or null. Do NOT output strings like \"auto\".\n");
+    prompt.push_str("If you are unsure about next_initial_conditions, set it to null. Do NOT use ellipses (`...`) in JSON.\n");
     prompt.push_str("{\n");
     prompt.push_str("  \"version\": \"v1\",\n");
     prompt.push_str("  \"ranking\": [0,1,2],\n");
@@ -429,7 +505,7 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     prompt.push_str("    {\"id\":0,\"total\":3.5,\"components\":{\"fidelity\":3,\"parsimony\":4,\"physical_plausibility\":3,\"regime_consistency\":4,\"stability_risk\":3},\"rationale\":\"...\",\"flags\":[\"...\"]}\n");
     prompt.push_str("  ],\n");
     prompt.push_str("  \"recommendations\": {\n");
-    prompt.push_str("    \"next_initial_conditions\": {\"bodies\":[{\"mass\":1.0,\"charge\":0.0,\"pos\":[0,0,0],\"vel\":[0,0,0]}, ... x3],\"barycentric\":true,\"notes\":\"...\"},\n");
+    prompt.push_str("    \"next_initial_conditions\": null,\n");
     prompt.push_str("    \"next_rollout_integrator\": \"euler\",\n");
     prompt.push_str("    \"next_ga_heuristic\": \"mse\",\n");
     prompt.push_str("    \"next_discovery_solver\": \"stls\",\n");
@@ -740,6 +816,45 @@ mod tests {
     }
 
     #[test]
+    fn judge_response_deserializes_auto_component_scores_as_zero() {
+        let json = r#"
+{
+  "version": "v1",
+  "ranking": [0],
+  "scores": [
+    {
+      "id": 0,
+      "total": "auto",
+      "components": {
+        "fidelity": "auto",
+        "parsimony": "auto",
+        "physical_plausibility": "auto",
+        "regime_consistency": "auto",
+        "stability_risk": "auto"
+      }
+    }
+  ],
+  "recommendations": {
+    "next_initial_conditions": null,
+    "next_rollout_integrator": null,
+    "next_ga_heuristic": null,
+    "next_discovery_solver": null,
+    "next_normalize": null
+  }
+}
+"#;
+        let resp: JudgeResponse = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(resp.scores.len(), 1);
+        let s = &resp.scores[0];
+        assert_eq!(s.total, 0.0);
+        assert_eq!(s.components.fidelity, 0.0);
+        assert_eq!(s.components.parsimony, 0.0);
+        assert_eq!(s.components.physical_plausibility, 0.0);
+        assert_eq!(s.components.regime_consistency, 0.0);
+        assert_eq!(s.components.stability_risk, 0.0);
+    }
+
+    #[test]
     fn ic_prompt_contains_bounds() {
         let request = IcRequest {
             bounds: IcBounds {
@@ -933,7 +1048,8 @@ mod tests {
         };
         let prompt = build_judge_prompt(&input);
         assert!(prompt.contains("exactly 3 bodies"));
-        assert!(prompt.contains("... x3"));
+        assert!(prompt.contains("\"next_initial_conditions\": null"));
+        assert!(prompt.contains("Do NOT use ellipses"));
     }
 
     #[test]

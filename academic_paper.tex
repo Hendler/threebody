@@ -170,7 +170,7 @@ We implement libraries of increasing expressivity:
 \item Magnetic basis: $b_i^\ast = (q_i/m_i)\, v_i \times B_i^\ast$, where $B_i^\ast = (1/4\pi)\sum_{j \ne i} q_j (v_j \times (r_i-r_j))/\|r_i-r_j\|^3$.
 \end{itemize}
 Under our quasi-static model, this yields $a_i \approx G\,g_i^\ast + k_e\,e_i^\ast + \mu_0\,b_i^\ast$ (with softening applied consistently).
-\item \textbf{structured\_extended} (planned): adds additional atoms (e.g., $r_{ij}/d_{ij}^2$, velocity differences, gated cross terms) to search for simpler regime-specific approximations beyond the baseline.
+\item \textbf{structured\_extended} (current implementation): adds a small number of carefully chosen atoms to expand expressivity while preserving interpretability, including (i) additional distance scalings (e.g., $1/r^4$ variants), and (ii) simple distance-based gating (``close'' vs.\ ``far'' features) to help isolate regime-specific structure without resorting to an unconstrained polynomial soup.
 \end{itemize}
 
 Editorial note: The library design is where most ``new math'' leverage lives. If the library is too broad, discovery becomes unstable and non-interpretable; too narrow, it cannot capture dynamics. We currently err toward small, interpretable libraries.
@@ -212,6 +212,7 @@ The systems are controlled by CLI:
 \item \textbf{discover}: fit sparse equations using a chosen library.
 \item \textbf{factory}: an optional LLM-guided loop that selects initial conditions, runs simulation, performs discovery, and emits a judged report with suggested next runs.
 \item \textbf{quickstart}: a convenience wrapper that runs an end-to-end workflow and writes a novice-friendly summary plus evidence under a single directory.
+\item \textbf{bench-em}: deterministic EM identifiability suite (charge/velocity sweeps + diverse initial conditions) that writes a comparable report per case.
 \item \textbf{findings}: render an aggregated LaTeX report of best-discovered equations across local runs (from the best-results ledger).
 \item \textbf{predict} (planned): roll out discovered equations and compare to truth.
 \item \textbf{score} (planned): compute quantitative benchmarks.
@@ -272,6 +273,7 @@ Softening is not a principled solution. We need a regularization strategy (Sundm
 
 \subsection*{Discovery stability and identifiability}
 Sparse regression can select misleading terms when features are correlated or data is not sufficiently rich. Better experimental design (diverse initial conditions, active learning) and more robust optimization (e.g., constrained solvers) are likely necessary.
+In practice, a common failure mode is to repeatedly rediscover gravity-only structure even when EM is enabled. We therefore log a simple identifiability diagnostic on each oracle trajectory: the ratio $\mathbb{E}(|a_{\mathrm{em}}|)/\mathbb{E}(|a_{\mathrm{grav}}|)$. If this ratio is $\ll 1$, EM terms are unlikely to be selected by sparse regression under the chosen regimes and noise levels. To operationalize ``rich enough'' data, we include a deterministic EM benchmark suite (\texttt{bench-em}) that sweeps charge scale and velocity scale across multiple initial-condition templates to produce EM-heavy regimes where EM terms should become identifiable.
 
 \subsection*{Meaning of ``novel math''}
 We interpret ``novel'' as compact approximations that outperform naive baselines within a regime and are expressed in human-interpretable terms. We do not claim a universal analytic solution.

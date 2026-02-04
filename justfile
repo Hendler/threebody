@@ -25,6 +25,9 @@ quickstart steps="200":
   out="results/quickstart_${ts}"
   mkdir -p "$out"
 
+  echo "Preflight: checking LLM connectivity (fails fast if misconfigured)"
+  cargo run -p threebody-cli -- llm-check
+
   echo "Running quickstart: out_dir=$out steps={{steps}} max_iters=10 llm_mode=auto require_llm=true"
   cargo run -p threebody-cli -- quickstart --out-dir "$out" --steps "{{steps}}" --max-iters 10 --require-llm
 
@@ -36,6 +39,8 @@ quickstart10 steps="200":
   steps="{{steps}}"
 
   echo "Running 10 quickstarts: steps=${steps} max_iters=10 llm_mode=auto"
+  echo "Preflight: checking LLM connectivity (fails fast if misconfigured)"
+  cargo run -p threebody-cli -- llm-check
   for i in $(seq 1 10); do
     ts="$(date +%Y%m%d_%H%M%S)"
     out="results/quickstart_${ts}_${i}"
