@@ -112,48 +112,42 @@ What it does:
 
 Commands:
 ```bash
-# Generate a starter config
-cargo run -p threebody-cli -- example-config --out config.json
+# Create an output directory (recommended: keep artifacts out of repo root)
+out="results/manual_$(date +%Y%m%d_%H%M%S)"; mkdir -p "$out"
 
-# Generate example initial conditions (recommended for non-technical experiments)
-cargo run -p threebody-cli -- example-ic --preset three-body --out ic.json
+# Generate a starter config + initial conditions
+cargo run -p threebody-cli -- example-config --out "$out/config.json"
+cargo run -p threebody-cli -- example-ic --preset three-body --out "$out/ic.json"
 
-# Run a simulation and emit CSV output
-cargo run -p threebody-cli -- simulate --config config.json --ic ic.json --output traj.csv
+# Run a simulation and emit CSV + sidecar JSON
+cargo run -p threebody-cli -- simulate --config "$out/config.json" --ic "$out/ic.json" --output "$out/traj.csv" --steps 200 --dt 0.01
 
 # Run a truth-mode simulation (adaptive RK45)
-cargo run -p threebody-cli -- simulate --config config.json --ic ic.json --output traj_truth.csv --mode truth
+cargo run -p threebody-cli -- simulate --config "$out/config.json" --ic "$out/ic.json" --output "$out/traj_truth.csv" --mode truth
 
 # Enable EM explicitly (EM is off by default)
-cargo run -p threebody-cli -- simulate --config config.json --ic ic.json --output traj_em.csv --em
+cargo run -p threebody-cli -- simulate --config "$out/config.json" --ic "$out/ic.json" --output "$out/traj_em.csv" --em
 
 # Run discovery (writes top 3 equations; default solver is STLS)
-cargo run -p threebody-cli -- discover --solver stls --out top_equations.json
-
-# Or run the GA baseline:
-# cargo run -p threebody-cli -- discover --solver ga --runs 50 --population 20 --out top_equations.json
+cargo run -p threebody-cli -- discover --solver stls --input "$out/traj.csv" --sidecar "$out/traj.json" --out "$out/top_equations.json"
 
 # Try LASSO instead:
-# cargo run -p threebody-cli -- discover --solver lasso --out top_equations.json
-
-# Optional: override the solver path explicitly
-# cargo run -p threebody-cli -- discover --solver stls --stls-thresholds 0.01,0.05,0.1 --out top_equations.json
-# cargo run -p threebody-cli -- discover --solver lasso --lasso-alphas 0.1,0.01,0.001 --out top_equations.json
+# cargo run -p threebody-cli -- discover --solver lasso --input "$out/traj.csv" --sidecar "$out/traj.json" --out "$out/top_equations.json"
 
 # If your simulation output isn't named traj.csv/traj.json, pass explicit paths:
 # cargo run -p threebody-cli -- discover --input run.csv --sidecar run.json --out top_equations.json
 
-# Run one factory/experiment iteration with a mock LLM (no API key needed)
-cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode mock --solver stls --rollout-integrator euler --fitness mse
+# Run the LLM-assisted factory loop (10 iterations) and generate an explainer at $out/factory/evaluation.md
+cargo run -p threebody-cli -- factory --out-dir "$out/factory" --max-iters 10 --auto --config "$out/config.json" --steps 200 --dt 0.01 --llm-mode mock
 
-# Run one factory iteration with OpenAI (uses .openai_key by default if present)
-cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5.2 --solver stls --rollout-integrator leapfrog --fitness mse_parsimony
+# Open the high-school-friendly explainer
+cat "$out/factory/evaluation.md"
 
-# Or override with a key file (ignores OPENAI_API_KEY and .openai_key)
-cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5.2 --openai-key-file .openai_key
+# Switch to OpenAI (uses .openai_key by default if present)
+# cargo run -p threebody-cli -- factory --out-dir "$out/factory" --max-iters 10 --auto --config "$out/config.json" --steps 200 --dt 0.01 --llm-mode openai --model gpt-5.2
 
 # Or use env var when no key file is present
-export OPENAI_API_KEY="your_key_here"
+# export OPENAI_API_KEY="your_key_here"
 ```
 
 **Paper Build (LaTeX -> PDF)**
@@ -162,13 +156,19 @@ export OPENAI_API_KEY="your_key_here"
 - Build the PDF: `pdflatex -interaction=nonstopmode academic_paper.tex`.
 - Optional: create a local Python environment for tooling with `uv venv .venv`.
 
-**Factory Outputs (Per Iteration)**
-- `traj.csv` and `traj.json` sidecar.
-- `initial_conditions.json` and `ic_request.json`.
-- `discovery.json` with solver metadata plus `top3_x/top3_y/top3_z` and `vector_candidates`.
-- `rollout_trace.json` for the best vector candidate under the selected rollout integrator.
-- `judge_input.json` plus `judge_prompt.txt` and `judge_response.txt` (when LLM is enabled).
-- `report.json` and `report.md` summaries.
+**Factory Outputs**
+- Run root (`<out_dir>/`):
+  - `evaluation.md`: high-school-friendly evaluation + next steps (LLM-generated when enabled).
+  - `evaluation_input.json`: structured summary of the run (for reproducibility).
+  - `evaluation_prompt.txt`: the exact prompt used to generate `evaluation.md`.
+  - `evaluation_error.txt`: only present if the LLM call failed and a fallback was used.
+- Per iteration (`<out_dir>/run_###/`):
+  - `traj.csv` and `traj.json` sidecar.
+  - `initial_conditions.json` and `ic_request.json`.
+  - `discovery.json` with solver metadata plus `top3_x/top3_y/top3_z` and `vector_candidates`.
+  - `rollout_trace.json` for the best vector candidate under the selected rollout integrator.
+  - `judge_input.json` plus `judge_prompt.txt` and `judge_response.txt` (when LLM is enabled).
+  - `report.json` and `report.md` summaries.
 
 **How To Spot “Math Improvements” (No Math Required)**
 Discovery produces equations, but you can judge progress using a few plain metrics:
@@ -179,7 +179,7 @@ Discovery produces equations, but you can judge progress using a few plain metri
 
 Where to look:
 - Single run: open `top_equations.json` and look at `top3[0].metrics` and `top3[0].equation_text`.
-- Factory run: open `factory_out/run_001/report.md` (human-readable) or `factory_out/run_001/report.json` (structured). Also check `factory_out/run_001/discovery.json` for `solver` metadata.
+- Factory run: start with `<out_dir>/evaluation.md`, then open `<out_dir>/run_001/report.md` (human-readable) or `<out_dir>/run_001/report.json` (structured). Also check `<out_dir>/run_001/discovery.json` for `solver` metadata. The CLI default out-dir is `factory_out/`.
 
 Practical checklist (for non-math users):
 1. Prefer the model with **lower `rollout_rmse`** and **higher `divergence_time`** on the same regime/config.
