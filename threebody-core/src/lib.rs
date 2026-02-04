@@ -10,6 +10,7 @@ pub mod regime;
 pub mod diagnostics;
 pub mod config;
 pub mod integrators;
+pub mod sim;
 
 // Re-export common items via the prelude to keep imports DRY.
 pub use crate::prelude::*;

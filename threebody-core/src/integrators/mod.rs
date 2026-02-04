@@ -3,6 +3,7 @@ use crate::state::System;
 
 pub mod leapfrog;
 pub mod boris;
+pub mod rk45;
 
 /// Core integrator interface.
 pub trait Integrator {
