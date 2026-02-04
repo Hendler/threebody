@@ -136,7 +136,6 @@ mod tests {
         let pos = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.05, 0.0, 0.0), Vec3::zero()];
         let vel = [Vec3::zero(); 3];
         let system = System::new(bodies, State::new(pos, vel));
-        let cfg = Config::default();
         let mut cfg = Config::default();
         cfg.close_encounter.r_min = 0.1;
         cfg.close_encounter.action = crate::config::CloseEncounterAction::StopAndReport;
