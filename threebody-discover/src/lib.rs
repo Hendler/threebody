@@ -17,4 +17,7 @@ pub use judge::{
     BodyInit, CandidateMetrics, CandidateSummary, DatasetSummary, FeatureDescription, IcBounds, IcRequest,
     InitialConditionSpec, JudgeInput, JudgeRecommendations, JudgeResponse, Rubric, ScoreComponents,
     SimulationSummary, RUBRIC_VERSION,
+    DiscoverySolverSummary, FactoryEvaluationCandidate, FactoryEvaluationInput, FactoryEvaluationIteration,
+    FactoryEvaluationIterationJudge, FACTORY_EVALUATION_VERSION, GaSolverSummary, JudgeRecommendationsLite,
+    LassoSolverSummary, StlsSolverSummary,
 };

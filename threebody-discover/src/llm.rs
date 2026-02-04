@@ -1,6 +1,6 @@
 use crate::judge::{
-    build_ic_prompt, build_judge_prompt, IcRequest, InitialConditionSpec, JudgeInput, JudgeRecommendations,
-    JudgeResponse, JudgeScore, ScoreComponents,
+    build_factory_evaluation_prompt, build_ic_prompt, build_judge_prompt, FactoryEvaluationInput, IcRequest,
+    InitialConditionSpec, JudgeInput, JudgeRecommendations, JudgeResponse, JudgeScore, ScoreComponents,
 };
 use serde::{Deserialize, Serialize};
 use std::env;
@@ -23,6 +23,7 @@ impl std::error::Error for LlmError {}
 pub trait LlmClient {
     fn propose_initial_conditions(&self, request: &IcRequest) -> Result<LlmResult<InitialConditionSpec>, LlmError>;
     fn judge_candidates(&self, input: &JudgeInput) -> Result<LlmResult<JudgeResponse>, LlmError>;
+    fn explain_factory_evaluation(&self, input: &FactoryEvaluationInput) -> Result<LlmResult<String>, LlmError>;
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +88,7 @@ impl LlmClient for MockLlm {
                 flags: vec![],
             });
         }
-        scores.sort_by(|a, b| a.total.partial_cmp(&b.total).unwrap());
+        scores.sort_by(|a, b| b.total.partial_cmp(&a.total).unwrap());
         let ranking = scores.iter().map(|s| s.id).collect();
         let value = JudgeResponse {
             version: input.rubric.version.clone(),
@@ -109,6 +110,16 @@ impl LlmClient for MockLlm {
         };
         let response = serde_json::to_string(&value).map_err(|e| LlmError(e.to_string()))?;
         Ok(LlmResult { value, prompt, response })
+    }
+
+    fn explain_factory_evaluation(&self, input: &FactoryEvaluationInput) -> Result<LlmResult<String>, LlmError> {
+        let prompt = build_factory_evaluation_prompt(input);
+        let response = build_mock_factory_evaluation_md(input);
+        Ok(LlmResult {
+            value: response.clone(),
+            prompt,
+            response,
+        })
     }
 }
 
@@ -209,6 +220,100 @@ impl LlmClient for OpenAIClient {
             response: text,
         })
     }
+
+    fn explain_factory_evaluation(&self, input: &FactoryEvaluationInput) -> Result<LlmResult<String>, LlmError> {
+        let prompt = build_factory_evaluation_prompt(input);
+        let text = self.request(&prompt)?;
+        Ok(LlmResult {
+            value: text.clone(),
+            prompt,
+            response: text,
+        })
+    }
+}
+
+fn build_mock_factory_evaluation_md(input: &FactoryEvaluationInput) -> String {
+    let n_iters = input.iterations.len();
+    let mut best_run: Option<(&str, &str, &crate::judge::FactoryEvaluationCandidate)> = None;
+    for iter in &input.iterations {
+        for cand in &iter.top_candidates {
+            match best_run {
+                None => best_run = Some((&iter.run_id, &iter.regime, cand)),
+                Some((_rid, _regime, best)) => {
+                    if cand.metrics.mse.is_finite() && cand.metrics.mse < best.metrics.mse {
+                        best_run = Some((&iter.run_id, &iter.regime, cand));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut md = String::new();
+    md.push_str("# Factory Evaluation\n\n");
+    md.push_str(&format!("- Iterations: {}\n", n_iters));
+    if !input.notes.is_empty() {
+        md.push_str("- Notes:\n");
+        for note in &input.notes {
+            md.push_str(&format!("  - {}\n", note));
+        }
+    }
+    md.push_str("\n## What was run\n");
+    md.push_str("This run repeatedly:\n");
+    md.push_str("1) picks initial conditions (sometimes via an LLM),\n");
+    md.push_str("2) simulates a trajectory (the “oracle”),\n");
+    md.push_str("3) fits simple equations to predict acceleration, and\n");
+    md.push_str("4) optionally uses an LLM judge to interpret results and suggest next settings.\n");
+
+    md.push_str("\n## Best result (plain English)\n");
+    if let Some((run_id, regime, cand)) = best_run {
+        md.push_str(&format!("- Best run: `{}` (regime: `{}`)\n", run_id, regime));
+        md.push_str(&format!("- Equation (vector form): {}\n", cand.equation_text));
+        md.push_str(&format!(
+            "- Metrics: mse={:.6}, rollout_rmse={:?}, divergence_time={:?}, complexity={}\n",
+            cand.metrics.mse, cand.metrics.rollout_rmse, cand.metrics.divergence_time, cand.metrics.complexity
+        ));
+        if !cand.metrics.stability_flags.is_empty() {
+            md.push_str(&format!(
+                "- Stability flags: {}\n",
+                cand.metrics.stability_flags.join(", ")
+            ));
+        }
+        md.push_str(&format!(
+            "\nFor details, open `{}/report.md` and `{}/discovery.json`.\n",
+            run_id, run_id
+        ));
+    } else {
+        md.push_str("No candidate equations were recorded.\n");
+    }
+
+    md.push_str("\n## How good is it?\n");
+    md.push_str("A model can “fit” the training data (low `mse`) but still drift when you roll it forward.\n");
+    md.push_str("The most useful quick check is `rollout_rmse` (lower is better) and `divergence_time` (higher is better).\n");
+
+    md.push_str("\n## What the numbers mean\n");
+    md.push_str("- `mse`: average squared error on the training samples (lower is better).\n");
+    md.push_str("- `rollout_rmse`: how far the learned model’s simulated trajectory drifts from the oracle (lower is better).\n");
+    md.push_str("- `divergence_time`: how long the learned model stays close before it diverges (higher is better).\n");
+    md.push_str("- `complexity`: roughly how long the equation is (lower usually generalizes better).\n");
+
+    md.push_str("\n## Next steps (easy)\n");
+    md.push_str("- Run more iterations and compare `evaluation.md` across runs.\n");
+    md.push_str("- Look at `run_###/report.md` and check whether improvements reduce `rollout_rmse`.\n");
+    md.push_str("- Try switching the rollout integrator between `euler` and `leapfrog`.\n");
+
+    md.push_str("\n## Next steps (more advanced)\n");
+    md.push_str("- Try `--solver lasso` vs `--solver stls` and compare stability.\n");
+    md.push_str("- Tune sparsity: increase STLS threshold (or LASSO alpha) to simplify equations.\n");
+    md.push_str("- Expand or refine the feature library (new physics-inspired terms), then re-run discovery.\n");
+    md.push_str("- Validate on new initial conditions (generalization), not just the same trajectory.\n");
+
+    md.push_str("\n## How to report improvements\n");
+    md.push_str("If you’re not a math/physics expert, the most helpful report is:\n");
+    md.push_str("- which run directory (`run_###`) looks best,\n");
+    md.push_str("- the equation text,\n");
+    md.push_str("- the metrics (`mse`, `rollout_rmse`, `divergence_time`, `complexity`), and\n");
+    md.push_str("- anything notable in `simulation.warnings` or stability flags.\n");
+    md
 }
 
 fn parse_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, LlmError> {
@@ -224,7 +329,10 @@ fn parse_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, LlmError>
 #[cfg(test)]
 mod tests {
     use super::{LlmClient, MockLlm, OpenAIClient};
-    use crate::judge::{CandidateMetrics, CandidateSummary, DatasetSummary, FeatureDescription, IcBounds, IcRequest, JudgeInput, Rubric};
+    use crate::judge::{
+        CandidateMetrics, CandidateSummary, DatasetSummary, FactoryEvaluationCandidate, FactoryEvaluationInput,
+        FactoryEvaluationIteration, FeatureDescription, IcBounds, IcRequest, JudgeInput, Rubric,
+    };
     use crate::equation::Equation;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -330,5 +438,43 @@ mod tests {
         assert_eq!(client.api_key, "sk-test-key");
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn mock_llm_writes_factory_evaluation_markdown() {
+        let llm = MockLlm;
+        let input = FactoryEvaluationInput {
+            version: crate::judge::FACTORY_EVALUATION_VERSION.to_string(),
+            notes: vec!["steps=5".to_string(), "dt=0.01".to_string()],
+            iterations: vec![FactoryEvaluationIteration {
+                iteration: 1,
+                run_id: "run_001".to_string(),
+                regime: "gravity_only".to_string(),
+                solver: crate::judge::DiscoverySolverSummary {
+                    name: "stls".to_string(),
+                    normalize: true,
+                    fitness_heuristic: "mse".to_string(),
+                    stls: None,
+                    lasso: None,
+                    ga: None,
+                },
+                simulation: None,
+                top_candidates: vec![FactoryEvaluationCandidate {
+                    id: 0,
+                    equation_text: "a = 0".to_string(),
+                    metrics: CandidateMetrics {
+                        mse: 1.0,
+                        complexity: 0,
+                        rollout_rmse: Some(0.1),
+                        divergence_time: Some(1.0),
+                        stability_flags: vec![],
+                    },
+                }],
+                judge: None,
+            }],
+        };
+        let out = llm.explain_factory_evaluation(&input).unwrap();
+        assert!(out.value.contains("# Factory Evaluation"));
+        assert!(out.value.to_lowercase().contains("next steps"));
     }
 }

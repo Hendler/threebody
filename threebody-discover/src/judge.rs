@@ -399,6 +399,137 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     prompt
 }
 
+pub const FACTORY_EVALUATION_VERSION: &str = "v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JudgeRecommendationsLite {
+    pub next_rollout_integrator: Option<String>,
+    pub next_ga_heuristic: Option<String>,
+    pub next_discovery_solver: Option<String>,
+    pub next_normalize: Option<bool>,
+    pub next_stls_threshold: Option<f64>,
+    pub next_ridge_lambda: Option<f64>,
+    pub next_lasso_alpha: Option<f64>,
+    pub next_search_directions: Vec<String>,
+    pub notes: String,
+}
+
+impl From<&JudgeRecommendations> for JudgeRecommendationsLite {
+    fn from(value: &JudgeRecommendations) -> Self {
+        Self {
+            next_rollout_integrator: value.next_rollout_integrator.clone(),
+            next_ga_heuristic: value.next_ga_heuristic.clone(),
+            next_discovery_solver: value.next_discovery_solver.clone(),
+            next_normalize: value.next_normalize,
+            next_stls_threshold: value.next_stls_threshold,
+            next_ridge_lambda: value.next_ridge_lambda,
+            next_lasso_alpha: value.next_lasso_alpha,
+            next_search_directions: value.next_search_directions.clone(),
+            notes: value.notes.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiscoverySolverSummary {
+    pub name: String,
+    pub normalize: bool,
+    pub fitness_heuristic: String,
+    pub stls: Option<StlsSolverSummary>,
+    pub lasso: Option<LassoSolverSummary>,
+    pub ga: Option<GaSolverSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StlsSolverSummary {
+    pub auto_thresholds: bool,
+    pub thresholds: Vec<f64>,
+    pub ridge_lambda: f64,
+    pub max_iter: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LassoSolverSummary {
+    pub auto_alphas: bool,
+    pub alphas: Vec<f64>,
+    pub max_iter: usize,
+    pub tol: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GaSolverSummary {
+    pub runs: usize,
+    pub population: usize,
+    pub seed: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactoryEvaluationCandidate {
+    pub id: usize,
+    pub equation_text: String,
+    pub metrics: CandidateMetrics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactoryEvaluationIterationJudge {
+    pub summary: String,
+    pub ranking: Vec<usize>,
+    pub recommendations: JudgeRecommendationsLite,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactoryEvaluationIteration {
+    pub iteration: usize,
+    pub run_id: String,
+    pub regime: String,
+    pub solver: DiscoverySolverSummary,
+    pub simulation: Option<SimulationSummary>,
+    pub top_candidates: Vec<FactoryEvaluationCandidate>,
+    pub judge: Option<FactoryEvaluationIterationJudge>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactoryEvaluationInput {
+    pub version: String,
+    pub notes: Vec<String>,
+    pub iterations: Vec<FactoryEvaluationIteration>,
+}
+
+pub fn build_factory_evaluation_prompt(input: &FactoryEvaluationInput) -> String {
+    let payload = serde_json::to_string_pretty(input).unwrap_or_else(|_| "{}".to_string());
+    let mut prompt = String::new();
+    prompt.push_str("You are writing a short evaluation of an automated equation-discovery run.\n");
+    prompt.push_str("Audience: a motivated high school physics student (minimal calculus).\n");
+    prompt.push_str("Return Markdown ONLY (no JSON). Be concrete and avoid jargon.\n");
+    prompt.push_str("Do NOT invent data or claim physical laws beyond the provided evidence.\n\n");
+
+    prompt.push_str("Explain these metrics clearly:\n");
+    prompt.push_str("- mse: training fit error (lower is better)\n");
+    prompt.push_str("- rollout_rmse: forward-simulation error vs the oracle trajectory (lower is better)\n");
+    prompt.push_str("- divergence_time: time until the learned model noticeably diverges (higher is better)\n");
+    prompt.push_str("- complexity: rough proxy for equation length (lower is simpler)\n\n");
+
+    prompt.push_str("Required sections (use these headings):\n");
+    prompt.push_str("## What was run\n");
+    prompt.push_str("## Best result (plain English)\n");
+    prompt.push_str("## How good is it?\n");
+    prompt.push_str("## What the numbers mean\n");
+    prompt.push_str("## Next steps (easy)\n");
+    prompt.push_str("## Next steps (more advanced)\n");
+    prompt.push_str("## How to report improvements\n\n");
+
+    prompt.push_str("When describing best results:\n");
+    prompt.push_str("- Prefer models with low mse AND low rollout_rmse.\n");
+    prompt.push_str("- If two models have similar errors, prefer lower complexity.\n");
+    prompt.push_str("- Call out any stability_flags and what they might mean.\n");
+    prompt.push_str("- Reference artifact paths like `run_003/report.md` when useful.\n\n");
+
+    prompt.push_str("Data (JSON):\n```json\n");
+    prompt.push_str(&payload);
+    prompt.push_str("\n```\n");
+    prompt
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -553,5 +684,49 @@ mod tests {
         assert!(prompt.contains("\"stls\""));
         assert!(prompt.contains("\"lasso\""));
         assert!(prompt.contains("\"ga\""));
+    }
+
+    #[test]
+    fn factory_evaluation_prompt_mentions_audience_and_metrics() {
+        let input = FactoryEvaluationInput {
+            version: FACTORY_EVALUATION_VERSION.to_string(),
+            notes: vec!["steps=5".to_string()],
+            iterations: vec![FactoryEvaluationIteration {
+                iteration: 1,
+                run_id: "run_001".to_string(),
+                regime: "gravity_only".to_string(),
+                solver: DiscoverySolverSummary {
+                    name: "stls".to_string(),
+                    normalize: true,
+                    fitness_heuristic: "mse".to_string(),
+                    stls: Some(StlsSolverSummary {
+                        auto_thresholds: true,
+                        thresholds: vec![],
+                        ridge_lambda: 1e-8,
+                        max_iter: 25,
+                    }),
+                    lasso: None,
+                    ga: None,
+                },
+                simulation: None,
+                top_candidates: vec![FactoryEvaluationCandidate {
+                    id: 0,
+                    equation_text: "a = -G*m*r_hat/r^2".to_string(),
+                    metrics: CandidateMetrics {
+                        mse: 1.0,
+                        complexity: 3,
+                        rollout_rmse: Some(0.1),
+                        divergence_time: Some(1.0),
+                        stability_flags: vec![],
+                    },
+                }],
+                judge: None,
+            }],
+        };
+        let prompt = build_factory_evaluation_prompt(&input);
+        assert!(prompt.to_lowercase().contains("high school"));
+        for needle in ["mse", "rollout_rmse", "divergence_time", "complexity"] {
+            assert!(prompt.contains(needle), "missing {needle}");
+        }
     }
 }

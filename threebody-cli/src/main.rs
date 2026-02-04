@@ -19,11 +19,14 @@ use threebody_discover::ga::DiscoveryConfig;
 use threebody_discover::library::FeatureLibrary;
 use threebody_discover::judge::{
     CandidateMetrics, CandidateSummary, DatasetSummary, FeatureDescription, IcBounds, IcRequest, InitialConditionSpec,
-    JudgeInput, JudgeResponse, Rubric, SimulationSummary,
+    JudgeInput, JudgeRecommendationsLite, JudgeResponse, Rubric, SimulationSummary,
 };
 use threebody_discover::llm::{LlmClient, MockLlm, OpenAIClient};
 use threebody_discover::{
-    grid_search, lasso_path_search, run_search, stls_path_search, Dataset, FitnessHeuristic, LassoConfig, StlsConfig,
+    grid_search, lasso_path_search, run_search, stls_path_search, Dataset, FactoryEvaluationCandidate,
+    FactoryEvaluationInput, FactoryEvaluationIteration, FactoryEvaluationIterationJudge, FitnessHeuristic,
+    GaSolverSummary, LassoConfig, LassoSolverSummary, StlsConfig, StlsSolverSummary, DiscoverySolverSummary,
+    FACTORY_EVALUATION_VERSION,
 };
 
 #[derive(Parser)]
@@ -1741,6 +1744,7 @@ fn run_factory(
     let mut current_fitness = parse_fitness_heuristic(&fitness)?;
     let mut current_rollout = parse_rollout_integrator(&rollout_integrator)?;
     let mut current_solver = solver_settings;
+    let mut evaluation_iterations: Vec<FactoryEvaluationIteration> = Vec::new();
 
     for iter in 0..max_iters {
         let run_id = format!("run_{:03}", iter + 1);
@@ -2062,6 +2066,60 @@ fn run_factory(
         }
         fs::write(run_dir.join("report.md"), md)?;
 
+        let solver_summary = DiscoverySolverSummary {
+            name: discovery_solver_label(current_solver.solver).to_string(),
+            normalize: current_solver.normalize,
+            fitness_heuristic: current_fitness.as_str().to_string(),
+            stls: matches!(current_solver.solver, DiscoverySolver::Stls).then(|| StlsSolverSummary {
+                auto_thresholds: current_solver.stls_thresholds.is_empty(),
+                thresholds: current_solver.stls_thresholds.clone(),
+                ridge_lambda: current_solver.stls_ridge_lambda,
+                max_iter: current_solver.stls_max_iter,
+            }),
+            lasso: matches!(current_solver.solver, DiscoverySolver::Lasso).then(|| LassoSolverSummary {
+                auto_alphas: current_solver.lasso_alphas.is_empty(),
+                alphas: current_solver.lasso_alphas.clone(),
+                max_iter: current_solver.lasso_max_iter,
+                tol: current_solver.lasso_tol,
+            }),
+            ga: matches!(current_solver.solver, DiscoverySolver::Ga)
+                .then(|| GaSolverSummary {
+                    runs,
+                    population,
+                    seed: ga_seed,
+                }),
+        };
+        let mut candidates_sorted = vector_candidates.clone();
+        candidates_sorted.sort_by(|a, b| {
+            a.metrics
+                .mse
+                .partial_cmp(&b.metrics.mse)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let top_candidates: Vec<FactoryEvaluationCandidate> = candidates_sorted
+            .into_iter()
+            .take(3)
+            .map(|c| FactoryEvaluationCandidate {
+                id: c.id,
+                equation_text: c.equation_text,
+                metrics: c.metrics,
+            })
+            .collect();
+        let judge_summary = judge.as_ref().map(|j| FactoryEvaluationIterationJudge {
+            summary: j.summary.clone(),
+            ranking: j.ranking.clone(),
+            recommendations: JudgeRecommendationsLite::from(&j.recommendations),
+        });
+        evaluation_iterations.push(FactoryEvaluationIteration {
+            iteration: iter + 1,
+            run_id: run_id.clone(),
+            regime: regime.to_string(),
+            solver: solver_summary,
+            simulation: Some(sim_summary.clone()),
+            top_candidates,
+            judge: judge_summary,
+        });
+
         println!("Factory iteration {} complete -> {}", iter + 1, run_dir.display());
         if let Some(j) = judge.as_ref() {
             println!("LLM summary: {}", j.summary);
@@ -2091,6 +2149,60 @@ fn run_factory(
             }
         }
     }
+
+    let mut eval_notes = Vec::new();
+    eval_notes.push(format!("max_iters={}", max_iters));
+    eval_notes.push(format!("steps={}", steps));
+    eval_notes.push(format!("dt={}", dt));
+    eval_notes.push(format!("mode={}", mode));
+    eval_notes.push(format!("preset={}", preset));
+    eval_notes.push(format!("seed={}", seed));
+    eval_notes.push(format!("auto={}", auto));
+    eval_notes.push(format!("llm_mode={}", llm_mode_label(llm_mode)));
+    if matches!(llm_mode, LlmMode::OpenAI) {
+        eval_notes.push(format!("llm_model={}", model));
+    }
+    let eval_input = FactoryEvaluationInput {
+        version: FACTORY_EVALUATION_VERSION.to_string(),
+        notes: eval_notes,
+        iterations: evaluation_iterations,
+    };
+    fs::write(
+        out_dir.join("evaluation_input.json"),
+        serde_json::to_string_pretty(&eval_input)?,
+    )?;
+
+    let eval_prompt_path = out_dir.join("evaluation_prompt.txt");
+    let eval_md_path = out_dir.join("evaluation.md");
+    if let Some(client) = llm_client.as_ref() {
+        match client.explain_factory_evaluation(&eval_input) {
+            Ok(res) => {
+                fs::write(&eval_prompt_path, res.prompt)?;
+                fs::write(&eval_md_path, res.value)?;
+            }
+            Err(err) => {
+                eprintln!("LLM evaluation failed: {}", err);
+                fs::write(out_dir.join("evaluation_error.txt"), err.to_string())?;
+                let fallback = MockLlm.explain_factory_evaluation(&eval_input)?;
+                fs::write(&eval_prompt_path, fallback.prompt)?;
+                let mut md = String::new();
+                md.push_str("<!-- WARNING: LLM evaluation failed; using local fallback. -->\n\n");
+                md.push_str(&fallback.value);
+                fs::write(&eval_md_path, md)?;
+            }
+        }
+    } else {
+        let mut md = String::new();
+        md.push_str("# Factory Evaluation\n\n");
+        md.push_str("LLM evaluation was disabled (`--llm-mode off`).\n\n");
+        md.push_str("Open per-run reports in `run_###/report.md` and compare:\n");
+        md.push_str("- `mse` (lower is better)\n");
+        md.push_str("- `rollout_rmse` (lower is better)\n");
+        md.push_str("- `divergence_time` (higher is better)\n");
+        md.push_str("- `complexity` (lower is simpler)\n");
+        fs::write(&eval_md_path, md)?;
+    }
+    println!("Factory evaluation written -> {}", eval_md_path.display());
     Ok(())
 }
 

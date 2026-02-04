@@ -181,6 +181,8 @@ fn factory_runs_once_with_mock_llm() {
     assert_eq!(solver.get("name").and_then(|v| v.as_str()), Some("stls"));
     let trace = tmp_dir.join("run_001").join("rollout_trace.json");
     assert!(trace.exists());
+    let eval_md = tmp_dir.join("evaluation.md");
+    assert!(eval_md.exists());
 }
 
 #[test]
@@ -303,6 +305,7 @@ fn quick_start_flow_runs() {
         .expect("experiment");
     assert!(out.status.success(), "experiment failed: {:?}", out);
     assert!(factory_dir.join("run_001").join("report.json").exists());
+    assert!(factory_dir.join("evaluation.md").exists());
 }
 
 #[test]
