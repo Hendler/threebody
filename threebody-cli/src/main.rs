@@ -439,7 +439,8 @@ fn run_discovery(
     let grid_topk = grid_search(&candidates, &dataset);
 
     let judge = if let Some(client) = llm_client.as_ref() {
-        let judge_input = build_judge_input(&dataset, &library, &topk.entries, None, "toy_dataset", "x");
+        let judge_input =
+            build_judge_input_from_entries(&dataset, &library, &topk.entries, None, "toy_dataset", "x");
         client.judge_candidates(&judge_input).ok().map(|r| r.value)
     } else {
         None
@@ -474,7 +475,7 @@ fn discovery_dataset() -> Dataset {
     Dataset::new(feature_names, samples, targets)
 }
 
-fn build_judge_input(
+fn build_judge_input_from_entries(
     dataset: &Dataset,
     library: &FeatureLibrary,
     entries: &[threebody_discover::EquationScore],
@@ -482,22 +483,6 @@ fn build_judge_input(
     regime: &str,
     target_description: &str,
 ) -> JudgeInput {
-    let mut desc_map = std::collections::HashMap::new();
-    for fd in library.feature_descriptions() {
-        desc_map.insert(fd.name.clone(), fd);
-    }
-    let feature_descriptions: Vec<FeatureDescription> = dataset
-        .feature_names
-        .iter()
-        .map(|name| {
-            desc_map.get(name).cloned().unwrap_or(FeatureDescription {
-                name: name.clone(),
-                description: "feature".to_string(),
-                tags: vec![],
-            })
-        })
-        .collect();
-
     let candidates = entries
         .iter()
         .enumerate()
@@ -515,20 +500,53 @@ fn build_judge_input(
             notes: vec![],
         })
         .collect::<Vec<_>>();
+    let dataset_summary =
+        build_dataset_summary(&dataset.feature_names, library, dataset.samples.len(), target_description);
+    build_judge_input_from_candidates(dataset_summary, candidates, simulation, regime)
+}
 
+fn build_judge_input_from_candidates(
+    dataset_summary: DatasetSummary,
+    candidates: Vec<CandidateSummary>,
+    simulation: Option<SimulationSummary>,
+    regime: &str,
+) -> JudgeInput {
     JudgeInput {
         rubric: Rubric::default_rubric(),
         regime: regime.to_string(),
-        dataset: DatasetSummary {
-            n_samples: dataset.samples.len(),
-            target_description: target_description.to_string(),
-            feature_names: dataset.feature_names.clone(),
-            feature_descriptions,
-        },
+        dataset: dataset_summary,
         simulation,
         candidates,
         ic_bounds: default_ic_bounds(),
         notes: vec!["LLM is supplemental; do not override numeric ranking without evidence.".to_string()],
+    }
+}
+
+fn build_dataset_summary(
+    feature_names: &[String],
+    library: &FeatureLibrary,
+    n_samples: usize,
+    target_description: &str,
+) -> DatasetSummary {
+    let mut desc_map = std::collections::HashMap::new();
+    for fd in library.feature_descriptions() {
+        desc_map.insert(fd.name.clone(), fd);
+    }
+    let feature_descriptions: Vec<FeatureDescription> = feature_names
+        .iter()
+        .map(|name| {
+            desc_map.get(name).cloned().unwrap_or(FeatureDescription {
+                name: name.clone(),
+                description: "feature".to_string(),
+                tags: vec![],
+            })
+        })
+        .collect();
+    DatasetSummary {
+        n_samples,
+        target_description: target_description.to_string(),
+        feature_names: feature_names.to_vec(),
+        feature_descriptions,
     }
 }
 
@@ -609,14 +627,17 @@ fn min_pair_distance(pos: &[Vec3; 3]) -> f64 {
     min
 }
 
-fn dataset_from_sim(result: &threebody_core::sim::SimResult, cfg: &Config) -> Dataset {
-    let feature_names = vec![
-        "r_inv2".to_string(),
-        "r_inv3".to_string(),
-        "v".to_string(),
-        "v_cross_r".to_string(),
-        "v_cross_v_cross_r".to_string(),
-    ];
+struct VectorDataset {
+    feature_names: Vec<String>,
+    samples: Vec<Vec<f64>>,
+    targets: Vec<[f64; 3]>,
+}
+
+fn build_vector_dataset(
+    result: &threebody_core::sim::SimResult,
+    cfg: &Config,
+    feature_names: &[String],
+) -> VectorDataset {
     let mut samples = Vec::new();
     let mut targets = Vec::new();
     let force_cfg = ForceConfig {
@@ -631,30 +652,196 @@ fn dataset_from_sim(result: &threebody_core::sim::SimResult, cfg: &Config) -> Da
     for step in &result.steps {
         let system = &step.system;
         let acc = compute_accel(system, &force_cfg);
-        let body = 0usize;
-        let a_mag = acc[body].norm();
-        let v = system.state.vel[body];
-        let v_mag = v.norm();
-        let mut r_inv2 = 0.0;
-        let mut r_inv3 = 0.0;
-        let mut v_cross_r = 0.0;
-        let mut v_cross_v_cross_r = 0.0;
-        for j in 0..3 {
-            if j == body {
-                continue;
-            }
-            let r = system.state.pos[j] - system.state.pos[body];
-            let r2 = r.norm_sq() + eps * eps;
-            let r_norm = r2.sqrt();
-            r_inv2 += 1.0 / r2;
-            r_inv3 += 1.0 / (r2 * r_norm);
-            v_cross_r += v.cross(r).norm() / (r2 * r_norm);
-            v_cross_v_cross_r += v.cross(v.cross(r)).norm() / (r2 * r_norm);
+        for body in 0..3 {
+            let features = compute_feature_vector(system, body, eps, feature_names);
+            samples.push(features);
+            targets.push([acc[body].x, acc[body].y, acc[body].z]);
         }
-        samples.push(vec![r_inv2, r_inv3, v_mag, v_cross_r, v_cross_v_cross_r]);
-        targets.push(a_mag);
     }
-    Dataset::new(feature_names, samples, targets)
+    VectorDataset {
+        feature_names: feature_names.to_vec(),
+        samples,
+        targets,
+    }
+}
+
+fn component_datasets(vec_data: &VectorDataset) -> [Dataset; 3] {
+    let mut targets_x = Vec::new();
+    let mut targets_y = Vec::new();
+    let mut targets_z = Vec::new();
+    for t in &vec_data.targets {
+        targets_x.push(t[0]);
+        targets_y.push(t[1]);
+        targets_z.push(t[2]);
+    }
+    [
+        Dataset::new(vec_data.feature_names.clone(), vec_data.samples.clone(), targets_x),
+        Dataset::new(vec_data.feature_names.clone(), vec_data.samples.clone(), targets_y),
+        Dataset::new(vec_data.feature_names.clone(), vec_data.samples.clone(), targets_z),
+    ]
+}
+
+fn compute_feature_vector(
+    system: &System,
+    body: usize,
+    eps: f64,
+    feature_names: &[String],
+) -> Vec<f64> {
+    let v = system.state.vel[body];
+    let v_mag = v.norm();
+    let mut r_inv2 = 0.0;
+    let mut r_inv3 = 0.0;
+    let mut v_cross_r = 0.0;
+    let mut v_cross_v_cross_r = 0.0;
+    for j in 0..3 {
+        if j == body {
+            continue;
+        }
+        let r = system.state.pos[j] - system.state.pos[body];
+        let r2 = r.norm_sq() + eps * eps;
+        let r_norm = r2.sqrt();
+        r_inv2 += 1.0 / r2;
+        r_inv3 += 1.0 / (r2 * r_norm);
+        v_cross_r += v.cross(r).norm() / (r2 * r_norm);
+        v_cross_v_cross_r += v.cross(v.cross(r)).norm() / (r2 * r_norm);
+    }
+    feature_names
+        .iter()
+        .map(|name| match name.as_str() {
+            "r_inv2" => r_inv2,
+            "r_inv3" => r_inv3,
+            "v" => v_mag,
+            "v_cross_r" => v_cross_r,
+            "v_cross_v_cross_r" => v_cross_v_cross_r,
+            _ => 0.0,
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+struct VectorModel {
+    eq_x: threebody_discover::Equation,
+    eq_y: threebody_discover::Equation,
+    eq_z: threebody_discover::Equation,
+}
+
+fn format_vector_model(model: &VectorModel) -> String {
+    format!(
+        "ax={} ; ay={} ; az={}",
+        model.eq_x.format(),
+        model.eq_y.format(),
+        model.eq_z.format()
+    )
+}
+
+fn rollout_metrics(
+    model: &VectorModel,
+    feature_names: &[String],
+    result: &threebody_core::sim::SimResult,
+    cfg: &Config,
+) -> (f64, Option<f64>) {
+    let mut system = result.steps.first().map(|s| s.system).unwrap_or_else(|| {
+        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(1.0, 0.0)];
+        let pos = [Vec3::zero(); 3];
+        let vel = [Vec3::zero(); 3];
+        System::new(bodies, State::new(pos, vel))
+    });
+    let feature_dataset = Dataset::new(feature_names.to_vec(), vec![], vec![]);
+    let eps = cfg.softening.max(1e-9);
+    let mut sum_sq = 0.0;
+    let mut count = 0usize;
+    let mut t = 0.0;
+    let threshold = (0.5 * min_pair_distance(&result.steps[0].system.state.pos)).max(0.1);
+    let mut divergence_time = None;
+    for i in 0..(result.steps.len().saturating_sub(1)) {
+        let dt = result.steps[i].dt;
+        let acc = predict_accel(&system, &feature_dataset, model, eps);
+        let mut new_pos = system.state.pos;
+        let mut new_vel = system.state.vel;
+        for b in 0..3 {
+            new_vel[b] = new_vel[b] + acc[b] * dt;
+            new_pos[b] = new_pos[b] + new_vel[b] * dt;
+        }
+        system = System::new(system.bodies, State::new(new_pos, new_vel));
+        t += dt;
+        let err = rms_pos_error(&system, &result.steps[i + 1].system);
+        sum_sq += err * err;
+        count += 1;
+        if divergence_time.is_none() && err > threshold {
+            divergence_time = Some(t);
+        }
+    }
+    let rmse = if count > 0 { (sum_sq / count as f64).sqrt() } else { 0.0 };
+    (rmse, divergence_time)
+}
+
+fn predict_accel(
+    system: &System,
+    feature_dataset: &Dataset,
+    model: &VectorModel,
+    eps: f64,
+) -> [Vec3; 3] {
+    let mut acc = [Vec3::zero(); 3];
+    for body in 0..3 {
+        let features = compute_feature_vector(system, body, eps, &feature_dataset.feature_names);
+        let ax = model.eq_x.predict(feature_dataset, &features);
+        let ay = model.eq_y.predict(feature_dataset, &features);
+        let az = model.eq_z.predict(feature_dataset, &features);
+        acc[body] = Vec3::new(ax, ay, az);
+    }
+    acc
+}
+
+fn rms_pos_error(pred: &System, truth: &System) -> f64 {
+    let mut sum = 0.0;
+    for b in 0..3 {
+        let diff = pred.state.pos[b] - truth.state.pos[b];
+        sum += diff.norm_sq();
+    }
+    (sum / 3.0).sqrt()
+}
+
+fn build_vector_candidates(
+    topk_x: &[threebody_discover::EquationScore],
+    topk_y: &[threebody_discover::EquationScore],
+    topk_z: &[threebody_discover::EquationScore],
+    feature_names: &[String],
+    result: &threebody_core::sim::SimResult,
+    cfg: &Config,
+    regime: &str,
+) -> Vec<CandidateSummary> {
+    let n = topk_x.len().min(topk_y.len()).min(topk_z.len()).min(3);
+    let mut candidates = Vec::new();
+    for i in 0..n {
+        let model = VectorModel {
+            eq_x: topk_x[i].equation.clone(),
+            eq_y: topk_y[i].equation.clone(),
+            eq_z: topk_z[i].equation.clone(),
+        };
+        let mse = (topk_x[i].score + topk_y[i].score + topk_z[i].score) / 3.0;
+        let complexity = model.eq_x.complexity() + model.eq_y.complexity() + model.eq_z.complexity();
+        let (rmse, divergence_time) = rollout_metrics(&model, feature_names, result, cfg);
+        let mut flags = Vec::new();
+        flags.extend(stability_flags_for(&model.eq_x, regime));
+        flags.extend(stability_flags_for(&model.eq_y, regime));
+        flags.extend(stability_flags_for(&model.eq_z, regime));
+        flags.sort();
+        flags.dedup();
+        candidates.push(CandidateSummary {
+            id: i,
+            equation: model.eq_x.clone(),
+            equation_text: format_vector_model(&model),
+            metrics: CandidateMetrics {
+                mse,
+                complexity,
+                rollout_rmse: Some(rmse),
+                divergence_time,
+                stability_flags: flags,
+            },
+            notes: vec![],
+        });
+    }
+    candidates
 }
 
 fn build_sim_summary(result: &threebody_core::sim::SimResult) -> SimulationSummary {
@@ -812,26 +999,47 @@ fn run_factory(
         let mut sidecar_file = fs::File::create(&sidecar_path)?;
         write_sidecar(&mut sidecar_file, &sidecar)?;
 
-        let dataset = dataset_from_sim(&result, &cfg);
         let library = FeatureLibrary::default_physics();
+        let vector_data = build_vector_dataset(&result, &cfg, &library.features);
+        let [dataset_x, dataset_y, dataset_z] = component_datasets(&vector_data);
         let disc_cfg = DiscoveryConfig {
             runs,
             population,
             seed: seed + iter as u64,
             ..DiscoveryConfig::default()
         };
-        let topk = run_search(&dataset, &library, &disc_cfg);
-        let candidates: Vec<_> = topk.entries.iter().map(|e| e.equation.clone()).collect();
-        let grid_topk = grid_search(&candidates, &dataset);
+        let topk_x = run_search(&dataset_x, &library, &disc_cfg);
+        let topk_y = run_search(&dataset_y, &library, &disc_cfg);
+        let topk_z = run_search(&dataset_z, &library, &disc_cfg);
+        let vector_candidates = build_vector_candidates(
+            &topk_x.entries,
+            &topk_y.entries,
+            &topk_z.entries,
+            &vector_data.feature_names,
+            &result,
+            &cfg,
+            regime,
+        );
+        let grid_topk = grid_search(
+            &vector_candidates
+                .iter()
+                .map(|c| c.equation.clone())
+                .collect::<Vec<_>>(),
+            &dataset_x,
+        );
 
         let sim_summary = build_sim_summary(&result);
-        let judge_input = build_judge_input(
-            &dataset,
+        let dataset_summary = build_dataset_summary(
+            &vector_data.feature_names,
             &library,
-            &topk.entries,
+            vector_data.samples.len(),
+            "accel_components_body_all",
+        );
+        let judge_input = build_judge_input_from_candidates(
+            dataset_summary,
+            vector_candidates.clone(),
             Some(sim_summary.clone()),
             regime,
-            "accel_mag_body0",
         );
         let judge_input_path = run_dir.join("judge_input.json");
         fs::write(&judge_input_path, serde_json::to_string_pretty(&judge_input)?)?;
@@ -874,7 +1082,10 @@ fn run_factory(
 
         let discovery_out = run_dir.join("discovery.json");
         let discovery_json = serde_json::to_string_pretty(&serde_json::json!({
-            "top3": topk.entries,
+            "top3_x": topk_x.entries,
+            "top3_y": topk_y.entries,
+            "top3_z": topk_z.entries,
+            "vector_candidates": vector_candidates,
             "grid_top3": grid_topk.entries,
         }))?;
         fs::write(&discovery_out, discovery_json)?;
@@ -888,6 +1099,7 @@ fn run_factory(
             initial_conditions: InitialConditionSpec,
             simulation: SimulationSummary,
             discovery_top3: Vec<threebody_discover::EquationScore>,
+            vector_candidates: Vec<CandidateSummary>,
             grid_top3: Vec<threebody_discover::EquationScore>,
             judge: Option<JudgeResponse>,
             llm_mode: String,
@@ -901,7 +1113,8 @@ fn run_factory(
             config: cfg,
             initial_conditions: ic_spec.clone(),
             simulation: sim_summary.clone(),
-            discovery_top3: topk.entries.clone(),
+            discovery_top3: topk_x.entries.clone(),
+            vector_candidates: vector_candidates.clone(),
             grid_top3: grid_topk.entries.clone(),
             judge: judge.clone(),
             llm_mode: llm_mode_label(llm_mode).to_string(),
@@ -916,12 +1129,13 @@ fn run_factory(
         md.push_str(&format!("- Steps: {}\n", sim_summary.steps));
         md.push_str(&format!("- Energy drift: {:?}\n", sim_summary.energy_drift));
         md.push_str(&format!("- Min pair dist: {:?}\n", sim_summary.min_pair_dist));
-        if let Some(best) = topk.entries.first() {
+        if let Some(best_vec) = vector_candidates.first() {
             md.push_str(&format!(
-                "- Best equation (numeric): score={:.6}, eq={}\n",
-                best.score,
-                best.equation.format()
+                "- Best vector model: mse={:.6}, rollout_rmse={:?}\n",
+                best_vec.metrics.mse,
+                best_vec.metrics.rollout_rmse
             ));
+            md.push_str(&format!("  eq: {}\n", best_vec.equation_text));
         }
         if let Some(j) = judge.as_ref() {
             md.push_str("\n## LLM Judge Summary\n");
