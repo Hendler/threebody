@@ -66,6 +66,32 @@ impl Default for OutputConfig {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub enum CloseEncounterAction {
+    Soften,
+    SwitchIntegrator,
+    StopAndReport,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct CloseEncounterConfig {
+    pub r_min: f64,
+    pub action: CloseEncounterAction,
+    pub softening: f64,
+    pub switch_integrator: Option<IntegratorKind>,
+}
+
+impl Default for CloseEncounterConfig {
+    fn default() -> Self {
+        Self {
+            r_min: 0.0,
+            action: CloseEncounterAction::StopAndReport,
+            softening: 0.0,
+            switch_integrator: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     pub constants: Constants,
     pub integrator: IntegratorConfig,
@@ -73,6 +99,8 @@ pub struct Config {
     pub enable_gravity: bool,
     pub enable_em: bool,
     pub output: OutputConfig,
+    pub close_encounter: CloseEncounterConfig,
+    pub allow_leapfrog_with_em: bool,
 }
 
 impl Default for Config {
@@ -84,6 +112,8 @@ impl Default for Config {
             enable_gravity: true,
             enable_em: true,
             output: OutputConfig::default(),
+            close_encounter: CloseEncounterConfig::default(),
+            allow_leapfrog_with_em: false,
         }
     }
 }
@@ -111,13 +141,32 @@ impl Config {
         if self.integrator.rtol < 0.0 || self.integrator.atol < 0.0 {
             return Err("tolerances must be >= 0".to_string());
         }
+        if self.close_encounter.r_min < 0.0 {
+            return Err("close_encounter.r_min must be >= 0".to_string());
+        }
+        if self.close_encounter.softening < 0.0 {
+            return Err("close_encounter.softening must be >= 0".to_string());
+        }
         Ok(())
+    }
+
+    pub fn warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self.enable_em
+            && matches!(self.integrator.kind, IntegratorKind::Leapfrog)
+            && !self.allow_leapfrog_with_em
+        {
+            warnings.push("leapfrog with EM enabled may violate structure; consider Boris or RK45".to_string());
+        }
+        warnings
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, Constants, IntegratorConfig, IntegratorKind, OutputConfig};
+    use super::{
+        CloseEncounterConfig, Config, Constants, IntegratorConfig, IntegratorKind, OutputConfig,
+    };
     use serde_json;
 
     #[test]
@@ -147,6 +196,8 @@ mod tests {
             enable_gravity: true,
             enable_em: false,
             output: OutputConfig::default(),
+            close_encounter: CloseEncounterConfig::default(),
+            allow_leapfrog_with_em: false,
         };
         assert!(cfg.validate().is_err());
 
@@ -155,5 +206,15 @@ mod tests {
         cfg.integrator.dt_min = 1.0;
         cfg.integrator.dt_max = 0.5;
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn warnings_for_leapfrog_em() {
+        let mut cfg = Config::default();
+        cfg.enable_em = true;
+        cfg.integrator.kind = IntegratorKind::Leapfrog;
+        cfg.allow_leapfrog_with_em = false;
+        let warnings = cfg.warnings();
+        assert!(!warnings.is_empty());
     }
 }
