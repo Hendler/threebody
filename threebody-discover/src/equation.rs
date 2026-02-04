@@ -28,6 +28,17 @@ impl Equation {
     pub fn complexity(&self) -> usize {
         self.terms.len()
     }
+
+    pub fn format(&self) -> String {
+        if self.terms.is_empty() {
+            return "0".to_string();
+        }
+        let mut parts = Vec::new();
+        for term in &self.terms {
+            parts.push(format!("{:+.6}*{}", term.coeff, term.feature));
+        }
+        parts.join(" ")
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

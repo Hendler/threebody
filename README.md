@@ -168,7 +168,7 @@ EM modeling:
 - Darwin, C. G. (1920). The dynamical motions of charged particles. Philosophical Magazine, 39(233), 537-551. doi:10.1080/14786440508636066.
 
 Regularization and close encounters:
-- Kustaanheimo, P., and Stiefel, E. (1965). Perturbation theory of Kepler motion based on spinor regularization. Journal fuer die reine und angewandte Mathematik, 218, 204-219.
+- Stiefel, E., and Kustaanheimo, P. (1965). Perturbation theory of Kepler motion based on spinor regularization. Journal fuer die reine und angewandte Mathematik, 218, 204-219. doi:10.1515/crll.1965.218.204.
 - Mikkola, S., and Aarseth, S. J. (1993). An implementation of N-body chain regularization. Celestial Mechanics and Dynamical Astronomy, 57, 439-459. doi:10.1007/BF00695714.
 
 Sparse discovery and equation learning:
