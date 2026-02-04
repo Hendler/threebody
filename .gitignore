@@ -7,3 +7,4 @@ missfont.log
 target
 .venv/
 factory_out/
+.openai_key

@@ -28,9 +28,11 @@ cargo run -p threebody-cli -- discover --runs 50 --population 20 --out top_equat
 # Run one experiment iteration (mock LLM, no API key)
 cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode mock
 
-# Run one factory iteration (OpenAI LLM)
-export OPENAI_API_KEY="your_key_here"
+# Run one factory iteration (OpenAI LLM, uses .openai_key if present)
 cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5
+
+# Or override with a key file (ignores OPENAI_API_KEY and .openai_key)
+cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5 --openai-key-file .openai_key
 
 # Show help
 cargo run -p threebody-cli -- --help
@@ -49,11 +51,17 @@ cargo run -p threebody-cli -- --help
 - `--rollout-integrator` selects the rollout evaluator (`euler`, `leapfrog`) for scoring.
 
 **LLM**
-Set `OPENAI_API_KEY` to enable LLM judge mode for discovery or the factory loop:
+If `.openai_key` exists in the working directory, it is used by default for OpenAI mode.
+Create the key file with: `echo "sk-your-key" > .openai_key`.
+Otherwise, set `OPENAI_API_KEY` to enable LLM judge mode for discovery or the factory loop:
 ```bash
 export OPENAI_API_KEY="your_key_here"
 cargo run -p threebody-cli -- discover --llm --model gpt-5
 cargo run -p threebody-cli -- factory --llm-mode openai --model gpt-5 --max-iters 1 --auto
+```
+Or override with a key file:
+```bash
+cargo run -p threebody-cli -- discover --llm --model gpt-5 --openai-key-file .openai_key
 ```
 The LLM judge receives equation forms plus numeric metrics (MSE, rollout RMSE, divergence time) and emits JSON-only scorecards.
 It may recommend the next rollout evaluator (`euler` or `leapfrog`) and GA fitness heuristic (`mse` or `mse_parsimony`).

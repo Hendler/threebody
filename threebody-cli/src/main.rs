@@ -156,6 +156,9 @@ enum Commands {
         /// LLM model name.
         #[arg(long, default_value = "gpt-5")]
         model: String,
+        /// OpenAI API key file (overrides OPENAI_API_KEY).
+        #[arg(long)]
+        openai_key_file: Option<PathBuf>,
         /// Fitness heuristic: mse | mse_parsimony.
         #[arg(long, default_value = "mse")]
         fitness: String,
@@ -220,6 +223,9 @@ enum Commands {
         /// LLM model name (openai mode).
         #[arg(long, default_value = "gpt-5")]
         model: String,
+        /// OpenAI API key file (overrides OPENAI_API_KEY).
+        #[arg(long)]
+        openai_key_file: Option<PathBuf>,
     },
 }
 
@@ -320,6 +326,7 @@ fn main() -> anyhow::Result<()> {
             body,
             llm,
             model,
+            openai_key_file,
             fitness,
             rollout_integrator,
         } => {
@@ -333,6 +340,7 @@ fn main() -> anyhow::Result<()> {
                 body,
                 llm,
                 model,
+                openai_key_file,
                 fitness,
                 rollout_integrator,
             )?;
@@ -356,6 +364,7 @@ fn main() -> anyhow::Result<()> {
             rollout_integrator,
             llm_mode,
             model,
+            openai_key_file,
         } => {
             run_factory(
                 out_dir,
@@ -376,6 +385,7 @@ fn main() -> anyhow::Result<()> {
                 rollout_integrator,
                 llm_mode,
                 model,
+                openai_key_file,
             )?;
         }
     }
@@ -547,6 +557,7 @@ fn run_discovery(
     body: Option<usize>,
     llm: bool,
     model: String,
+    openai_key_file: Option<PathBuf>,
     fitness: String,
     rollout_integrator: String,
 ) -> anyhow::Result<()> {
@@ -560,7 +571,11 @@ fn run_discovery(
         fitness,
         ..DiscoveryConfig::default()
     };
-    let llm_client = if llm { Some(OpenAIClient::from_env(&model)?) } else { None };
+    let llm_client = if llm {
+        Some(OpenAIClient::from_env_or_file(&model, openai_key_file.as_deref())?)
+    } else {
+        None
+    };
 
     if let Some(b) = body {
         if b > 2 {
@@ -1348,11 +1363,18 @@ fn llm_mode_label(mode: LlmMode) -> &'static str {
     }
 }
 
-fn select_llm_client(mode: LlmMode, model: &str) -> anyhow::Result<Option<Box<dyn LlmClient>>> {
+fn select_llm_client(
+    mode: LlmMode,
+    model: &str,
+    openai_key_file: Option<&std::path::Path>,
+) -> anyhow::Result<Option<Box<dyn LlmClient>>> {
     match mode {
         LlmMode::Off => Ok(None),
         LlmMode::Mock => Ok(Some(Box::new(MockLlm))),
-        LlmMode::OpenAI => Ok(Some(Box::new(OpenAIClient::from_env(model)?))),
+        LlmMode::OpenAI => Ok(Some(Box::new(OpenAIClient::from_env_or_file(
+            model,
+            openai_key_file,
+        )?))),
     }
 }
 
@@ -1375,11 +1397,12 @@ fn run_factory(
     rollout_integrator: String,
     llm_mode: String,
     model: String,
+    openai_key_file: Option<PathBuf>,
 ) -> anyhow::Result<()> {
     fs::create_dir_all(&out_dir)?;
     let mut next_ic: Option<InitialConditionSpec> = None;
     let llm_mode = parse_llm_mode(&llm_mode)?;
-    let llm_client = select_llm_client(llm_mode, &model)?;
+    let llm_client = select_llm_client(llm_mode, &model, openai_key_file.as_deref())?;
     let mut current_fitness = parse_fitness_heuristic(&fitness)?;
     let mut current_rollout = parse_rollout_integrator(&rollout_integrator)?;
 

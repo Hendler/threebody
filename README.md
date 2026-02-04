@@ -85,7 +85,10 @@ Outputs:
 - The LLM can propose initial conditions within strict bounds to drive the `factory` loop.
 - Prompts and responses are logged for reproducibility; numeric metrics (MSE, rollout RMSE, divergence time) remain the primary ranking.
 - The rollout evaluator supports `euler` and `leapfrog`; the LLM can recommend which to use next, along with the GA fitness heuristic (`mse` vs `mse_parsimony`).
-- Requires an API key in `OPENAI_API_KEY` for `--llm-mode openai`. Offline and `--llm-mode mock` are supported.
+- If `.openai_key` exists in the working directory, it is used by default for `--llm-mode openai` and overrides `OPENAI_API_KEY`.
+- You can pass `--openai-key-file` to use a specific key file.
+- If no key file is found, `OPENAI_API_KEY` is used. Offline and `--llm-mode mock` are supported.
+- Create the key file with: `echo "sk-your-key" > .openai_key`.
 
 **Status**
 This repo now includes a working Rust workspace with `threebody-core` (library), `threebody-cli` (binary), and `threebody-discover` (discovery engine). The core simulator supports gravity + quasi-static EM, adaptive RK45 truth mode, and CSV + JSON sidecar output. The discovery engine runs a genetic search and can optionally use an LLM judge plus an end-to-end `factory` workflow.
@@ -122,9 +125,14 @@ cargo run -p threebody-cli -- discover --runs 50 --population 20 --out top_equat
 # Run one factory/experiment iteration with a mock LLM (no API key needed)
 cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode mock --rollout-integrator euler --fitness mse
 
-# Run one factory iteration with OpenAI (requires OPENAI_API_KEY)
-export OPENAI_API_KEY="your_key_here"
+# Run one factory iteration with OpenAI (uses .openai_key by default if present)
 cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5 --rollout-integrator leapfrog --fitness mse_parsimony
+
+# Or override with a key file (ignores OPENAI_API_KEY and .openai_key)
+cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5 --openai-key-file .openai_key
+
+# Or use env var when no key file is present
+export OPENAI_API_KEY="your_key_here"
 ```
 
 **Paper Build (LaTeX -> PDF)**

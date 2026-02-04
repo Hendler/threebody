@@ -4,6 +4,8 @@ use crate::judge::{
 };
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::fs;
+use std::path::Path;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -114,7 +116,23 @@ pub struct OpenAIClient {
 
 impl OpenAIClient {
     pub fn from_env(model: &str) -> Result<Self, LlmError> {
-        let api_key = env::var("OPENAI_API_KEY").map_err(|_| LlmError("OPENAI_API_KEY missing".to_string()))?;
+        Self::from_env_or_file(model, None)
+    }
+
+    pub fn from_env_or_file(model: &str, key_file: Option<&Path>) -> Result<Self, LlmError> {
+        let default_path = Path::new(".openai_key");
+        let key_path = key_file.or_else(|| default_path.exists().then_some(default_path));
+        let api_key = if let Some(path) = key_path {
+            let raw = fs::read_to_string(path)
+                .map_err(|e| LlmError(format!("failed to read OpenAI key file {}: {}", path.display(), e)))?;
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(LlmError(format!("OpenAI key file {} is empty", path.display())));
+            }
+            trimmed.to_string()
+        } else {
+            env::var("OPENAI_API_KEY").map_err(|_| LlmError("OPENAI_API_KEY missing".to_string()))?
+        };
         Ok(Self {
             api_key,
             model: model.to_string(),
@@ -200,9 +218,11 @@ fn parse_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, LlmError>
 
 #[cfg(test)]
 mod tests {
-    use super::{LlmClient, MockLlm};
+    use super::{LlmClient, MockLlm, OpenAIClient};
     use crate::judge::{CandidateMetrics, CandidateSummary, DatasetSummary, FeatureDescription, IcBounds, IcRequest, JudgeInput, Rubric};
     use crate::equation::Equation;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn mock_llm_proposes_ic() {
@@ -289,5 +309,21 @@ mod tests {
         };
         let resp = llm.judge_candidates(&input).unwrap();
         assert!(!resp.value.ranking.is_empty());
+    }
+
+    #[test]
+    fn openai_client_reads_key_file() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let mut path = std::env::temp_dir();
+        path.push(format!("openai_key_test_{now}.txt"));
+        fs::write(&path, "sk-test-key\n").unwrap();
+
+        let client = OpenAIClient::from_env_or_file("gpt-5", Some(&path)).unwrap();
+        assert_eq!(client.api_key, "sk-test-key");
+
+        fs::remove_file(path).unwrap();
     }
 }
