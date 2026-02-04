@@ -531,34 +531,9 @@ fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize) -> a
     fs::create_dir_all(&out_dir)?;
 
     let config_path = out_dir.join("config.json");
-    let ic_path = out_dir.join("ic.json");
-    let traj_csv = out_dir.join("traj.csv");
-    let top_eq = out_dir.join("top_equations.json");
 
-    // Emit config + ICs (mirrors example-config/example-ic).
+    // Emit a starter config (so users can tweak constants/integrators if desired).
     fs::write(&config_path, serde_json::to_string_pretty(&Config::default())?)?;
-    fs::write(
-        &ic_path,
-        serde_json::to_string_pretty(&initial_conditions_from_preset("three-body")?)?,
-    )?;
-
-    // Baseline simulate + discover.
-    run_simulation(
-        Some(config_path.clone()),
-        traj_csv.clone(),
-        steps,
-        0.01,
-        "standard".to_string(),
-        "three-body".to_string(),
-        Some(ic_path.clone()),
-        None,
-        false,
-        false,
-        false,
-        "csv".to_string(),
-        false,
-        false,
-    )?;
 
     let solver_settings = DiscoverySolverSettings {
         solver: DiscoverySolver::Stls,
@@ -570,21 +545,6 @@ fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize) -> a
         lasso_max_iter: 2000,
         lasso_tol: 1e-6,
     };
-    run_discovery(
-        50,
-        20,
-        42,
-        top_eq.clone(),
-        traj_csv.clone(),
-        Some(traj_csv.with_extension("json")),
-        None,
-        false,
-        "gpt-5.2".to_string(),
-        None,
-        "mse".to_string(),
-        "euler".to_string(),
-        solver_settings.clone(),
-    )?;
 
     let factory_dir = out_dir.join("factory");
     run_factory(

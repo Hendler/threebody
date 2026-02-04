@@ -343,10 +343,7 @@ fn quickstart_command_runs() {
     assert!(out.status.success(), "quickstart failed: {:?}", out);
 
     assert!(tmp_dir.join("config.json").exists());
-    assert!(tmp_dir.join("ic.json").exists());
-    assert!(tmp_dir.join("traj.csv").exists());
-    assert!(tmp_dir.join("traj.json").exists());
-    assert!(tmp_dir.join("top_equations.json").exists());
+    assert!(tmp_dir.join("RESULTS.md").exists());
 
     let factory_dir = tmp_dir.join("factory");
     assert!(factory_dir.join("run_001").join("report.json").exists());
