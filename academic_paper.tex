@@ -12,7 +12,7 @@
 \maketitle
 
 \begin{abstract}
-We present a two-system framework for studying and predicting three-body dynamics under coupled gravitational and electromagnetic interactions. The first system is a high-fidelity numerical simulator (``oracle'') designed for reproducibility, performance, and explicit error control. It supports Newtonian gravity and a nonrelativistic electromagnetic interaction model including electric and magnetic fields as well as scalar and vector potentials ($\phi$, $A$). The second system is a model-discovery engine that searches for sparse, interpretable equations that predict the oracle's trajectories with minimal complexity. Discovery proceeds via structured feature libraries and sequential thresholded least squares (SINDy/STLS), using simulator-provided accelerations to avoid derivative noise. We provide an implementation-centric description and emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction), conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes. We argue that novelty arises not from claiming a universal closed-form solution, but from automatically discovering compact regime-specific laws with explicit validity domains and verified rollout performance against the oracle.
+We present a two-system framework for studying and predicting three-body dynamics under coupled gravitational and electromagnetic interactions. The first system is a high-fidelity numerical simulator (``oracle'') designed for reproducibility, performance, and explicit error control. It supports Newtonian gravity and a nonrelativistic electromagnetic interaction model including electric and magnetic fields as well as scalar and vector potentials ($\phi$, $A$). The second system is a model-discovery engine that searches for sparse, interpretable equations that predict the oracle's trajectories with minimal complexity. Discovery proceeds via structured feature libraries and sequential thresholded least squares (SINDy/STLS)\cite{Brunton2016}, using simulator-provided accelerations to avoid derivative noise. We provide an implementation-centric description and emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. We argue that novelty arises not from claiming a universal closed-form solution, but from automatically discovering compact regime-specific laws with explicit validity domains and verified rollout performance against the oracle.
 \end{abstract}
 
 \section{Introduction}
@@ -85,13 +85,13 @@ Vector potential:
 A_i = \sum_{j \ne i} \frac{\mu_0}{4\pi} \frac{q_j v_j}{\|r_i - r_j\|}.
 \end{equation*}
 
-Editorial uncertainty: This EM model omits finite propagation speed (retardation), radiation reaction, and self-field effects. It is best interpreted as a quasi-static approximation; its domain of physical validity is not universal. For ``truth-grade'' claims, the simulator is truth-grade relative to the assumed equations, not necessarily relative to full Maxwell--Lorentz dynamics.
+Editorial uncertainty: This EM model omits finite propagation speed (retardation), radiation reaction, and self-field effects. It is best interpreted as a quasi-static approximation\cite{Darwin1920}; its domain of physical validity is not universal. For ``truth-grade'' claims, the simulator is truth-grade relative to the assumed equations, not necessarily relative to full Maxwell--Lorentz dynamics.
 
 \subsection{Numerical integration}
 We provide two integrators:
 \begin{itemize}
-\item \textbf{Adaptive RK45 (Dormand--Prince)}: used as ``truth mode'' for controlled local truncation error. It adapts time step using embedded error estimates with user-specified tolerances and min/max dt.
-\item \textbf{Leapfrog (Kick--Drift--Kick)}: a fast, stable second-order method often favored for long-horizon gravitational dynamics.
+\item \textbf{Adaptive RK45 (Dormand--Prince)}\cite{Dormand1980}: used as ``truth mode'' for controlled local truncation error. It adapts time step using embedded error estimates with user-specified tolerances and min/max dt.
+\item \textbf{Leapfrog (Kick--Drift--Kick)}\cite{Verlet1967,Ruth1983,Yoshida1990,ForestRuth1990}: a fast, stable second-order method often favored for long-horizon gravitational dynamics.
 \end{itemize}
 
 Editorial uncertainty: For purely Hamiltonian gravity, symplectic methods have strong long-term stability guarantees. With the chosen EM terms, the system is not treated with a full Hamiltonian field formulation here; leapfrog remains useful but should not be assumed to preserve the same structure exactly. This is one reason we maintain RK-based truth mode.
@@ -117,7 +117,7 @@ Near-collisions can cause:
 
 Current implementation supports optional softening $\epsilon$ in denominators to avoid singularities.
 
-Editorial uncertainty: Softening changes physics. A true ``truth-grade'' approach for close encounters would incorporate regularization (e.g., time transformations, KS/chain regularization) and/or higher precision. This is a clear future-work item.
+Editorial uncertainty: Softening changes physics. A true ``truth-grade'' approach for close encounters would incorporate regularization (e.g., KS/chain regularization)\cite{KustaanheimoStiefel1965,MikkolaAarseth1993} and/or higher precision. This is a clear future-work item.
 
 \subsection{Output contract for downstream discovery}
 The simulator outputs a wide CSV including:
@@ -132,13 +132,13 @@ Design rationale: Discovery should use simulator-provided accelerations, not fin
 
 \section{Discovery Engine (``Predictor''): Sparse, Interpretable Dynamics}
 \subsection{Objective}
-We seek simple, interpretable functions $\hat{f}_i$ that approximate oracle accelerations:
+We seek simple, interpretable functions $\hat{f}_i$ that approximate oracle accelerations, building on work in automated equation discovery and sparse model identification\cite{Bongard2007,Schmidt2009,Brunton2016}:
 \begin{equation*}
 a_i(t) \approx \hat{f}_i\left(\text{features}(r(t), v(t), \ldots)\right),
 \end{equation*}
 with high forward-prediction fidelity over a time horizon, minimal equation complexity, and explicit domain-of-validity.
 
-This is fundamentally different from ``solving the three-body problem in closed form.'' The goal is regime-specific compact predictive structure.
+This is fundamentally different from ``solving the three-body problem in closed form.'' The goal is regime-specific compact predictive structure. Related work extends sparse discovery to spatiotemporal systems and PDE settings.\cite{Rudy2017}
 
 \subsection{Why we fit acceleration directly}
 Classical system identification often estimates $\dot{x}$ from measurements; in chaotic systems this introduces strong noise amplification. We avoid this by training on simulator-provided $a_i(t)$ rather than differentiating $v_i(t)$.
@@ -178,7 +178,7 @@ with sparsity enforced by Sequential Thresholded Least Squares:
 
 We normalize feature columns (RMS scaling) before thresholding to ensure $\lambda$ has consistent meaning across heterogeneous terms.
 
-Editorial uncertainty: STLS can be sensitive to collinearity and scaling; our current approach uses ridge stabilization and normalization, but more robust solvers (e.g., LASSO with cross-validation) may improve stability.
+Editorial uncertainty: STLS can be sensitive to collinearity and scaling; our current approach uses ridge stabilization and normalization, but more robust solvers (e.g., LASSO with cross-validation)\cite{Tibshirani1996} may improve stability.
 
 \subsection{What counts as ``predicts well''}
 Pointwise acceleration fit is not sufficient. We evaluate:
@@ -188,7 +188,7 @@ Pointwise acceleration fit is not sufficient. We evaluate:
 \item Generalization to held-out initial conditions within the intended regime.
 \end{itemize}
 
-Editorial uncertainty: In chaotic regimes, long-horizon point prediction is not meaningful; evaluation should shift toward short-horizon deterministic accuracy, ensemble/statistical predictions, and qualitative invariants and manifold structure. We are not yet fully implementing those alternative evaluation regimes.
+Editorial uncertainty: In chaotic regimes, long-horizon point prediction is not meaningful\cite{Lorenz1963}; evaluation should shift toward short-horizon deterministic accuracy, ensemble/statistical predictions, and qualitative invariants and manifold structure. We are not yet fully implementing those alternative evaluation regimes.
 
 \section{System Integration and Reproducibility}
 \subsection{CLI-driven workflow}
@@ -244,7 +244,7 @@ This section is intentionally frank.
 The quasi-static magnetic approximation may be adequate for some regimes but fails when retardation or radiation are significant. If the objective is ``physics truth,'' the EM model must be upgraded (retarded potentials or field solver), at significant computational cost.
 
 \subsection*{Integrator structure under EM}
-Leapfrog is attractive for gravity; under EM it may not preserve the right structure. We currently treat leapfrog as a fast option, not as a guaranteed long-term invariant-preserving method under full coupled dynamics.
+Leapfrog is attractive for gravity; under EM it may not preserve the right structure. We currently treat leapfrog as a fast option, not as a guaranteed long-term invariant-preserving method under full coupled dynamics. EM-appropriate schemes include the Boris pusher and structure-preserving charged-particle integrators.\cite{Boris1970,He2015,HigueraCary2017}
 
 \subsection*{Close encounters and stiffness}
 Softening is not a principled solution. We need a regularization strategy (Sundman transform, KS/chain regularization) and possibly adaptive precision.
@@ -266,6 +266,62 @@ We interpret ``novel'' as compact approximations that outperform naive baselines
 
 \section{Conclusion}
 We described a pragmatic two-system approach to three-body dynamics: a high-fidelity simulator as oracle, and a sparse discovery engine that produces interpretable, compact predictive equations. The central technical strategy is to train on simulator-provided accelerations and to constrain the hypothesis space through physically structured feature libraries, thereby producing ``simple math'' that predicts well within explicit regimes. We also highlighted the primary uncertainties: electromagnetic approximation fidelity, conservation-law interpretation, close-encounter stiffness, and the limits of long-horizon prediction in chaotic systems. This framework is designed to be extensible, reproducible, and honest about what is known versus assumed.
+
+\section*{References}
+\begin{thebibliography}{99}
+
+\bibitem{Brunton2016}
+S. L. Brunton, J. L. Proctor, and J. N. Kutz, ``Discovering governing equations from data by sparse identification of nonlinear dynamical systems,'' \emph{Proceedings of the National Academy of Sciences}, vol. 113, no. 15, pp. 3932--3937, 2016. doi:10.1073/pnas.1517384113.
+
+\bibitem{Rudy2017}
+S. H. Rudy, S. L. Brunton, J. L. Proctor, and J. N. Kutz, ``Data-driven discovery of partial differential equations,'' \emph{Science Advances}, vol. 3, no. 4, e1602614, 2017. doi:10.1126/sciadv.1602614.
+
+\bibitem{Bongard2007}
+J. Bongard and H. Lipson, ``Automated reverse engineering of nonlinear dynamical systems,'' \emph{Proceedings of the National Academy of Sciences}, vol. 104, no. 24, pp. 9943--9948, 2007. doi:10.1073/pnas.0609476104.
+
+\bibitem{Schmidt2009}
+M. Schmidt and H. Lipson, ``Distilling Free-Form Natural Laws from Experimental Data,'' \emph{Science}, vol. 324, no. 5923, pp. 81--85, 2009. doi:10.1126/science.1165893.
+
+\bibitem{Tibshirani1996}
+R. Tibshirani, ``Regression shrinkage and selection via the lasso,'' \emph{Journal of the Royal Statistical Society: Series B (Methodological)}, vol. 58, no. 1, pp. 267--288, 1996. doi:10.1111/j.2517-6161.1996.tb02080.x.
+
+\bibitem{Lorenz1963}
+E. N. Lorenz, ``Deterministic nonperiodic flow,'' \emph{Journal of the Atmospheric Sciences}, vol. 20, no. 2, pp. 130--141, 1963. doi:10.1175/1520-0469(1963)020<0130:DNF>2.0.CO;2.
+
+\bibitem{Dormand1980}
+J. R. Dormand and P. J. Prince, ``A family of embedded Runge--Kutta formulae,'' \emph{Journal of Computational and Applied Mathematics}, vol. 6, no. 1, pp. 19--26, 1980. doi:10.1016/0771-050X(80)90013-3.
+
+\bibitem{Verlet1967}
+L. Verlet, ``Computer `Experiments' on Classical Fluids. I. Thermodynamical Properties of Lennard-Jones Molecules,'' \emph{Physical Review}, vol. 159, pp. 98--103, 1967. doi:10.1103/PhysRev.159.98.
+
+\bibitem{Ruth1983}
+R. D. Ruth, ``A canonical integration technique,'' in \emph{Proceedings of the 10th Particle Accelerator Conference (PAC'83)}, Santa Fe, NM, USA, 1983, pp. 2669--2672.
+
+\bibitem{ForestRuth1990}
+E. Forest and R. D. Ruth, ``Fourth-order symplectic integration,'' \emph{Physica D: Nonlinear Phenomena}, vol. 43, no. 1, pp. 105--117, 1990. doi:10.1016/0167-2789(90)90019-L.
+
+\bibitem{Yoshida1990}
+H. Yoshida, ``Construction of higher order symplectic integrators,'' \emph{Physics Letters A}, vol. 150, no. 5--7, pp. 262--268, 1990. doi:10.1016/0375-9601(90)90092-3.
+
+\bibitem{Boris1970}
+J. P. Boris, ``Relativistic plasma simulation---optimization of a hybrid code,'' in \emph{Proceedings of the Fourth Conference on Numerical Simulation of Plasmas}, Washington, DC, USA, 1970, pp. 3--67.
+
+\bibitem{He2015}
+Y. He, Y. Sun, J. Liu, and H. Qin, ``Volume-preserving algorithms for charged particle dynamics,'' \emph{Journal of Computational Physics}, vol. 281, pp. 135--147, 2015. doi:10.1016/j.jcp.2014.10.032.
+
+\bibitem{HigueraCary2017}
+A. V. Higuera and J. R. Cary, ``Structure-preserving second-order integration of relativistic charged particle trajectories in electromagnetic fields,'' \emph{Physics of Plasmas}, vol. 24, 052104, 2017. doi:10.1063/1.4979989.
+
+\bibitem{Darwin1920}
+C. G. Darwin, ``The dynamical motions of charged particles,'' \emph{Philosophical Magazine}, vol. 39, no. 233, pp. 537--551, 1920. doi:10.1080/14786440508636066.
+
+\bibitem{KustaanheimoStiefel1965}
+P. Kustaanheimo and E. Stiefel, ``Perturbation theory of Kepler motion based on spinor regularization,'' \emph{Journal fuer die reine und angewandte Mathematik}, vol. 218, pp. 204--219, 1965.
+
+\bibitem{MikkolaAarseth1993}
+S. Mikkola and S. J. Aarseth, ``An implementation of N-body chain regularization,'' \emph{Celestial Mechanics and Dynamical Astronomy}, vol. 57, pp. 439--459, 1993. doi:10.1007/BF00695714.
+
+\end{thebibliography}
 
 \appendix
 \section{Implementation Notes (brief)}

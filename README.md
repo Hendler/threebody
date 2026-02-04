@@ -136,5 +136,33 @@ cargo run -p threebody-cli -- simulate --config config.json --out run.csv
 3. Tolerances live in `threebody-core/tests/tolerances.rs` and are reused everywhere.
 4. Every public function has at least one failure-mode test (invalid inputs, division by zero, or epsilon edge cases).
 
+**References (Selected)**
+Simulation and integrators:
+- Dormand, J. R., and Prince, P. J. (1980). A family of embedded Runge-Kutta formulae. Journal of Computational and Applied Mathematics, 6(1), 19-26. doi:10.1016/0771-050X(80)90013-3.
+- Verlet, L. (1967). Computer "Experiments" on Classical Fluids. I. Thermodynamical Properties of Lennard-Jones Molecules. Physical Review, 159, 98-103. doi:10.1103/PhysRev.159.98.
+- Ruth, R. D. (1983). A canonical integration technique. Proc. PAC'83, Santa Fe, NM, pp. 2669-2672.
+- Forest, E., and Ruth, R. D. (1990). Fourth-order symplectic integration. Physica D, 43(1), 105-117. doi:10.1016/0167-2789(90)90019-L.
+- Yoshida, H. (1990). Construction of higher order symplectic integrators. Physics Letters A, 150(5-7), 262-268. doi:10.1016/0375-9601(90)90092-3.
+- Boris, J. P. (1970). Relativistic plasma simulation--optimization of a hybrid code. Proc. 4th Conf. on Numerical Simulation of Plasmas, Washington, DC, pp. 3-67.
+- He, Y., Sun, Y., Liu, J., and Qin, H. (2015). Volume-preserving algorithms for charged particle dynamics. Journal of Computational Physics, 281, 135-147. doi:10.1016/j.jcp.2014.10.032.
+- Higuera, A. V., and Cary, J. R. (2017). Structure-preserving second-order integration of relativistic charged particle trajectories in electromagnetic fields. Physics of Plasmas, 24, 052104. doi:10.1063/1.4979989.
+
+EM modeling:
+- Darwin, C. G. (1920). The dynamical motions of charged particles. Philosophical Magazine, 39(233), 537-551. doi:10.1080/14786440508636066.
+
+Regularization and close encounters:
+- Kustaanheimo, P., and Stiefel, E. (1965). Perturbation theory of Kepler motion based on spinor regularization. Journal fuer die reine und angewandte Mathematik, 218, 204-219.
+- Mikkola, S., and Aarseth, S. J. (1993). An implementation of N-body chain regularization. Celestial Mechanics and Dynamical Astronomy, 57, 439-459. doi:10.1007/BF00695714.
+
+Sparse discovery and equation learning:
+- Bongard, J., and Lipson, H. (2007). Automated reverse engineering of nonlinear dynamical systems. PNAS, 104(24), 9943-9948. doi:10.1073/pnas.0609476104.
+- Schmidt, M., and Lipson, H. (2009). Distilling Free-Form Natural Laws from Experimental Data. Science, 324(5923), 81-85. doi:10.1126/science.1165893.
+- Brunton, S. L., Proctor, J. L., and Kutz, J. N. (2016). Discovering governing equations from data by sparse identification of nonlinear dynamical systems. PNAS, 113(15), 3932-3937. doi:10.1073/pnas.1517384113.
+- Rudy, S. H., Brunton, S. L., Proctor, J. L., and Kutz, J. N. (2017). Data-driven discovery of partial differential equations. Science Advances, 3(4), e1602614. doi:10.1126/sciadv.1602614.
+- Tibshirani, R. (1996). Regression shrinkage and selection via the lasso. JRSS-B, 58(1), 267-288. doi:10.1111/j.2517-6161.1996.tb02080.x.
+
+Chaos and predictability:
+- Lorenz, E. N. (1963). Deterministic nonperiodic flow. Journal of the Atmospheric Sciences, 20(2), 130-141. doi:10.1175/1520-0469(1963)020<0130:DNF>2.0.CO;2.
+
 **Where This Is Headed**
 The near-term goal is a reproducible, testable simulator whose outputs can be used to discover compact, regime-specific predictive laws. The long-term goal is an "atlas of models" that balances interpretability with predictive power across regimes.
