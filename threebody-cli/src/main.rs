@@ -610,29 +610,21 @@ fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize) -> a
         None,
     )?;
 
-    // Copy the most important factory artifacts to the quickstart root for convenience.
-    for name in [
-        "evaluation.md",
-        "evaluation.tex",
-        "evaluation_history.json",
-        "evaluation_input.json",
-        "evaluation_prompt.txt",
-        "evaluation_llm.md",
-        "evaluation.pdf",
-        "evaluation_pdf_error.txt",
-    ] {
-        let src = factory_dir.join(name);
-        if src.exists() {
-            let _ = fs::copy(&src, out_dir.join(name));
-        }
+    // Copy a single novice-friendly artifact to the quickstart root.
+    let eval_md = factory_dir.join("evaluation.md");
+    if eval_md.exists() {
+        let _ = fs::copy(&eval_md, out_dir.join("RESULTS.md"));
+    }
+    let eval_pdf = factory_dir.join("evaluation.pdf");
+    if eval_pdf.exists() {
+        let _ = fs::copy(&eval_pdf, out_dir.join("RESULTS.pdf"));
     }
 
     println!("Quickstart complete: {}", out_dir.display());
     println!("Key outputs:");
-    println!("- {}/evaluation.md", out_dir.display());
-    println!("- {}/evaluation.tex (and .pdf if built)", out_dir.display());
-    println!("- {}/factory/run_###/report.md", out_dir.display());
-    println!("- {}/top_equations.json", out_dir.display());
+    println!("- {}/RESULTS.md", out_dir.display());
+    println!("- {}/RESULTS.pdf (if built)", out_dir.display());
+    println!("- {}/factory/ (evidence + per-iteration artifacts)", out_dir.display());
     Ok(())
 }
 
@@ -2338,6 +2330,45 @@ fn run_factory(
         .as_ref()
         .and_then(|b| fs::read_to_string(out_dir.join(&b.run_id).join("initial_conditions.json")).ok())
         .and_then(|raw| serde_json::from_str(&raw).ok());
+    let incumbent_on_best_run = (|| -> anyhow::Result<Option<IncumbentEvalOnBestRun>> {
+        let (best, prior) = match (current_best.as_ref(), prior_best.as_ref()) {
+            (Some(b), Some(p)) => (b, p),
+            _ => return Ok(None),
+        };
+        let best_run_dir = out_dir.join(&best.run_id);
+        let oracle = match load_oracle_run_from_dir(&best_run_dir) {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+
+        let rollout_integrator = eval_input
+            .iterations
+            .iter()
+            .find(|it| it.run_id == best.run_id)
+            .and_then(|it| it.simulation.as_ref())
+            .and_then(|sim| parse_rollout_integrator(&sim.rollout_integrator).ok())
+            .unwrap_or(RolloutIntegrator::Euler);
+
+        let incumbent_model = match vector_model_from_equation_text(&prior.best.candidate.equation_text) {
+            Some(v) => v,
+            None => return Ok(None),
+        };
+        let complexity = incumbent_model.eq_x.complexity() + incumbent_model.eq_y.complexity() + incumbent_model.eq_z.complexity();
+        let feature_names = FeatureLibrary::default_physics().features;
+        let (rmse, div) = rollout_metrics(
+            &incumbent_model,
+            &feature_names,
+            &oracle.result,
+            &oracle.cfg,
+            rollout_integrator,
+        );
+        Ok(Some(IncumbentEvalOnBestRun {
+            equation_text: prior.best.candidate.equation_text.clone(),
+            rollout_rmse: rmse,
+            divergence_time: div,
+            complexity,
+        }))
+    })()?;
 
     #[derive(serde::Serialize)]
     struct HistoryAttempt {
@@ -2464,7 +2495,13 @@ fn run_factory(
     let eval_prompt_path = out_dir.join("evaluation_prompt.txt");
     let eval_md_path = out_dir.join("evaluation.md");
     let eval_llm_md_path = out_dir.join("evaluation_llm.md");
-    let exec_md = render_executive_summary_md(&eval_input, current_best.as_ref(), prior_best.as_ref());
+    let exec_md = render_executive_summary_md(
+        &eval_input,
+        current_best.as_ref(),
+        prior_best.as_ref(),
+        best_ic.as_ref(),
+        incumbent_on_best_run.as_ref(),
+    );
 
     let mut raw_md = String::new();
     let prompt_text: String;
@@ -2496,9 +2533,7 @@ fn run_factory(
 
     fs::write(&eval_prompt_path, prompt_text)?;
     fs::write(&eval_llm_md_path, &raw_md)?;
-    let mut combined = exec_md;
-    combined.push_str(&raw_md);
-    fs::write(&eval_md_path, combined)?;
+    fs::write(&eval_md_path, exec_md)?;
 
     println!("Factory evaluation written -> {}", eval_md_path.display());
     Ok(())
@@ -2809,6 +2844,84 @@ fn render_expanded_math_md(equation_text: &str) -> String {
     md
 }
 
+fn best_candidate_in_iteration(iter: &FactoryEvaluationIteration) -> Option<&FactoryEvaluationCandidate> {
+    let mut best: Option<&FactoryEvaluationCandidate> = None;
+    let mut best_key: Option<(f64, f64, usize)> = None;
+    for cand in &iter.top_candidates {
+        let key = metrics_sort_key(&cand.metrics);
+        if best_key.map_or(true, |bk| key < bk) {
+            best_key = Some(key);
+            best = Some(cand);
+        }
+    }
+    best
+}
+
+#[derive(Clone, Debug)]
+struct OracleRun {
+    cfg: Config,
+    result: threebody_core::sim::SimResult,
+}
+
+fn load_oracle_run_from_dir(run_dir: &std::path::Path) -> anyhow::Result<OracleRun> {
+    let cfg_json = fs::read_to_string(run_dir.join("config.json"))?;
+    let cfg: Config = serde_json::from_str(&cfg_json)?;
+    cfg.validate().map_err(anyhow::Error::msg)?;
+
+    let ic_json = fs::read_to_string(run_dir.join("initial_conditions.json"))?;
+    let ic: InitialConditionSpec = serde_json::from_str(&ic_json)?;
+    if ic.bodies.len() != 3 {
+        anyhow::bail!(
+            "expected 3 bodies in initial_conditions.json (found {})",
+            ic.bodies.len()
+        );
+    }
+    let mut bodies = [Body::new(0.0, 0.0); 3];
+    for i in 0..3 {
+        bodies[i] = Body::new(ic.bodies[i].mass, ic.bodies[i].charge);
+    }
+
+    let steps = load_steps_from_csv(&run_dir.join("traj.csv").to_path_buf(), bodies, &cfg)?;
+    let sidecar_json = fs::read_to_string(run_dir.join("traj.json"))?;
+    let sidecar: threebody_core::output::sidecar::Sidecar = serde_json::from_str(&sidecar_json)?;
+
+    Ok(OracleRun {
+        cfg,
+        result: threebody_core::sim::SimResult {
+            steps,
+            encounter: None,
+            encounter_action: None,
+            warnings: sidecar.warnings,
+            terminated_early: false,
+            termination_reason: None,
+            stats: sidecar.sim_stats,
+        },
+    })
+}
+
+fn vector_model_from_equation_text(equation_text: &str) -> Option<VectorModel> {
+    let [tx, ty, tz] = parse_vector_equation_terms(equation_text);
+    let to_eq = |terms: Vec<(f64, String)>| threebody_discover::Equation {
+        terms: terms
+            .into_iter()
+            .map(|(coeff, feature)| threebody_discover::equation::Term { feature, coeff })
+            .collect(),
+    };
+    Some(VectorModel {
+        eq_x: to_eq(tx),
+        eq_y: to_eq(ty),
+        eq_z: to_eq(tz),
+    })
+}
+
+#[derive(Clone, Debug)]
+struct IncumbentEvalOnBestRun {
+    equation_text: String,
+    rollout_rmse: f64,
+    divergence_time: Option<f64>,
+    complexity: usize,
+}
+
 fn render_evaluation_tex(
     eval_input: &FactoryEvaluationInput,
     current_best: Option<&BestFactoryCandidate>,
@@ -3010,6 +3123,8 @@ fn render_executive_summary_md(
     eval_input: &FactoryEvaluationInput,
     current_best: Option<&BestFactoryCandidate>,
     prior_best: Option<&PriorAttemptBest>,
+    best_ic: Option<&InitialConditionSpec>,
+    incumbent_on_best_run: Option<&IncumbentEvalOnBestRun>,
 ) -> String {
     let mut md = String::new();
     md.push_str("# Executive Summary\n\n");
@@ -3031,6 +3146,34 @@ fn render_executive_summary_md(
             md.push_str(&best.candidate.equation_text);
             md.push_str("\n```\n");
             md.push_str(&render_expanded_math_md(&best.candidate.equation_text));
+
+            if let Some(iter) = eval_input.iterations.iter().find(|it| it.run_id == best.run_id) {
+                if let Some(sim) = iter.simulation.as_ref() {
+                    md.push_str("\n## Best-Run Physics Diagnostics\n");
+                    md.push_str(&format!("- steps={}\n", sim.steps));
+                    md.push_str(&format!("- min_pair_dist={}\n", format_opt_f64(sim.min_pair_dist)));
+                    md.push_str(&format!("- energy_drift={}\n", format_opt_f64(sim.energy_drift)));
+                    md.push_str(&format!("- rollout_integrator={}\n", sim.rollout_integrator));
+                    if !sim.warnings.is_empty() {
+                        md.push_str(&format!("- warnings: {}\n", sim.warnings.join("; ")));
+                    }
+                }
+            }
+
+            if let Some(ic) = best_ic {
+                md.push_str("\n## Initial Conditions (Best Run)\n");
+                md.push_str(&format!("- barycentric={}\n", ic.barycentric));
+                if !ic.notes.trim().is_empty() {
+                    md.push_str(&format!("- notes: {}\n", ic.notes.trim()));
+                }
+                md.push_str("- bodies:\n");
+                for (i, b) in ic.bodies.iter().enumerate() {
+                    md.push_str(&format!(
+                        "  - body {i}: m={:.6}, q={:.6}, r=({:.6},{:.6},{:.6}), v=({:.6},{:.6},{:.6})\n",
+                        b.mass, b.charge, b.pos[0], b.pos[1], b.pos[2], b.vel[0], b.vel[1], b.vel[2]
+                    ));
+                }
+            }
         }
         None => {
             md.push_str("- No candidate equations were recorded.\n");
@@ -3051,9 +3194,17 @@ fn render_executive_summary_md(
         let prior_roll = pm.rollout_rmse.unwrap_or(f64::INFINITY);
         if curr_roll.is_finite() && prior_roll.is_finite() {
             let delta = curr_roll - prior_roll;
-            let verdict = if delta < 0.0 { "improved" } else if delta > 0.0 { "worse" } else { "no change" };
+            let eps = 1e-9;
+            let verdict = if delta < -eps {
+                "improved"
+            } else if delta > eps {
+                "worse"
+            } else {
+                "no change"
+            };
+            let delta_disp = if delta.abs() <= eps { 0.0 } else { delta };
             md.push_str(&format!(
-                "- Compared to prior best: {verdict} (Δ rollout_rmse = {delta:+.6}).\n"
+                "- Compared to prior best: {verdict} (Δ rollout_rmse = {delta_disp:+.6}).\n"
             ));
             md.push_str(&format!(
                 "- Prior best artifact: `{}`\n",
@@ -3067,11 +3218,72 @@ fn render_executive_summary_md(
         md.push_str("- No prior attempts found under `results/` (or no candidates in this run).\n");
     }
 
+    if let (Some(best), Some(inc)) = (current_best, incumbent_on_best_run) {
+        let curr_roll = best.candidate.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+        if curr_roll.is_finite() && inc.rollout_rmse.is_finite() {
+            let delta = curr_roll - inc.rollout_rmse;
+            let eps = 1e-9;
+            let verdict = if delta < -eps {
+                "better"
+            } else if delta > eps {
+                "worse"
+            } else {
+                "equal"
+            };
+            let delta_disp = if delta.abs() <= eps { 0.0 } else { delta };
+            md.push_str("\n## Evidence: Prior Best Re-Scored on This Run\n");
+            md.push_str("- This is an apples-to-apples check on the *same* oracle trajectory.\n");
+            md.push_str(&format!("- Prior best complexity: {}.\n", inc.complexity));
+            md.push_str("- Prior best equation (exact):\n");
+            md.push_str("```text\n");
+            md.push_str(&inc.equation_text);
+            md.push_str("\n```\n");
+            md.push_str(&format!(
+                "- Prior best equation rollout_rmse on best-run oracle: {:.6} (divergence_time={}).\n",
+                inc.rollout_rmse,
+                format_opt_f64(inc.divergence_time)
+            ));
+            md.push_str(&format!(
+                "- Current best rollout_rmse on best-run oracle: {}.\n",
+                format_opt_f64(best.candidate.metrics.rollout_rmse)
+            ));
+            md.push_str(&format!(
+                "- Verdict on this run: {verdict} (Δ rollout_rmse = {delta_disp:+.6}).\n"
+            ));
+        }
+    }
+
+    md.push_str("\n## Evidence: Per-Iteration Best Candidates\n");
+    md.push_str("Selection rule: pick the lowest `rollout_rmse`, break ties by lower `mse`, then lower `complexity`.\n\n");
+    md.push_str("| run | rollout_integrator | rollout_rmse | mse | complexity | equation |\n");
+    md.push_str("|---|---|---:|---:|---:|---|\n");
+    for iter in &eval_input.iterations {
+        let best_iter = match best_candidate_in_iteration(iter) {
+            Some(v) => v,
+            None => continue,
+        };
+        let sim_int = iter
+            .simulation
+            .as_ref()
+            .map(|s| s.rollout_integrator.as_str())
+            .unwrap_or("n/a");
+        md.push_str(&format!(
+            "| `{}` | `{}` | {} | {:.6e} | {} | `{}` |\n",
+            iter.run_id,
+            sim_int,
+            format_opt_f64(best_iter.metrics.rollout_rmse),
+            best_iter.metrics.mse,
+            best_iter.metrics.complexity,
+            best_iter.equation_text.replace('`', "'")
+        ));
+    }
+
     md.push_str("\n## Where to Look Next\n");
     md.push_str("- `evaluation.tex` (and `evaluation.pdf` if built)\n");
     md.push_str("- `run_###/report.md` (per-iteration summary)\n");
     md.push_str("- `run_###/discovery.json` (solver metadata + candidates)\n");
-    md.push_str("\n---\n\n");
+    md.push_str("- `evaluation_llm.md` (optional narrative; not used for numeric selection)\n");
+    md.push_str("\n");
     md
 }
 

@@ -106,13 +106,12 @@ just quickstart
 ```
 What it does:
 - Creates a timestamped run directory under `results/quickstart_*/`.
-- Writes `config.json`, `ic.json`, `traj.csv` + `traj.json`, and `top_equations.json` into that directory.
-- Runs **10** `factory` iterations with an LLM judge (`--llm-mode auto`) and writes artifacts under `results/quickstart_*/factory/run_###/`.
-- Writes an explainer/evaluation doc to `results/quickstart_*/evaluation.md` plus a reproducible LaTeX evaluation to `results/quickstart_*/evaluation.tex` (and `evaluation.pdf` when `pdflatex` is available).
+- Runs **10** `factory` iterations with an LLM judge (`--llm-mode auto`) and writes evidence under `results/quickstart_*/factory/run_###/`.
+- Writes a single novice-friendly results file to `results/quickstart_*/RESULTS.md` (and `RESULTS.pdf` when `pdflatex` is available).
 
 Tune simulation length (the only “knob” you should need):
 ```bash
-just quickstart steps=400
+just quickstart 400
 ```
 
 Commands:
@@ -166,11 +165,11 @@ cat "$out/factory/evaluation.md"
 
 **Factory Outputs**
 - Run root (`<out_dir>/`):
-  - `evaluation.md`: high-school-friendly evaluation + next steps (LLM-generated when enabled).
-  - `evaluation_llm.md`: raw LLM evaluation output (or local fallback).
+  - `evaluation.md`: single-file summary for novices + evidence (deterministic; numeric metrics are the source of truth).
+  - `evaluation_llm.md`: optional narrative evaluation output (OpenAI or local fallback).
   - `evaluation_input.json`: structured summary of the run (for reproducibility).
   - `evaluation_history.json`: best-vs-prior-best comparison over all previous local attempts under `results/`.
-  - `evaluation_prompt.txt`: the exact prompt used to generate `evaluation.md`.
+  - `evaluation_prompt.txt`: the exact prompt used to generate `evaluation_llm.md` (when LLM mode is enabled).
   - `evaluation.tex`: reproducible LaTeX evaluation (exact equation text + ICs + metrics).
   - `evaluation.pdf`: built when `pdflatex` is available (best-effort).
   - `evaluation_pdf_error.txt`: present only if `pdflatex` is available but fails.
