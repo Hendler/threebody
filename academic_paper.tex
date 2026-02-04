@@ -1,0 +1,278 @@
+\documentclass[11pt]{article}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{A Two-System Framework for Truth-Grade Three-Body Simulation and Sparse Discovery of Interpretable Predictive Dynamics}
+\author{Jonathan Hendler et al.}
+\date{Draft (editorial; explicitly notes open issues)}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We present a two-system framework for studying and predicting three-body dynamics under coupled gravitational and electromagnetic interactions. The first system is a high-fidelity numerical simulator (``oracle'') designed for reproducibility, performance, and explicit error control. It supports Newtonian gravity and a nonrelativistic electromagnetic interaction model including electric and magnetic fields as well as scalar and vector potentials ($\phi$, $A$). The second system is a model-discovery engine that searches for sparse, interpretable equations that predict the oracle's trajectories with minimal complexity. Discovery proceeds via structured feature libraries and sequential thresholded least squares (SINDy/STLS), using simulator-provided accelerations to avoid derivative noise. We provide an implementation-centric description and emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction), conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes. We argue that novelty arises not from claiming a universal closed-form solution, but from automatically discovering compact regime-specific laws with explicit validity domains and verified rollout performance against the oracle.
+\end{abstract}
+
+\section{Introduction}
+The classical three-body problem is a paradigmatic nonlinear dynamical system exhibiting sensitivity to initial conditions and, for most configurations, the absence of closed-form global solutions. Practical prediction therefore relies on numerical integration, while theory offers partial analytic structure (integrals of motion, special solutions, perturbation expansions, invariant manifolds). For modern applications---ranging from celestial mechanics to charged particle dynamics---one often wants both: (i) an accurate simulator suitable as ``ground truth,'' and (ii) interpretable approximations that predict well and illuminate structure.
+
+We propose a two-system approach:
+\begin{itemize}
+\item \textbf{Truth-grade simulation system (``oracle'')} -- a careful, reproducible, numerically controlled engine that produces trajectories and physically meaningful diagnostics.
+\item \textbf{Equation discovery system (``predictor'')} -- a sparse identification pipeline that produces compact, interpretable predictive models that approximate the oracle and are validated by forward rollout.
+\end{itemize}
+
+This paper describes the architecture, numerical methods, and discovery methodology, and it explicitly lists modeling assumptions and unresolved issues.
+
+\section{Simulator (``Oracle'') Design}
+\subsection{State, coordinate choices, and invariants}
+The simulator evolves three bodies indexed by $i \in \{1,2,3\}$ with:
+\begin{itemize}
+\item Mass $m_i$, charge $q_i$.
+\item Position $r_i(t) \in \mathbb{R}^3$.
+\item Velocity $v_i(t) = \dot{r}_i(t) \in \mathbb{R}^3$.
+\end{itemize}
+
+We typically re-center initial conditions to the center-of-mass (COM) frame and remove net linear momentum (barycentric initialization) to reduce drift. Invariants used as diagnostics include:
+\begin{itemize}
+\item Total linear momentum $P = \sum_i m_i v_i$.
+\item Total angular momentum $L = \sum_i r_i \times (m_i v_i)$.
+\end{itemize}
+
+A ``mechanical energy'' proxy (Section 2.4) is logged, with editorial caveats for EM.
+
+\subsection{Interaction model: gravity and nonrelativistic electromagnetism}
+\paragraph{Gravity (Newtonian).}
+We use
+\begin{equation*}
+a_i^{(g)} = \sum_{j \ne i} G m_j \frac{r_j - r_i}{\|r_j - r_i\|^3}.
+\end{equation*}
+
+\paragraph{Electromagnetism (chosen approximation).}
+We include an explicit, nonrelativistic EM model.
+
+Electric field at particle $i$:
+\begin{equation*}
+E_i = \sum_{j \ne i} k_e q_j \frac{r_i - r_j}{\|r_i - r_j\|^3}.
+\end{equation*}
+
+Magnetic field at particle $i$ via a quasi-static Biot--Savart-like term for moving charges:
+\begin{equation*}
+B_i = \sum_{j \ne i} \frac{\mu_0}{4\pi} q_j \frac{v_j \times (r_i - r_j)}{\|r_i - r_j\|^3}.
+\end{equation*}
+
+Lorentz acceleration:
+\begin{equation*}
+a_i^{(em)} = \frac{q_i}{m_i}\left(E_i + v_i \times B_i\right).
+\end{equation*}
+
+Total acceleration:
+\begin{equation*}
+a_i = a_i^{(g)} + a_i^{(em)}.
+\end{equation*}
+
+We also compute potentials.
+
+Scalar potential:
+\begin{equation*}
+\phi_i = \sum_{j \ne i} k_e \frac{q_j}{\|r_i - r_j\|}.
+\end{equation*}
+
+Vector potential:
+\begin{equation*}
+A_i = \sum_{j \ne i} \frac{\mu_0}{4\pi} \frac{q_j v_j}{\|r_i - r_j\|}.
+\end{equation*}
+
+Editorial uncertainty: This EM model omits finite propagation speed (retardation), radiation reaction, and self-field effects. It is best interpreted as a quasi-static approximation; its domain of physical validity is not universal. For ``truth-grade'' claims, the simulator is truth-grade relative to the assumed equations, not necessarily relative to full Maxwell--Lorentz dynamics.
+
+\subsection{Numerical integration}
+We provide two integrators:
+\begin{itemize}
+\item \textbf{Adaptive RK45 (Dormand--Prince)}: used as ``truth mode'' for controlled local truncation error. It adapts time step using embedded error estimates with user-specified tolerances and min/max dt.
+\item \textbf{Leapfrog (Kick--Drift--Kick)}: a fast, stable second-order method often favored for long-horizon gravitational dynamics.
+\end{itemize}
+
+Editorial uncertainty: For purely Hamiltonian gravity, symplectic methods have strong long-term stability guarantees. With the chosen EM terms, the system is not treated with a full Hamiltonian field formulation here; leapfrog remains useful but should not be assumed to preserve the same structure exactly. This is one reason we maintain RK-based truth mode.
+
+\subsection{Diagnostics and conservation interpretation}
+We log $P(t)$ and $L(t)$, plus a ``mechanical energy'' diagnostic:
+\begin{itemize}
+\item Kinetic: $\sum_i \frac{1}{2} m_i \|v_i\|^2$.
+\item Gravitational potential: $\sum_{i<j} -G m_i m_j / \|r_{ij}\|$.
+\item Electric potential: $\sum_{i<j} k_e q_i q_j / \|r_{ij}\|$.
+\end{itemize}
+where $r_{ij} = r_j - r_i$.
+
+Editorial uncertainty: In full electrodynamics, energy conservation includes field energy and radiation; in quasi-static approximations, interpreting ``total energy'' is subtle. We therefore treat energy drift as a numerical health metric, not a strict physical invariant under all EM configurations.
+
+\subsection{Close encounters and stiffness}
+Near-collisions can cause:
+\begin{itemize}
+\item Accelerations scaling as $1/r^2$ (and worse in some derived terms).
+\item Adaptive dt collapse.
+\item Large floating-point conditioning issues.
+\end{itemize}
+
+Current implementation supports optional softening $\epsilon$ in denominators to avoid singularities.
+
+Editorial uncertainty: Softening changes physics. A true ``truth-grade'' approach for close encounters would incorporate regularization (e.g., time transformations, KS/chain regularization) and/or higher precision. This is a clear future-work item.
+
+\subsection{Output contract for downstream discovery}
+The simulator outputs a wide CSV including:
+\begin{itemize}
+\item $r_i, v_i$ for each body.
+\item $a_i$ (total acceleration) for each body.
+\item $E_i, B_i, \phi_i, A_i$.
+\item Diagnostics: energy proxy, $P$, $L$, drifts.
+\end{itemize}
+
+Design rationale: Discovery should use simulator-provided accelerations, not finite differences of noisy trajectories.
+
+\section{Discovery Engine (``Predictor''): Sparse, Interpretable Dynamics}
+\subsection{Objective}
+We seek simple, interpretable functions $\hat{f}_i$ that approximate oracle accelerations:
+\begin{equation*}
+a_i(t) \approx \hat{f}_i\left(\text{features}(r(t), v(t), \ldots)\right),
+\end{equation*}
+with high forward-prediction fidelity over a time horizon, minimal equation complexity, and explicit domain-of-validity.
+
+This is fundamentally different from ``solving the three-body problem in closed form.'' The goal is regime-specific compact predictive structure.
+
+\subsection{Why we fit acceleration directly}
+Classical system identification often estimates $\dot{x}$ from measurements; in chaotic systems this introduces strong noise amplification. We avoid this by training on simulator-provided $a_i(t)$ rather than differentiating $v_i(t)$.
+
+\subsection{Feature libraries ($\Theta$) as structured hypothesis spaces}
+We build vector-valued basis functions (``terms'') from physically meaningful atoms:
+\begin{itemize}
+\item Relative vectors $r_{ij} = r_j - r_i$.
+\item Distances $d_{ij} = \|r_{ij}\|$.
+\item Unit directions $\hat{r}_{ij}$.
+\item Velocities and differences $v_i$, $v_{ij}$.
+\item Cross products capturing magnetic-like structure $v_j \times r_{ij}$.
+\item Triple products capturing Lorentz-like structure $v_i \times (v_j \times r_{ij})$.
+\end{itemize}
+
+We implement libraries of increasing expressivity:
+\begin{itemize}
+\item \textbf{gravity\_min}: $\hat{r}_{ij} / d_{ij}^2$, $\hat{r}_{ij} / d_{ij}^3$.
+\item \textbf{gravity\_plus}: adds simple velocity couplings.
+\item \textbf{em\_basic}: adds magnetic-shaped cross terms and gated scalar modulations.
+\end{itemize}
+
+Editorial note: The library design is where most ``new math'' leverage lives. If the library is too broad, discovery becomes unstable and non-interpretable; too narrow, it cannot capture dynamics. We currently err toward small, interpretable libraries.
+
+\subsection{Sparse regression via STLS (SINDy-style)}
+Let $y$ be a target acceleration component (e.g., $a_{i,x}$) and let $\Theta$ be the feature matrix evaluated over time. We solve
+\begin{equation*}
+y \approx \Theta \xi
+\end{equation*}
+with sparsity enforced by Sequential Thresholded Least Squares:
+\begin{itemize}
+\item Fit ridge-regularized least squares.
+\item Threshold small coefficients below $\lambda$.
+\item Refit on the remaining active set.
+\item Iterate.
+\end{itemize}
+
+We normalize feature columns (RMS scaling) before thresholding to ensure $\lambda$ has consistent meaning across heterogeneous terms.
+
+Editorial uncertainty: STLS can be sensitive to collinearity and scaling; our current approach uses ridge stabilization and normalization, but more robust solvers (e.g., LASSO with cross-validation) may improve stability.
+
+\subsection{What counts as ``predicts well''}
+Pointwise acceleration fit is not sufficient. We evaluate:
+\begin{itemize}
+\item Rollout accuracy: integrate the discovered model forward and compare trajectory error against the oracle.
+\item Stability and failure modes (blow-ups, divergence time).
+\item Generalization to held-out initial conditions within the intended regime.
+\end{itemize}
+
+Editorial uncertainty: In chaotic regimes, long-horizon point prediction is not meaningful; evaluation should shift toward short-horizon deterministic accuracy, ensemble/statistical predictions, and qualitative invariants and manifold structure. We are not yet fully implementing those alternative evaluation regimes.
+
+\section{System Integration and Reproducibility}
+\subsection{CLI-driven workflow}
+The systems are controlled by CLI:
+\begin{itemize}
+\item \textbf{simulate}: produce truth trajectories and diagnostics.
+\item \textbf{discover}: fit sparse equations using a chosen library.
+\item \textbf{predict} (planned): roll out discovered equations and compare to truth.
+\item \textbf{score} (planned): compute quantitative benchmarks.
+\item \textbf{render}: visualization (with robust header-based parsing).
+\end{itemize}
+
+\subsection{Robust I/O design}
+We explicitly fixed a key fragility: rigid CSV schemas break as output evolves. We therefore parse by header name and extract only needed columns for any given task. This enables rapid iteration.
+
+\subsection{Determinism and metadata}
+A ``truth-grade'' oracle requires:
+\begin{itemize}
+\item Fixed integrator and tolerance settings recorded.
+\item Initial condition specifications recorded.
+\item Constants and force toggles recorded.
+\end{itemize}
+
+Current implementation outputs CSV; we recommend adding a JSON ``sidecar'' containing run parameters to support strict reproducibility.
+
+\section{Results (What we expect, what we can claim, and what we cannot)}
+\subsection{Expected outcomes}
+For gravity-only or weak-EM regimes:
+\begin{itemize}
+\item \textbf{gravity\_min} should rediscover near-inverse-square directional structure.
+\item \textbf{em\_basic} may recover Lorentz-like cross terms if EM effects are present and sufficiently sampled.
+\item Sparse models can achieve strong short-horizon rollout fidelity with few terms.
+\end{itemize}
+
+\subsection{What we can claim}
+\begin{itemize}
+\item The simulator provides consistent numerical solutions to the implemented equations with user-controlled accuracy (RK45 mode).
+\item The discovery engine can identify compact, interpretable approximations within structured libraries and validate them by rollout.
+\end{itemize}
+
+\subsection{What we cannot honestly claim (yet)}
+\begin{itemize}
+\item That the simulator is ``physically exact'' for EM in all regimes (it is quasi-static).
+\item That energy conservation is strict in combined EM dynamics as implemented (field energy not modeled).
+\item That close-encounter accuracy is truth-grade without regularization/high precision.
+\item That a single global simple formula predicts chaotic three-body dynamics long-horizon.
+\end{itemize}
+
+\section{Limitations and Open Questions (Editorial)}
+This section is intentionally frank.
+
+\subsection*{Electromagnetic modeling fidelity}
+The quasi-static magnetic approximation may be adequate for some regimes but fails when retardation or radiation are significant. If the objective is ``physics truth,'' the EM model must be upgraded (retarded potentials or field solver), at significant computational cost.
+
+\subsection*{Integrator structure under EM}
+Leapfrog is attractive for gravity; under EM it may not preserve the right structure. We currently treat leapfrog as a fast option, not as a guaranteed long-term invariant-preserving method under full coupled dynamics.
+
+\subsection*{Close encounters and stiffness}
+Softening is not a principled solution. We need a regularization strategy (Sundman transform, KS/chain regularization) and possibly adaptive precision.
+
+\subsection*{Discovery stability and identifiability}
+Sparse regression can select misleading terms when features are correlated or data is not sufficiently rich. Better experimental design (diverse initial conditions, active learning) and more robust optimization (e.g., constrained solvers) are likely necessary.
+
+\subsection*{Meaning of ``novel math''}
+We interpret ``novel'' as compact approximations that outperform naive baselines within a regime and are expressed in human-interpretable terms. We do not claim a universal analytic solution.
+
+\section{Future Work}
+\begin{itemize}
+\item Add close-encounter regularization and/or multi-precision truth mode.
+\item Implement predict and score commands with standardized benchmarks (divergence time, RMS error curves).
+\item Add an \textbf{em\_fields} library that learns directly from simulator fields $E, B$ to obtain even simpler discovered laws.
+\item Implement regime partitioning (``atlas of models''): train multiple sparse models with a lightweight regime classifier.
+\item Extend discovery to probabilistic forecasts for chaotic regimes.
+\end{itemize}
+
+\section{Conclusion}
+We described a pragmatic two-system approach to three-body dynamics: a high-fidelity simulator as oracle, and a sparse discovery engine that produces interpretable, compact predictive equations. The central technical strategy is to train on simulator-provided accelerations and to constrain the hypothesis space through physically structured feature libraries, thereby producing ``simple math'' that predicts well within explicit regimes. We also highlighted the primary uncertainties: electromagnetic approximation fidelity, conservation-law interpretation, close-encounter stiffness, and the limits of long-horizon prediction in chaotic systems. This framework is designed to be extensible, reproducible, and honest about what is known versus assumed.
+
+\appendix
+\section{Implementation Notes (brief)}
+\begin{itemize}
+\item CSV parsing must be header-based to remain stable as columns evolve.
+\item Discovery uses $\Theta$ with vector terms expanded into x/y/z columns and normalized by RMS scale.
+\item STLS uses ridge stabilization due to feature collinearity.
+\end{itemize}
+
+\end{document}
