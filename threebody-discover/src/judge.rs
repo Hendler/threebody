@@ -159,7 +159,9 @@ pub struct JudgeScore {
     pub id: usize,
     pub total: f64,
     pub components: ScoreComponents,
+    #[serde(default)]
     pub rationale: String,
+    #[serde(default)]
     pub flags: Vec<String>,
 }
 
@@ -176,7 +178,9 @@ pub struct JudgeRecommendations {
     pub next_ridge_lambda: Option<f64>,
     #[serde(default, deserialize_with = "deserialize_opt_f64_or_auto")]
     pub next_lasso_alpha: Option<f64>,
+    #[serde(default)]
     pub next_search_directions: Vec<String>,
+    #[serde(default)]
     pub notes: String,
 }
 
@@ -217,6 +221,7 @@ pub struct JudgeResponse {
     pub ranking: Vec<usize>,
     pub scores: Vec<JudgeScore>,
     pub recommendations: JudgeRecommendations,
+    #[serde(default)]
     pub summary: String,
 }
 
@@ -692,6 +697,46 @@ mod tests {
         assert!(resp.recommendations.next_stls_threshold.is_none());
         assert_eq!(resp.recommendations.next_ridge_lambda, Some(1e-8));
         assert!(resp.recommendations.next_lasso_alpha.is_none());
+    }
+
+    #[test]
+    fn judge_response_deserializes_missing_flags_and_optional_fields() {
+        let json = r#"
+{
+  "version": "v1",
+  "ranking": [0],
+  "scores": [
+    {
+      "id": 0,
+      "total": 1.0,
+      "components": {
+        "fidelity": 1.0,
+        "parsimony": 1.0,
+        "physical_plausibility": 1.0,
+        "regime_consistency": 1.0,
+        "stability_risk": 1.0
+      }
+    }
+  ],
+  "recommendations": {
+    "next_initial_conditions": null,
+    "next_rollout_integrator": "leapfrog",
+    "next_ga_heuristic": "mse",
+    "next_discovery_solver": "stls",
+    "next_normalize": true,
+    "next_stls_threshold": null,
+    "next_ridge_lambda": null,
+    "next_lasso_alpha": null
+  }
+}
+"#;
+        let resp: JudgeResponse = serde_json::from_str(json).expect("should deserialize");
+        assert_eq!(resp.scores.len(), 1);
+        assert!(resp.scores[0].flags.is_empty());
+        assert!(resp.scores[0].rationale.is_empty());
+        assert!(resp.recommendations.next_search_directions.is_empty());
+        assert!(resp.recommendations.notes.is_empty());
+        assert!(resp.summary.is_empty());
     }
 
     #[test]
