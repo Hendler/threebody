@@ -274,7 +274,9 @@ mod tests {
         let pos = [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::zero()];
         let vel = [Vec3::zero(); 3];
         let system = System::new(bodies, State::new(pos, vel));
-        let cfg = Config::default();
+        let mut cfg = Config::default();
+        cfg.integrator.kind = crate::config::IntegratorKind::Leapfrog;
+        cfg.integrator.adaptive = false;
         let options = SimOptions { steps: 3, dt: 0.02 };
         let integrator = Leapfrog;
 

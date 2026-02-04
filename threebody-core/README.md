@@ -27,4 +27,4 @@ println!("steps={}", result.steps.len());
 - `forces`: gravity and EM models.
 - `integrators`: leapfrog, RK45, Boris.
 - `sim`: simulation driver, adaptive RK45 truth mode, and encounter policy.
-- `output`: CSV writer (includes per-step `dt`) and sidecar metadata.
+- `output`: CSV writer (includes per-step `dt`) and JSON sidecar with config, header hash, warnings, last regime, and dt stats.

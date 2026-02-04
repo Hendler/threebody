@@ -217,7 +217,7 @@ A ``truth-grade'' oracle requires:
 \item Constants and force toggles recorded.
 \end{itemize}
 
-Current implementation outputs CSV; we recommend adding a JSON ``sidecar'' containing run parameters to support strict reproducibility.
+Current implementation outputs CSV and a JSON ``sidecar'' containing config, header hash, warnings, last-regime diagnostics, and dt statistics (accepted/rejected/min/max/avg) to support strict reproducibility.
 
 \section{Results (What we expect, what we can claim, and what we cannot)}
 \subsection{Expected outcomes}
