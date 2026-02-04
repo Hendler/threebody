@@ -3,11 +3,17 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 example-config:
   cargo run -p threebody-cli -- example-config --out config.json
 
+example-ic:
+  cargo run -p threebody-cli -- example-ic --preset three-body --out ic.json
+
 simulate:
   cargo run -p threebody-cli -- simulate --config config.json --output traj.csv --steps 100 --dt 0.01
 
+simulate-ic:
+  cargo run -p threebody-cli -- simulate --config config.json --ic ic.json --output traj.csv --steps 100 --dt 0.01
+
 simulate-em:
-  cargo run -p threebody-cli -- simulate --config config.json --output traj_em.csv --steps 100 --dt 0.01
+  cargo run -p threebody-cli -- simulate --config config.json --output traj_em.csv --steps 100 --dt 0.01 --em
 
 discover:
   cargo run -p threebody-cli -- discover --runs 50 --population 20 --out top_equations.json

@@ -40,6 +40,15 @@ enum Commands {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Emit an example initial-conditions JSON.
+    ExampleIc {
+        /// Preset initial conditions to use.
+        #[arg(long, default_value = "three-body")]
+        preset: String,
+        /// Output path (stdout if omitted).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Run a simulation.
     Simulate {
         /// Config JSON path.
@@ -60,6 +69,9 @@ enum Commands {
         /// Preset initial conditions.
         #[arg(long, default_value = "two-body")]
         preset: String,
+        /// Initial conditions JSON path (overrides --preset).
+        #[arg(long)]
+        ic: Option<PathBuf>,
         /// Override integrator.
         #[arg(long)]
         integrator: Option<String>,
@@ -96,6 +108,9 @@ enum Commands {
         mode: String,
         #[arg(long, default_value = "two-body")]
         preset: String,
+        /// Initial conditions JSON path (overrides --preset).
+        #[arg(long)]
+        ic: Option<PathBuf>,
         #[arg(long)]
         integrator: Option<String>,
         /// Enable EM (overrides config default).
@@ -149,6 +164,7 @@ enum Commands {
         rollout_integrator: String,
     },
     /// Run the LLM-assisted factory loop (ICs -> sim -> discovery -> judge).
+    #[command(alias = "experiment")]
     Factory {
         /// Output directory for all artifacts.
         #[arg(long, default_value = "factory_out")]
@@ -219,6 +235,15 @@ fn main() -> anyhow::Result<()> {
                 println!("{json}");
             }
         }
+        Commands::ExampleIc { preset, out } => {
+            let ic = initial_conditions_from_preset(&preset)?;
+            let json = serde_json::to_string_pretty(&ic)?;
+            if let Some(path) = out {
+                fs::write(path, json)?;
+            } else {
+                println!("{json}");
+            }
+        }
         Commands::Simulate {
             config,
             output,
@@ -226,6 +251,7 @@ fn main() -> anyhow::Result<()> {
             dt,
             mode,
             preset,
+            ic,
             integrator,
             em,
             no_em,
@@ -241,6 +267,7 @@ fn main() -> anyhow::Result<()> {
                 dt,
                 mode,
                 preset,
+                ic,
                 integrator,
                 em,
                 no_em,
@@ -257,6 +284,7 @@ fn main() -> anyhow::Result<()> {
             dt,
             mode,
             preset,
+            ic,
             integrator,
             em,
             no_em,
@@ -272,6 +300,7 @@ fn main() -> anyhow::Result<()> {
                 dt,
                 mode,
                 preset,
+                ic,
                 integrator,
                 em,
                 no_em,
@@ -360,6 +389,7 @@ fn run_simulation(
     dt: f64,
     mode: String,
     preset: String,
+    ic_path: Option<PathBuf>,
     integrator_override: Option<String>,
     em: bool,
     no_em: bool,
@@ -372,7 +402,13 @@ fn run_simulation(
         anyhow::bail!("unsupported format: {format}");
     }
     let cfg = build_config(config_path, &mode, integrator_override, em, no_em, no_gravity)?;
-    let system = preset_system(&preset)?;
+    let system = if let Some(path) = ic_path {
+        let json = fs::read_to_string(&path)?;
+        let spec: InitialConditionSpec = serde_json::from_str(&json)?;
+        system_from_ic(&spec, &default_ic_bounds())?
+    } else {
+        preset_system(&preset)?
+    };
     let options = SimOptions { steps, dt };
     let result = simulate_with_cfg(system, &cfg, options);
 
@@ -472,6 +508,23 @@ fn preset_system(name: &str) -> anyhow::Result<System> {
             let pos = [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::zero()];
             let v = (0.5_f64).sqrt();
             let vel = [Vec3::new(0.0, v, 0.0), Vec3::new(0.0, -v, 0.0), Vec3::zero()];
+            Ok(System::new(bodies, State::new(pos, vel)))
+        }
+        "three-body" => {
+            // Lagrange equilateral solution (normalized): three equal masses at an equilateral triangle,
+            // rotating about the center of mass. Assumes G=1, m=1, side length L=1 -> speed v = sqrt(G*m/L) = 1.
+            let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(1.0, 0.0)];
+            let r = 1.0 / 3.0_f64.sqrt(); // circumradius for side length 1
+            let pos = [
+                Vec3::new(r, 0.0, 0.0),
+                Vec3::new(-0.5 * r, 0.5, 0.0),
+                Vec3::new(-0.5 * r, -0.5, 0.0),
+            ];
+            let vel = [
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(-0.866_025_403_784_438_6, -0.5, 0.0),
+                Vec3::new(0.866_025_403_784_438_6, -0.5, 0.0),
+            ];
             Ok(System::new(bodies, State::new(pos, vel)))
         }
         "static" => {
@@ -744,36 +797,6 @@ fn load_steps_from_csv(input: &PathBuf, bodies: [Body; 3], cfg: &Config) -> anyh
         anyhow::bail!("no data rows in CSV: {}", input.display());
     }
     Ok(steps)
-}
-
-fn build_judge_input_from_entries(
-    dataset: &Dataset,
-    library: &FeatureLibrary,
-    entries: &[threebody_discover::EquationScore],
-    simulation: Option<SimulationSummary>,
-    regime: &str,
-    target_description: &str,
-) -> JudgeInput {
-    let candidates = entries
-        .iter()
-        .enumerate()
-        .map(|(id, e)| CandidateSummary {
-            id,
-            equation: e.equation.clone(),
-            equation_text: e.equation.format(),
-            metrics: CandidateMetrics {
-                mse: e.score,
-                complexity: e.equation.complexity(),
-                rollout_rmse: None,
-                divergence_time: None,
-                stability_flags: stability_flags_for(&e.equation, regime),
-            },
-            notes: vec![],
-        })
-        .collect::<Vec<_>>();
-    let dataset_summary =
-        build_dataset_summary(&dataset.feature_names, library, dataset.samples.len(), target_description);
-    build_judge_input_from_candidates(dataset_summary, candidates, simulation, regime)
 }
 
 fn build_judge_input_from_candidates(
@@ -1671,7 +1694,7 @@ fn initial_conditions_from_preset(preset: &str) -> anyhow::Result<InitialConditi
                 vel: [v.x, v.y, v.z],
             })
             .collect(),
-        barycentric: false,
+        barycentric: true,
         notes: format!("preset:{preset}"),
     })
 }
@@ -1679,7 +1702,14 @@ fn initial_conditions_from_preset(preset: &str) -> anyhow::Result<InitialConditi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use threebody_discover::Equation;
+
+    fn unique_temp_path(name: &str, ext: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("threebody_cli_test_{name}_{}_{}.{}", std::process::id(), n, ext))
+    }
 
     #[test]
     fn vector_dataset_includes_all_bodies() {
@@ -1689,6 +1719,18 @@ mod tests {
         let library = FeatureLibrary::default_physics();
         let vec_data = build_vector_dataset(&result, &cfg, &library.features, None);
         let expected = result.steps.len() * 3;
+        assert_eq!(vec_data.samples.len(), expected);
+        assert_eq!(vec_data.targets.len(), expected);
+    }
+
+    #[test]
+    fn vector_dataset_body_filter_reduces_samples() {
+        let cfg = Config::default();
+        let system = preset_system("two-body").unwrap();
+        let result = simulate_with_cfg(system, &cfg, SimOptions { steps: 3, dt: 0.01 });
+        let library = FeatureLibrary::default_physics();
+        let vec_data = build_vector_dataset(&result, &cfg, &library.features, Some(1));
+        let expected = result.steps.len();
         assert_eq!(vec_data.samples.len(), expected);
         assert_eq!(vec_data.targets.len(), expected);
     }
@@ -1711,5 +1753,175 @@ mod tests {
             rollout_metrics(&model, &vec_data.feature_names, &result, &cfg, RolloutIntegrator::Leapfrog);
         assert!(rmse_e.is_finite());
         assert!(rmse_l.is_finite());
+    }
+
+    #[test]
+    fn gravity_features_match_simple_analytic_case() {
+        let mut cfg = Config::default();
+        cfg.enable_gravity = true;
+        cfg.enable_em = false;
+        cfg.softening = 0.0;
+
+        let bodies = [Body::new(1.0, 0.0), Body::new(2.0, 0.0), Body::new(3.0, 0.0)];
+        let pos = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 2.0, 0.0),
+        ];
+        let vel = [Vec3::zero(); 3];
+        let system = System::new(bodies, State::new(pos, vel));
+
+        let feature_names = FeatureLibrary::default_physics().features;
+        let f0 = compute_feature_vector(&system, 0, &cfg, &feature_names);
+        let idx = |name: &str| feature_names.iter().position(|n| n == name).unwrap();
+
+        // grav = Σ m_j (r_j - r_i) / |r|^3 (no G)
+        // body0: from body1: 2*(1,0,0)/1^3 -> (2,0,0)
+        //        from body2: 3*(0,2,0)/2^3 -> 3*(0,2,0)/8 -> (0,0.75,0)
+        assert!((f0[idx("grav_x")] - 2.0).abs() < 1e-12);
+        assert!((f0[idx("grav_y")] - 0.75).abs() < 1e-12);
+        assert!((f0[idx("grav_z")] - 0.0).abs() < 1e-12);
+
+        // EM disabled => elec/mag features are zero.
+        for name in ["elec_x", "elec_y", "elec_z", "mag_x", "mag_y", "mag_z"] {
+            assert!((f0[idx(name)] - 0.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn electric_features_match_simple_analytic_case() {
+        let mut cfg = Config::default();
+        cfg.enable_gravity = false;
+        cfg.enable_em = true;
+        cfg.softening = 0.0;
+
+        let bodies = [Body::new(1.0, 1.0), Body::new(1.0, 2.0), Body::new(1.0, 0.0)];
+        let pos = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 2.0, 0.0),
+        ];
+        let vel = [Vec3::zero(); 3];
+        let system = System::new(bodies, State::new(pos, vel));
+
+        let feature_names = FeatureLibrary::default_physics().features;
+        let idx = |name: &str| feature_names.iter().position(|n| n == name).unwrap();
+
+        // elec = (q_i/m_i) Σ q_j (r_i - r_j) / |r|^3 (no k_e)
+        let f0 = compute_feature_vector(&system, 0, &cfg, &feature_names);
+        // body0: q0/m0=1.  only body1 contributes: q1*(r0-r1) = 2*(-1,0,0) -> (-2,0,0)
+        assert!((f0[idx("elec_x")] - (-2.0)).abs() < 1e-12);
+        assert!((f0[idx("elec_y")] - 0.0).abs() < 1e-12);
+
+        let f1 = compute_feature_vector(&system, 1, &cfg, &feature_names);
+        // body1: q1/m1=2. body0 contributes: q0*(r1-r0) = 1*(1,0,0) -> (1,0,0) then *2 -> (2,0,0)
+        assert!((f1[idx("elec_x")] - 2.0).abs() < 1e-12);
+
+        // With zero velocities, magnetic contribution must be zero even when EM is enabled.
+        for name in ["mag_x", "mag_y", "mag_z"] {
+            assert!((f0[idx(name)] - 0.0).abs() < 1e-12);
+            assert!((f1[idx(name)] - 0.0).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn magnetic_features_match_simple_analytic_case() {
+        let mut cfg = Config::default();
+        cfg.enable_gravity = false;
+        cfg.enable_em = true;
+        cfg.softening = 0.0;
+
+        // body0 at origin, body1 at x=1. Choose velocities so that v1 × (r0-r1) points +z.
+        // r = r0 - r1 = (-1,0,0), v1=(0,1,0) => v1×r=(0,0,1).
+        // B_basis_z = (1/4π) * q1 * 1/|r|^3 = q1/(4π).
+        // mag = (q0/m0) * v0 × B_basis, with v0=(1,0,0) and B_basis=(0,0,q1/(4π))
+        // => mag_y = -(q0/m0) * q1/(4π).
+        let bodies = [Body::new(1.0, 1.0), Body::new(1.0, 2.0), Body::new(1.0, 0.0)];
+        let pos = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 10.0, 0.0),
+        ];
+        let vel = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::zero(),
+        ];
+        let system = System::new(bodies, State::new(pos, vel));
+
+        let feature_names = FeatureLibrary::default_physics().features;
+        let idx = |name: &str| feature_names.iter().position(|n| n == name).unwrap();
+
+        let f0 = compute_feature_vector(&system, 0, &cfg, &feature_names);
+        let expected_mag_y = -(1.0_f64) * (2.0 / (4.0 * std::f64::consts::PI));
+        assert!((f0[idx("mag_x")] - 0.0).abs() < 1e-12);
+        assert!((f0[idx("mag_y")] - expected_mag_y).abs() < 1e-12);
+        assert!((f0[idx("mag_z")] - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn load_steps_from_csv_parses_minimal_file() {
+        let mut cfg = Config::default();
+        cfg.enable_gravity = true;
+        cfg.enable_em = false;
+        cfg.softening = 0.0;
+
+        let bodies = [Body::new(1.0, 0.0), Body::new(2.0, 0.0), Body::new(3.0, 0.0)];
+        let csv_path = unique_temp_path("load_steps", "csv");
+
+        let header = [
+            "t",
+            "dt",
+            "r1_x",
+            "r1_y",
+            "r1_z",
+            "r2_x",
+            "r2_y",
+            "r2_z",
+            "r3_x",
+            "r3_y",
+            "r3_z",
+            "v1_x",
+            "v1_y",
+            "v1_z",
+            "v2_x",
+            "v2_y",
+            "v2_z",
+            "v3_x",
+            "v3_y",
+            "v3_z",
+        ]
+        .join(",");
+        let row = [
+            "0.0",
+            "0.1",
+            "0.0",
+            "0.0",
+            "0.0",
+            "1.0",
+            "0.0",
+            "0.0",
+            "0.0",
+            "2.0",
+            "0.0",
+            "0.0",
+            "0.0",
+            "0.0",
+            "0.0",
+            "0.0",
+            "0.0",
+            "0.0",
+            "0.0",
+            "0.0",
+        ]
+        .join(",");
+        fs::write(&csv_path, format!("{header}\n{row}\n")).unwrap();
+
+        let steps = load_steps_from_csv(&csv_path, bodies, &cfg).unwrap();
+        assert_eq!(steps.len(), 1);
+        assert!((steps[0].t - 0.0).abs() < 1e-12);
+        assert!((steps[0].dt - 0.1).abs() < 1e-12);
+        assert!(steps[0].system.state.pos[1].approx_eq(Vec3::new(1.0, 0.0, 0.0), 1e-12, 1e-12));
+        assert!(steps[0].diagnostics.energy_proxy.is_finite());
     }
 }

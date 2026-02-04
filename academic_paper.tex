@@ -12,7 +12,7 @@
 \maketitle
 
 \begin{abstract}
-We present a two-system framework for studying and predicting three-body dynamics under coupled gravitational and electromagnetic interactions. The first system is a high-fidelity numerical simulator (``oracle'') designed for reproducibility, performance, and explicit error control. It supports Newtonian gravity and a nonrelativistic electromagnetic interaction model including electric and magnetic fields as well as scalar and vector potentials ($\phi$, $A$). The second system is a model-discovery engine that searches for sparse, interpretable equations that predict the oracle's trajectories with minimal complexity. Discovery proceeds via structured feature libraries and sequential thresholded least squares (SINDy/STLS)\cite{Brunton2016}, using simulator-provided accelerations to avoid derivative noise. We provide an implementation-centric description and emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. We argue that novelty arises not from claiming a universal closed-form solution, but from automatically discovering compact regime-specific laws with explicit validity domains and verified rollout performance against the oracle.
+We present a two-system framework for studying and predicting three-body dynamics under coupled gravitational and electromagnetic interactions. The first system is a high-fidelity numerical simulator (``oracle'') designed for reproducibility, performance, and explicit error control. It supports Newtonian gravity and a nonrelativistic electromagnetic interaction model including electric and magnetic fields as well as scalar and vector potentials ($\phi$, $A$). The second system is a model-discovery engine that searches for sparse, interpretable equations that predict the oracle's trajectories with minimal complexity. In the current implementation, discovery proceeds via structured feature libraries and a lightweight genetic search over sparse equations, using simulator-provided accelerations to avoid derivative noise; related work includes sparse regression approaches such as SINDy/STLS\cite{Brunton2016}. We provide an implementation-centric description and emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. We argue that novelty arises not from claiming a universal closed-form solution, but from automatically discovering compact regime-specific laws with explicit validity domains and verified rollout performance against the oracle.
 \end{abstract}
 
 \section{Introduction}
@@ -34,6 +34,7 @@ The simulator evolves three bodies indexed by $i \in \{1,2,3\}$ with:
 \item Position $r_i(t) \in \mathbb{R}^3$.
 \item Velocity $v_i(t) = \dot{r}_i(t) \in \mathbb{R}^3$.
 \end{itemize}
+The current Rust implementation is fixed to three bodies ($N=3$) across simulation, output schema, and discovery; general $N$-body support is future work.
 
 We typically re-center initial conditions to the center-of-mass (COM) frame and remove net linear momentum (barycentric initialization) to reduce drift. Invariants used as diagnostics include:
 \begin{itemize}
@@ -161,29 +162,32 @@ We build vector-valued basis functions (``terms'') from physically meaningful at
 
 We implement libraries of increasing expressivity:
 \begin{itemize}
-\item \textbf{gravity\_min}: $\hat{r}_{ij} / d_{ij}^2$, $\hat{r}_{ij} / d_{ij}^3$.
-\item \textbf{gravity\_plus}: adds simple velocity couplings.
-\item \textbf{em\_basic}: adds magnetic-shaped cross terms and gated scalar modulations.
+\item \textbf{structured\_basic} (current implementation): direction-preserving, component-wise bases that mirror the analytic force contributions \emph{without} physical constants:
+\begin{itemize}
+\item Gravity basis: $g_i^\ast = \sum_{j \ne i} m_j (r_j - r_i) / \|r_j-r_i\|^3$.
+\item Electric basis: $e_i^\ast = (q_i/m_i)\sum_{j \ne i} q_j (r_i - r_j) / \|r_i-r_j\|^3$.
+\item Magnetic basis: $b_i^\ast = (q_i/m_i)\, v_i \times B_i^\ast$, where $B_i^\ast = (1/4\pi)\sum_{j \ne i} q_j (v_j \times (r_i-r_j))/\|r_i-r_j\|^3$.
+\end{itemize}
+Under our quasi-static model, this yields $a_i \approx G\,g_i^\ast + k_e\,e_i^\ast + \mu_0\,b_i^\ast$ (with softening applied consistently).
+\item \textbf{structured\_extended} (planned): adds additional atoms (e.g., $r_{ij}/d_{ij}^2$, velocity differences, gated cross terms) to search for simpler regime-specific approximations beyond the baseline.
 \end{itemize}
 
 Editorial note: The library design is where most ``new math'' leverage lives. If the library is too broad, discovery becomes unstable and non-interpretable; too narrow, it cannot capture dynamics. We currently err toward small, interpretable libraries.
 
-\subsection{Sparse regression via STLS (SINDy-style)}
-Let $y$ be a target acceleration component (e.g., $a_{i,x}$) and let $\Theta$ be the feature matrix evaluated over time. We solve
+\subsection{Sparse discovery via genetic search (current implementation)}
+Let $y$ be a target acceleration component (e.g., $a_{i,x}$) and let $\Theta$ be the feature matrix evaluated over time (columns are library terms evaluated at each time step). We restrict to models linear in features,
 \begin{equation*}
-y \approx \Theta \xi
+y \approx \Theta \xi,
 \end{equation*}
-with sparsity enforced by Sequential Thresholded Least Squares:
+but rather than estimating $\xi$ via a regression solver, the current Rust implementation performs a lightweight genetic search over \emph{sparse} coefficient vectors:
 \begin{itemize}
-\item Fit ridge-regularized least squares.
-\item Threshold small coefficients below $\lambda$.
-\item Refit on the remaining active set.
-\item Iterate.
+\item Each candidate ``equation'' is a short list of $(\text{feature}, \text{coefficient})$ terms with a maximum term budget $K$.
+\item Fitness is mean squared error (MSE) on $y$, optionally multiplied by a parsimony penalty increasing with the number of terms.
+\item We iterate: score a population, keep the best survivors, then mutate (perturb coefficients; add/remove terms) to repopulate.
+\item We retain the top-3 equations per component and then combine component-wise equations into vector candidates that are evaluated by forward rollout (next subsection).
 \end{itemize}
 
-We normalize feature columns (RMS scaling) before thresholding to ensure $\lambda$ has consistent meaning across heterogeneous terms.
-
-Editorial uncertainty: STLS can be sensitive to collinearity and scaling; our current approach uses ridge stabilization and normalization, but more robust solvers (e.g., LASSO with cross-validation)\cite{Tibshirani1996} may improve stability.
+Related work: A natural alternative is sparse regression (SINDy/STLS)\cite{Brunton2016} or LASSO-style solvers\cite{Tibshirani1996} to estimate $\xi$ for a fixed library. These are not yet implemented in the current Rust codebase; the data contract (header-based CSV plus sidecar metadata) is designed to support them.
 
 \subsection{What counts as ``predicts well''}
 Pointwise acceleration fit is not sufficient. We evaluate:
@@ -225,7 +229,7 @@ A ``truth-grade'' oracle requires:
 \item Constants and force toggles recorded.
 \end{itemize}
 
-Current implementation outputs CSV and a JSON ``sidecar'' containing config, header hash, warnings, last-regime diagnostics, and dt statistics (accepted/rejected/min/max/avg) to support strict reproducibility.
+Current implementation outputs CSV and a JSON ``sidecar'' containing config, header hash, warnings, last-regime diagnostics, dt statistics (accepted/rejected/min/max/avg), and the initial state (masses/charges/positions/velocities) to support strict reproducibility.
 
 \section{Results (What we expect, what we can claim, and what we cannot)}
 \subsection{Expected outcomes}
@@ -341,8 +345,8 @@ S. Mikkola and S. J. Aarseth, ``An implementation of N-body chain regularization
 \section{Implementation Notes (brief)}
 \begin{itemize}
 \item CSV parsing must be header-based to remain stable as columns evolve.
-\item Discovery uses $\Theta$ with vector terms expanded into x/y/z columns and normalized by RMS scale.
-\item STLS uses ridge stabilization due to feature collinearity.
+\item Discovery expands vector bases into x/y/z component features and searches for sparse linear combinations via a GA (with an optional parsimony penalty).
+\item Sparse-regression solvers (e.g., STLS/LASSO) are promising alternatives for estimating coefficients on a fixed library, but are not yet implemented in the current Rust codebase.
 \end{itemize}
 
 \end{document}

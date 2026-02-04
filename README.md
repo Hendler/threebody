@@ -21,6 +21,7 @@ The implementation plan is explicitly TDD-first and emphasizes reproducibility, 
 - Be explicit about modeling limits and avoid overclaiming.
 
 **Assumptions and Modeling Limits**
+- Current implementation is fixed to three bodies (N=3) across the simulator, outputs, and discovery pipeline. General N-body support is future work.
 - Units are SI by default; `G`, `k_e`, and `mu_0` are configurable.
 - EM is quasi-static and nonrelativistic: no retardation, no radiation reaction, no self-fields.
 - Energy and momentum conservation are not guaranteed once magnetic terms are enabled; energy is treated as a mechanical proxy.
@@ -54,24 +55,24 @@ Potentials:
   A_i   = sum_{j != i} (mu_0 / 4pi) * q_j * v_j / |r_i - r_j|
 ```
 
-Numerical integration (planned):
+Numerical integration:
 - Adaptive RK45 (Dormand-Prince) for truth-mode error control.
 - Leapfrog (kick-drift-kick) for fast, long-horizon gravity runs.
-- An EM-suitable integrator (Boris or implicit midpoint) is required when EM is enabled.
+- EM-suitable integrators are available (Boris and implicit midpoint) for experiments where EM is enabled.
 
 Diagnostics:
 - Linear momentum, angular momentum.
-- Mechanical energy proxy (kinetic + gravitational + electric potential).
+- Mechanical energy proxy (kinetic + gravitational potential when gravity is enabled + electric potential when EM is enabled). Magnetic field energy is not modeled.
 
 Outputs:
 - Wide CSV with positions, velocities, accelerations, fields, potentials, and diagnostics.
 - Robust header-based parsing to avoid schema brittleness.
-- JSON sidecar with config, header hash, warnings, last regime, and dt stats (accepted/rejected/min/max/avg).
+- JSON sidecar with config, header hash, warnings, last regime, dt stats (accepted/rejected/min/max/avg), and the initial state (masses/charges/pos/vel).
 
 **Discovery Engine (Predictor) Overview**
 - Learns sparse, interpretable models of acceleration from simulator output.
 - Uses structured feature libraries (relative positions, distances, cross products, etc.).
-- Fits via sequential thresholded least squares (SINDy / STLS).
+- Searches for sparse, interpretable equations via a simple genetic algorithm (GA) over the feature library (with optional parsimony penalty). Related work includes sparse regression approaches such as SINDy/STLS, but the current Rust implementation is GA-based.
 - Evaluates models by rollout accuracy (position RMSE), divergence time, stability, and generalization within a regime.
 
 **Accuracy / Truth Mode**
@@ -95,21 +96,30 @@ The intended flow is:
 2. Run a simulation from that config and produce a CSV.
 3. Inspect or visualize outputs, and then feed them into discovery.
 
-Expected commands (exact flags will be finalized during implementation):
+Commands:
 ```bash
 # Generate a starter config
 cargo run -p threebody-cli -- example-config --out config.json
 
+# Generate example initial conditions (recommended for non-technical experiments)
+cargo run -p threebody-cli -- example-ic --preset three-body --out ic.json
+
 # Run a simulation and emit CSV output
-cargo run -p threebody-cli -- simulate --config config.json --output run.csv
+cargo run -p threebody-cli -- simulate --config config.json --ic ic.json --output traj.csv
 
 # Run a truth-mode simulation (adaptive RK45)
-cargo run -p threebody-cli -- simulate --config config.json --output run_truth.csv --mode truth
+cargo run -p threebody-cli -- simulate --config config.json --ic ic.json --output traj_truth.csv --mode truth
+
+# Enable EM explicitly (EM is off by default)
+cargo run -p threebody-cli -- simulate --config config.json --ic ic.json --output traj_em.csv --em
 
 # Run discovery (writes top 3 equations)
 cargo run -p threebody-cli -- discover --runs 50 --population 20 --out top_equations.json
 
-# Run one factory iteration with a mock LLM (no API key needed)
+# If your simulation output isn't named traj.csv/traj.json, pass explicit paths:
+# cargo run -p threebody-cli -- discover --input run.csv --sidecar run.json --out top_equations.json
+
+# Run one factory/experiment iteration with a mock LLM (no API key needed)
 cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode mock --rollout-integrator euler --fitness mse
 
 # Run one factory iteration with OpenAI (requires OPENAI_API_KEY)
@@ -150,7 +160,7 @@ cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --m
 22. Add deterministic fixtures in `threebody-core/tests/fixtures/`. Tests: output matches within tolerance, no NaNs.
 23. Add benchmarks in `threebody-core/benches/` using `criterion`. Tests: benches compile.
 24. Add docs in `threebody-core/README.md` and `threebody-cli/README.md`. Tests: `cargo test --doc`.
-25. Optional discovery crate `threebody-discover` with feature library, STLS solver, and rollout evaluator. Tests: recover synthetic coefficients, rollout checks.
+25. Optional discovery crate `threebody-discover` with feature library, GA search, and rollout evaluator. Tests: recover synthetic coefficients in a controlled synthetic case; rollout checks.
 
 **Mitigation Insertions (placed after referenced steps)**
 1. After step 3: add a model validity matrix in `threebody-core/src/physics.rs` listing supported regimes and non-claims. Tests: doc test asserts regimes and non-claims are present.
