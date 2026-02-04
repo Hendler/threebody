@@ -85,6 +85,7 @@ Outputs:
 - The LLM can propose initial conditions within strict bounds to drive the `factory` loop.
 - Prompts and responses are logged for reproducibility; numeric metrics (MSE, rollout RMSE, divergence time) remain the primary ranking.
 - The rollout evaluator supports `euler` and `leapfrog`; the LLM can recommend which to use next, along with the GA fitness heuristic (`mse` vs `mse_parsimony`).
+- The LLM does not search equation space or fit coefficients; it only steers the loop (IC proposals, candidate ranking/interpretation, and next-step recommendations).
 - If `.openai_key` exists in the working directory, it is used by default for `--llm-mode openai` and overrides `OPENAI_API_KEY`.
 - You can pass `--openai-key-file` to use a specific key file.
 - If no key file is found, `OPENAI_API_KEY` is used. Offline and `--llm-mode mock` are supported.

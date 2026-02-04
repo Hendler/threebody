@@ -22,7 +22,9 @@ use threebody_discover::judge::{
     JudgeInput, JudgeResponse, Rubric, SimulationSummary,
 };
 use threebody_discover::llm::{LlmClient, MockLlm, OpenAIClient};
-use threebody_discover::{grid_search, run_search, Dataset, FitnessHeuristic};
+use threebody_discover::{
+    grid_search, lasso_path_search, run_search, stls_path_search, Dataset, FitnessHeuristic, LassoConfig, StlsConfig,
+};
 
 #[derive(Parser)]
 #[command(name = "threebody-cli")]
@@ -165,6 +167,30 @@ enum Commands {
         /// Rollout integrator for evaluation: euler | leapfrog.
         #[arg(long, default_value = "euler")]
         rollout_integrator: String,
+        /// Discovery solver: stls | lasso | ga.
+        #[arg(long, default_value = "stls")]
+        solver: String,
+        /// Disable column normalization for STLS/LASSO.
+        #[arg(long)]
+        no_normalize: bool,
+        /// Ridge penalty λ for STLS.
+        #[arg(long, default_value_t = 1e-8)]
+        ridge_lambda: f64,
+        /// STLS active-set refit iterations.
+        #[arg(long, default_value_t = 25)]
+        stls_max_iter: usize,
+        /// Comma-separated STLS thresholds (overrides auto grid).
+        #[arg(long)]
+        stls_thresholds: Option<String>,
+        /// LASSO coordinate-descent iterations.
+        #[arg(long, default_value_t = 2000)]
+        lasso_max_iter: usize,
+        /// LASSO coordinate-descent tolerance.
+        #[arg(long, default_value_t = 1e-6)]
+        lasso_tol: f64,
+        /// Comma-separated LASSO alphas (overrides auto grid).
+        #[arg(long)]
+        lasso_alphas: Option<String>,
     },
     /// Run the LLM-assisted factory loop (ICs -> sim -> discovery -> judge).
     #[command(alias = "experiment")]
@@ -217,6 +243,30 @@ enum Commands {
         /// Rollout integrator for evaluation: euler | leapfrog.
         #[arg(long, default_value = "euler")]
         rollout_integrator: String,
+        /// Discovery solver: stls | lasso | ga.
+        #[arg(long, default_value = "stls")]
+        solver: String,
+        /// Disable column normalization for STLS/LASSO.
+        #[arg(long)]
+        no_normalize: bool,
+        /// Ridge penalty λ for STLS.
+        #[arg(long, default_value_t = 1e-8)]
+        ridge_lambda: f64,
+        /// STLS active-set refit iterations.
+        #[arg(long, default_value_t = 25)]
+        stls_max_iter: usize,
+        /// Comma-separated STLS thresholds (overrides auto grid).
+        #[arg(long)]
+        stls_thresholds: Option<String>,
+        /// LASSO coordinate-descent iterations.
+        #[arg(long, default_value_t = 2000)]
+        lasso_max_iter: usize,
+        /// LASSO coordinate-descent tolerance.
+        #[arg(long, default_value_t = 1e-6)]
+        lasso_tol: f64,
+        /// Comma-separated LASSO alphas (overrides auto grid).
+        #[arg(long)]
+        lasso_alphas: Option<String>,
         /// LLM mode: off, mock, openai.
         #[arg(long, default_value = "mock")]
         llm_mode: String,
@@ -329,7 +379,33 @@ fn main() -> anyhow::Result<()> {
             openai_key_file,
             fitness,
             rollout_integrator,
+            solver,
+            no_normalize,
+            ridge_lambda,
+            stls_max_iter,
+            stls_thresholds,
+            lasso_max_iter,
+            lasso_tol,
+            lasso_alphas,
         } => {
+            let solver_settings = DiscoverySolverSettings {
+                solver: parse_discovery_solver(&solver)?,
+                normalize: !no_normalize,
+                stls_thresholds: stls_thresholds
+                    .as_deref()
+                    .map(parse_csv_f64_list)
+                    .transpose()?
+                    .unwrap_or_default(),
+                stls_ridge_lambda: ridge_lambda,
+                stls_max_iter,
+                lasso_alphas: lasso_alphas
+                    .as_deref()
+                    .map(parse_csv_f64_list)
+                    .transpose()?
+                    .unwrap_or_default(),
+                lasso_max_iter,
+                lasso_tol,
+            };
             run_discovery(
                 runs,
                 population,
@@ -343,6 +419,7 @@ fn main() -> anyhow::Result<()> {
                 openai_key_file,
                 fitness,
                 rollout_integrator,
+                solver_settings,
             )?;
         }
         Commands::Factory {
@@ -362,10 +439,36 @@ fn main() -> anyhow::Result<()> {
             seed,
             fitness,
             rollout_integrator,
+            solver,
+            no_normalize,
+            ridge_lambda,
+            stls_max_iter,
+            stls_thresholds,
+            lasso_max_iter,
+            lasso_tol,
+            lasso_alphas,
             llm_mode,
             model,
             openai_key_file,
         } => {
+            let solver_settings = DiscoverySolverSettings {
+                solver: parse_discovery_solver(&solver)?,
+                normalize: !no_normalize,
+                stls_thresholds: stls_thresholds
+                    .as_deref()
+                    .map(parse_csv_f64_list)
+                    .transpose()?
+                    .unwrap_or_default(),
+                stls_ridge_lambda: ridge_lambda,
+                stls_max_iter,
+                lasso_alphas: lasso_alphas
+                    .as_deref()
+                    .map(parse_csv_f64_list)
+                    .transpose()?
+                    .unwrap_or_default(),
+                lasso_max_iter,
+                lasso_tol,
+            };
             run_factory(
                 out_dir,
                 max_iters,
@@ -383,6 +486,7 @@ fn main() -> anyhow::Result<()> {
                 seed,
                 fitness,
                 rollout_integrator,
+                solver_settings,
                 llm_mode,
                 model,
                 openai_key_file,
@@ -560,6 +664,7 @@ fn run_discovery(
     openai_key_file: Option<PathBuf>,
     fitness: String,
     rollout_integrator: String,
+    solver_settings: DiscoverySolverSettings,
 ) -> anyhow::Result<()> {
     let library = FeatureLibrary::default_physics();
     let fitness = parse_fitness_heuristic(&fitness)?;
@@ -621,9 +726,35 @@ fn run_discovery(
     let vector_data = build_vector_dataset(&result, &sim_cfg, &library.features, body);
     let [dataset_x, dataset_y, dataset_z] = component_datasets(&vector_data);
 
-    let topk_x = run_search(&dataset_x, &library, &cfg);
-    let topk_y = run_search(&dataset_y, &library, &cfg);
-    let topk_z = run_search(&dataset_z, &library, &cfg);
+    let stls_cfg = StlsConfig {
+        thresholds: solver_settings.stls_thresholds.clone(),
+        ridge_lambda: solver_settings.stls_ridge_lambda,
+        max_iter: solver_settings.stls_max_iter,
+        normalize: solver_settings.normalize,
+    };
+    let lasso_cfg = LassoConfig {
+        alphas: solver_settings.lasso_alphas.clone(),
+        max_iter: solver_settings.lasso_max_iter,
+        tol: solver_settings.lasso_tol,
+        normalize: solver_settings.normalize,
+    };
+    let (topk_x, topk_y, topk_z) = match solver_settings.solver {
+        DiscoverySolver::Ga => (
+            run_search(&dataset_x, &library, &cfg),
+            run_search(&dataset_y, &library, &cfg),
+            run_search(&dataset_z, &library, &cfg),
+        ),
+        DiscoverySolver::Stls => (
+            stls_path_search(&dataset_x, &stls_cfg, fitness),
+            stls_path_search(&dataset_y, &stls_cfg, fitness),
+            stls_path_search(&dataset_z, &stls_cfg, fitness),
+        ),
+        DiscoverySolver::Lasso => (
+            lasso_path_search(&dataset_x, &lasso_cfg, fitness),
+            lasso_path_search(&dataset_y, &lasso_cfg, fitness),
+            lasso_path_search(&dataset_z, &lasso_cfg, fitness),
+        ),
+    };
 
     let vector_candidates = build_vector_candidates(
         &topk_x.entries,
@@ -656,18 +787,81 @@ fn run_discovery(
         vector_data.samples.len(),
         "accel_components_body_all",
     );
-    let judge_input = build_judge_input_from_candidates(
+    let mut judge_input = build_judge_input_from_candidates(
         dataset_summary.clone(),
         vector_candidates.clone(),
         Some(simulation.clone()),
         regime,
     );
+    judge_input
+        .notes
+        .push(format!("fitness_heuristic={}", fitness.as_str()));
+    judge_input
+        .notes
+        .push(format!("discovery_solver={}", discovery_solver_label(solver_settings.solver)));
+    judge_input.notes.push(format!("normalize={}", solver_settings.normalize));
+    match solver_settings.solver {
+        DiscoverySolver::Ga => {
+            judge_input.notes.push(format!("ga_runs={runs}"));
+            judge_input.notes.push(format!("ga_population={population}"));
+        }
+        DiscoverySolver::Stls => {
+            judge_input
+                .notes
+                .push(format!("stls_ridge_lambda={}", solver_settings.stls_ridge_lambda));
+            if solver_settings.stls_thresholds.is_empty() {
+                judge_input.notes.push("stls_thresholds=auto".to_string());
+            } else {
+                judge_input
+                    .notes
+                    .push(format!("stls_thresholds={:?}", solver_settings.stls_thresholds));
+            }
+        }
+        DiscoverySolver::Lasso => {
+            judge_input
+                .notes
+                .push(format!("lasso_tol={}", solver_settings.lasso_tol));
+            if solver_settings.lasso_alphas.is_empty() {
+                judge_input.notes.push("lasso_alphas=auto".to_string());
+            } else {
+                judge_input
+                    .notes
+                    .push(format!("lasso_alphas={:?}", solver_settings.lasso_alphas));
+            }
+        }
+    }
 
+    let mut judge_prompt = None;
+    let mut judge_response = None;
     let judge = if let Some(client) = llm_client.as_ref() {
-        client.judge_candidates(&judge_input).ok().map(|r| r.value)
+        match client.judge_candidates(&judge_input) {
+            Ok(result) => {
+                judge_prompt = Some(result.prompt);
+                judge_response = Some(result.response);
+                let resp = result.value;
+                if resp.validate(&judge_input).is_ok() {
+                    Some(resp)
+                } else {
+                    eprintln!("LLM judge response failed validation");
+                    None
+                }
+            }
+            Err(err) => {
+                eprintln!("LLM judge failed: {}", err);
+                None
+            }
+        }
     } else {
         None
     };
+
+    if let Some(prompt) = judge_prompt.as_ref() {
+        fs::write(out.with_extension("judge_prompt.txt"), prompt)?;
+    }
+    if let Some(resp) = judge_response.as_ref() {
+        fs::write(out.with_extension("judge_response.txt"), resp)?;
+    }
+    let solver_meta = build_solver_meta(&solver_settings, fitness, Some((runs, population, seed)));
 
     #[derive(serde::Serialize)]
     struct Output {
@@ -677,6 +871,7 @@ fn run_discovery(
         config: Config,
         dataset: DatasetSummary,
         simulation: SimulationSummary,
+        solver: SolverMeta,
         top3: Vec<CandidateSummary>,
         component_top3: ComponentTop3,
         grid_top3: ComponentTop3,
@@ -697,6 +892,7 @@ fn run_discovery(
         config: sim_cfg,
         dataset: dataset_summary,
         simulation,
+        solver: solver_meta,
         top3: vector_candidates,
         component_top3: ComponentTop3 {
             x: topk_x.entries.clone(),
@@ -1323,6 +1519,144 @@ enum RolloutIntegrator {
     Leapfrog,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiscoverySolver {
+    Ga,
+    Stls,
+    Lasso,
+}
+
+#[derive(Clone, Debug)]
+struct DiscoverySolverSettings {
+    solver: DiscoverySolver,
+    normalize: bool,
+    stls_thresholds: Vec<f64>, // empty => auto grid
+    stls_ridge_lambda: f64,
+    stls_max_iter: usize,
+    lasso_alphas: Vec<f64>, // empty => auto grid
+    lasso_max_iter: usize,
+    lasso_tol: f64,
+}
+
+#[derive(serde::Serialize)]
+struct SolverMeta {
+    name: String,
+    normalize: bool,
+    fitness: String,
+    stls: Option<StlsMeta>,
+    lasso: Option<LassoMeta>,
+    ga: Option<GaMeta>,
+}
+
+#[derive(serde::Serialize)]
+struct StlsMeta {
+    auto_thresholds: bool,
+    thresholds: Vec<f64>,
+    ridge_lambda: f64,
+    max_iter: usize,
+}
+
+#[derive(serde::Serialize)]
+struct LassoMeta {
+    auto_alphas: bool,
+    alphas: Vec<f64>,
+    max_iter: usize,
+    tol: f64,
+}
+
+#[derive(serde::Serialize)]
+struct GaMeta {
+    runs: usize,
+    population: usize,
+    seed: u64,
+}
+
+fn build_solver_meta(
+    solver_settings: &DiscoverySolverSettings,
+    fitness: FitnessHeuristic,
+    ga_cfg: Option<(usize, usize, u64)>,
+) -> SolverMeta {
+    SolverMeta {
+        name: discovery_solver_label(solver_settings.solver).to_string(),
+        normalize: solver_settings.normalize,
+        fitness: fitness.as_str().to_string(),
+        stls: matches!(solver_settings.solver, DiscoverySolver::Stls).then(|| StlsMeta {
+            auto_thresholds: solver_settings.stls_thresholds.is_empty(),
+            thresholds: solver_settings.stls_thresholds.clone(),
+            ridge_lambda: solver_settings.stls_ridge_lambda,
+            max_iter: solver_settings.stls_max_iter,
+        }),
+        lasso: matches!(solver_settings.solver, DiscoverySolver::Lasso).then(|| LassoMeta {
+            auto_alphas: solver_settings.lasso_alphas.is_empty(),
+            alphas: solver_settings.lasso_alphas.clone(),
+            max_iter: solver_settings.lasso_max_iter,
+            tol: solver_settings.lasso_tol,
+        }),
+        ga: matches!(solver_settings.solver, DiscoverySolver::Ga).then(|| {
+            let (runs, population, seed) = ga_cfg.unwrap_or((0, 0, 0));
+            GaMeta {
+                runs,
+                population,
+                seed,
+            }
+        }),
+    }
+}
+
+fn parse_discovery_solver(name: &str) -> anyhow::Result<DiscoverySolver> {
+    match name {
+        "ga" => Ok(DiscoverySolver::Ga),
+        "stls" => Ok(DiscoverySolver::Stls),
+        "lasso" => Ok(DiscoverySolver::Lasso),
+        _ => anyhow::bail!("unknown discovery solver: {name} (expected stls|lasso|ga)"),
+    }
+}
+
+fn discovery_solver_label(solver: DiscoverySolver) -> &'static str {
+    match solver {
+        DiscoverySolver::Ga => "ga",
+        DiscoverySolver::Stls => "stls",
+        DiscoverySolver::Lasso => "lasso",
+    }
+}
+
+fn apply_discovery_recommendations(
+    settings: &mut DiscoverySolverSettings,
+    rec: &threebody_discover::JudgeRecommendations,
+) {
+    fn centered_triple(v: f64) -> Vec<f64> {
+        let mut out = vec![v * 0.5, v, v * 2.0];
+        out.retain(|x| x.is_finite() && *x >= 0.0);
+        out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        out.dedup();
+        out
+    }
+
+    if let Some(name) = rec.next_discovery_solver.as_deref() {
+        if let Ok(parsed) = parse_discovery_solver(name) {
+            settings.solver = parsed;
+        }
+    }
+    if let Some(norm) = rec.next_normalize {
+        settings.normalize = norm;
+    }
+    if let Some(lambda) = rec.next_ridge_lambda {
+        if lambda.is_finite() && lambda >= 0.0 {
+            settings.stls_ridge_lambda = lambda;
+        }
+    }
+    if let Some(tau) = rec.next_stls_threshold {
+        if tau.is_finite() && tau > 0.0 {
+            settings.stls_thresholds = centered_triple(tau);
+        }
+    }
+    if let Some(alpha) = rec.next_lasso_alpha {
+        if alpha.is_finite() && alpha > 0.0 {
+            settings.lasso_alphas = centered_triple(alpha);
+        }
+    }
+}
+
 fn parse_llm_mode(mode: &str) -> anyhow::Result<LlmMode> {
     match mode {
         "off" => Ok(LlmMode::Off),
@@ -1395,6 +1729,7 @@ fn run_factory(
     seed: u64,
     fitness: String,
     rollout_integrator: String,
+    solver_settings: DiscoverySolverSettings,
     llm_mode: String,
     model: String,
     openai_key_file: Option<PathBuf>,
@@ -1405,6 +1740,7 @@ fn run_factory(
     let llm_client = select_llm_client(llm_mode, &model, openai_key_file.as_deref())?;
     let mut current_fitness = parse_fitness_heuristic(&fitness)?;
     let mut current_rollout = parse_rollout_integrator(&rollout_integrator)?;
+    let mut current_solver = solver_settings;
 
     for iter in 0..max_iters {
         let run_id = format!("run_{:03}", iter + 1);
@@ -1478,9 +1814,35 @@ fn run_factory(
             fitness: current_fitness,
             ..DiscoveryConfig::default()
         };
-        let topk_x = run_search(&dataset_x, &library, &disc_cfg);
-        let topk_y = run_search(&dataset_y, &library, &disc_cfg);
-        let topk_z = run_search(&dataset_z, &library, &disc_cfg);
+        let stls_cfg = StlsConfig {
+            thresholds: current_solver.stls_thresholds.clone(),
+            ridge_lambda: current_solver.stls_ridge_lambda,
+            max_iter: current_solver.stls_max_iter,
+            normalize: current_solver.normalize,
+        };
+        let lasso_cfg = LassoConfig {
+            alphas: current_solver.lasso_alphas.clone(),
+            max_iter: current_solver.lasso_max_iter,
+            tol: current_solver.lasso_tol,
+            normalize: current_solver.normalize,
+        };
+        let (topk_x, topk_y, topk_z) = match current_solver.solver {
+            DiscoverySolver::Ga => (
+                run_search(&dataset_x, &library, &disc_cfg),
+                run_search(&dataset_y, &library, &disc_cfg),
+                run_search(&dataset_z, &library, &disc_cfg),
+            ),
+            DiscoverySolver::Stls => (
+                stls_path_search(&dataset_x, &stls_cfg, current_fitness),
+                stls_path_search(&dataset_y, &stls_cfg, current_fitness),
+                stls_path_search(&dataset_z, &stls_cfg, current_fitness),
+            ),
+            DiscoverySolver::Lasso => (
+                lasso_path_search(&dataset_x, &lasso_cfg, current_fitness),
+                lasso_path_search(&dataset_y, &lasso_cfg, current_fitness),
+                lasso_path_search(&dataset_z, &lasso_cfg, current_fitness),
+            ),
+        };
         let vector_candidates = build_vector_candidates(
             &topk_x.entries,
             &topk_y.entries,
@@ -1546,7 +1908,35 @@ fn run_factory(
         );
         judge_input
             .notes
-            .push(format!("ga_fitness={}", current_fitness.as_str()));
+            .push(format!("fitness_heuristic={}", current_fitness.as_str()));
+        judge_input
+            .notes
+            .push(format!("discovery_solver={}", discovery_solver_label(current_solver.solver)));
+        judge_input
+            .notes
+            .push(format!("normalize={}", current_solver.normalize));
+        match current_solver.solver {
+            DiscoverySolver::Ga => {
+                judge_input.notes.push(format!("ga_runs={runs}"));
+                judge_input.notes.push(format!("ga_population={population}"));
+            }
+            DiscoverySolver::Stls => {
+                judge_input.notes.push(format!("stls_ridge_lambda={}", current_solver.stls_ridge_lambda));
+                if current_solver.stls_thresholds.is_empty() {
+                    judge_input.notes.push("stls_thresholds=auto".to_string());
+                } else {
+                    judge_input.notes.push(format!("stls_thresholds={:?}", current_solver.stls_thresholds));
+                }
+            }
+            DiscoverySolver::Lasso => {
+                judge_input.notes.push(format!("lasso_tol={}", current_solver.lasso_tol));
+                if current_solver.lasso_alphas.is_empty() {
+                    judge_input.notes.push("lasso_alphas=auto".to_string());
+                } else {
+                    judge_input.notes.push(format!("lasso_alphas={:?}", current_solver.lasso_alphas));
+                }
+            }
+        }
         judge_input
             .notes
             .push(format!("rollout_integrator={}", rollout_integrator_label(current_rollout)));
@@ -1590,7 +1980,14 @@ fn run_factory(
         }
 
         let discovery_out = run_dir.join("discovery.json");
+        let ga_seed = seed + iter as u64;
+        let solver_meta = build_solver_meta(
+            &current_solver,
+            current_fitness,
+            matches!(current_solver.solver, DiscoverySolver::Ga).then_some((runs, population, ga_seed)),
+        );
         let discovery_json = serde_json::to_string_pretty(&serde_json::json!({
+            "solver": &solver_meta,
             "top3_x": topk_x.entries,
             "top3_y": topk_y.entries,
             "top3_z": topk_z.entries,
@@ -1607,6 +2004,7 @@ fn run_factory(
             config: Config,
             initial_conditions: InitialConditionSpec,
             simulation: SimulationSummary,
+            solver: SolverMeta,
             discovery_top3: Vec<threebody_discover::EquationScore>,
             vector_candidates: Vec<CandidateSummary>,
             grid_top3: Vec<threebody_discover::EquationScore>,
@@ -1625,6 +2023,7 @@ fn run_factory(
             config: cfg,
             initial_conditions: ic_spec.clone(),
             simulation: sim_summary.clone(),
+            solver: solver_meta,
             discovery_top3: topk_x.entries.clone(),
             vector_candidates: vector_candidates.clone(),
             grid_top3: grid_topk.entries.clone(),
@@ -1676,6 +2075,7 @@ fn run_factory(
             break;
         }
         if let Some(j) = judge {
+            apply_discovery_recommendations(&mut current_solver, &j.recommendations);
             if let Some(next) = j.recommendations.next_initial_conditions {
                 next_ic = Some(next);
             }
@@ -1692,6 +2092,19 @@ fn run_factory(
         }
     }
     Ok(())
+}
+
+fn parse_csv_f64_list(raw: &str) -> anyhow::Result<Vec<f64>> {
+    let mut values = Vec::new();
+    for part in raw.split(',') {
+        let t = part.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let v: f64 = t.parse().map_err(|e| anyhow::anyhow!("invalid f64 '{t}': {e}"))?;
+        values.push(v);
+    }
+    Ok(values)
 }
 
 fn prompt_continue() -> anyhow::Result<bool> {
@@ -1946,5 +2359,36 @@ mod tests {
         assert!((steps[0].dt - 0.1).abs() < 1e-12);
         assert!(steps[0].system.state.pos[1].approx_eq(Vec3::new(1.0, 0.0, 0.0), 1e-12, 1e-12));
         assert!(steps[0].diagnostics.energy_proxy.is_finite());
+    }
+
+    #[test]
+    fn apply_discovery_recommendations_updates_solver_and_params() {
+        let mut settings = DiscoverySolverSettings {
+            solver: DiscoverySolver::Ga,
+            normalize: true,
+            stls_thresholds: Vec::new(),
+            stls_ridge_lambda: 1e-8,
+            stls_max_iter: 25,
+            lasso_alphas: Vec::new(),
+            lasso_max_iter: 2000,
+            lasso_tol: 1e-6,
+        };
+        let rec = threebody_discover::JudgeRecommendations {
+            next_initial_conditions: None,
+            next_rollout_integrator: None,
+            next_ga_heuristic: None,
+            next_discovery_solver: Some("stls".to_string()),
+            next_normalize: Some(false),
+            next_stls_threshold: Some(0.2),
+            next_ridge_lambda: Some(1e-6),
+            next_lasso_alpha: None,
+            next_search_directions: vec![],
+            notes: String::new(),
+        };
+        apply_discovery_recommendations(&mut settings, &rec);
+        assert_eq!(settings.solver, DiscoverySolver::Stls);
+        assert!(!settings.normalize);
+        assert!((settings.stls_ridge_lambda - 1e-6).abs() < 1e-18);
+        assert_eq!(settings.stls_thresholds, vec![0.1, 0.2, 0.4]);
     }
 }

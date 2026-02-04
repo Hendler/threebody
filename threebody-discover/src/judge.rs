@@ -168,6 +168,11 @@ pub struct JudgeRecommendations {
     pub next_initial_conditions: Option<InitialConditionSpec>,
     pub next_rollout_integrator: Option<String>,
     pub next_ga_heuristic: Option<String>,
+    pub next_discovery_solver: Option<String>,
+    pub next_normalize: Option<bool>,
+    pub next_stls_threshold: Option<f64>,
+    pub next_ridge_lambda: Option<f64>,
+    pub next_lasso_alpha: Option<f64>,
     pub next_search_directions: Vec<String>,
     pub notes: String,
 }
@@ -221,6 +226,33 @@ impl JudgeResponse {
                 }
                 if !seen.insert(*id) {
                     return Err("ranking contains duplicate id".to_string());
+                }
+            }
+        }
+
+        if let Some(name) = self.recommendations.next_rollout_integrator.as_deref() {
+            if name != "euler" && name != "leapfrog" {
+                return Err("invalid next_rollout_integrator".to_string());
+            }
+        }
+        if let Some(name) = self.recommendations.next_ga_heuristic.as_deref() {
+            if name != "mse" && name != "mse_parsimony" {
+                return Err("invalid next_ga_heuristic".to_string());
+            }
+        }
+        if let Some(name) = self.recommendations.next_discovery_solver.as_deref() {
+            if name != "stls" && name != "lasso" && name != "ga" {
+                return Err("invalid next_discovery_solver".to_string());
+            }
+        }
+        for val in [
+            self.recommendations.next_stls_threshold,
+            self.recommendations.next_ridge_lambda,
+            self.recommendations.next_lasso_alpha,
+        ] {
+            if let Some(v) = val {
+                if !v.is_finite() || v < 0.0 {
+                    return Err("invalid solver hyperparameter".to_string());
                 }
             }
         }
@@ -343,6 +375,7 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     prompt.push_str("\nOutput JSON schema:\n");
     prompt.push_str("Allowed next_rollout_integrator: \"euler\" or \"leapfrog\".\n");
     prompt.push_str("Allowed next_ga_heuristic: \"mse\" or \"mse_parsimony\".\n");
+    prompt.push_str("Allowed next_discovery_solver: \"stls\", \"lasso\", or \"ga\".\n");
     prompt.push_str("{\n");
     prompt.push_str("  \"version\": \"v1\",\n");
     prompt.push_str("  \"ranking\": [0,1,2],\n");
@@ -353,6 +386,11 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     prompt.push_str("    \"next_initial_conditions\": {\"bodies\":[{\"mass\":1.0,\"charge\":0.0,\"pos\":[0,0,0],\"vel\":[0,0,0]}],\"barycentric\":true,\"notes\":\"...\"},\n");
     prompt.push_str("    \"next_rollout_integrator\": \"euler\",\n");
     prompt.push_str("    \"next_ga_heuristic\": \"mse\",\n");
+    prompt.push_str("    \"next_discovery_solver\": \"stls\",\n");
+    prompt.push_str("    \"next_normalize\": true,\n");
+    prompt.push_str("    \"next_stls_threshold\": 0.1,\n");
+    prompt.push_str("    \"next_ridge_lambda\": 1e-8,\n");
+    prompt.push_str("    \"next_lasso_alpha\": 0.01,\n");
     prompt.push_str("    \"next_search_directions\": [\"...\"],\n");
     prompt.push_str("    \"notes\": \"...\"\n");
     prompt.push_str("  },\n");
@@ -429,6 +467,11 @@ mod tests {
                 next_initial_conditions: None,
                 next_rollout_integrator: None,
                 next_ga_heuristic: None,
+                next_discovery_solver: None,
+                next_normalize: None,
+                next_stls_threshold: None,
+                next_ridge_lambda: None,
+                next_lasso_alpha: None,
                 next_search_directions: vec![],
                 notes: String::new(),
             },
@@ -459,5 +502,56 @@ mod tests {
         let prompt = build_ic_prompt(&request);
         assert!(prompt.contains("minimum pair distance"));
         assert!(prompt.contains("barycentric"));
+    }
+
+    #[test]
+    fn judge_prompt_mentions_discovery_solver_recommendations() {
+        let rubric = Rubric::default_rubric();
+        let input = JudgeInput {
+            rubric: rubric.clone(),
+            regime: "gravity_only".to_string(),
+            dataset: DatasetSummary {
+                n_samples: 1,
+                target_description: "a_x".to_string(),
+                feature_names: vec!["grav_x".to_string()],
+                feature_descriptions: vec![FeatureDescription {
+                    name: "grav_x".to_string(),
+                    description: "gravity basis x-component".to_string(),
+                    tags: vec!["gravity".to_string()],
+                }],
+            },
+            simulation: None,
+            candidates: vec![CandidateSummary {
+                id: 0,
+                equation: Equation { terms: vec![] },
+                equation_text: "0".to_string(),
+                metrics: CandidateMetrics {
+                    mse: 1.0,
+                    complexity: 0,
+                    rollout_rmse: None,
+                    divergence_time: None,
+                    stability_flags: vec![],
+                },
+                notes: vec![],
+            }],
+            ic_bounds: IcBounds {
+                mass_min: 0.1,
+                mass_max: 10.0,
+                charge_min: -1.0,
+                charge_max: 1.0,
+                pos_min: -1.0,
+                pos_max: 1.0,
+                vel_min: -1.0,
+                vel_max: 1.0,
+                min_pair_dist: 0.2,
+                recommend_barycentric: true,
+            },
+            notes: vec![],
+        };
+        let prompt = build_judge_prompt(&input);
+        assert!(prompt.contains("next_discovery_solver"));
+        assert!(prompt.contains("\"stls\""));
+        assert!(prompt.contains("\"lasso\""));
+        assert!(prompt.contains("\"ga\""));
     }
 }
