@@ -21,7 +21,7 @@ use threebody_discover::judge::{
     CandidateMetrics, CandidateSummary, DatasetSummary, FeatureDescription, IcBounds, IcRequest, InitialConditionSpec,
     JudgeInput, JudgeRecommendationsLite, JudgeResponse, Rubric, SimulationSummary,
 };
-use threebody_discover::llm::{LlmClient, MockLlm, OpenAIClient};
+use threebody_discover::llm::{AutoLlmClient, LlmClient, MockLlm, OpenAIClient};
 use threebody_discover::{
     grid_search, lasso_path_search, run_search, stls_path_search, Dataset, FactoryEvaluationCandidate,
     FactoryEvaluationInput, FactoryEvaluationIteration, FactoryEvaluationIterationJudge, FitnessHeuristic,
@@ -270,7 +270,7 @@ enum Commands {
         /// Comma-separated LASSO alphas (overrides auto grid).
         #[arg(long)]
         lasso_alphas: Option<String>,
-        /// LLM mode: off, mock, openai.
+        /// LLM mode: off, mock, auto, openai.
         #[arg(long, default_value = "mock")]
         llm_mode: String,
         /// LLM model name (openai mode).
@@ -1530,6 +1530,7 @@ fn build_sim_summary(result: &threebody_core::sim::SimResult, rollout_integrator
 enum LlmMode {
     Off,
     Mock,
+    Auto,
     OpenAI,
 }
 
@@ -1681,6 +1682,7 @@ fn parse_llm_mode(mode: &str) -> anyhow::Result<LlmMode> {
     match mode {
         "off" => Ok(LlmMode::Off),
         "mock" => Ok(LlmMode::Mock),
+        "auto" => Ok(LlmMode::Auto),
         "openai" => Ok(LlmMode::OpenAI),
         _ => anyhow::bail!("unknown llm mode: {mode}"),
     }
@@ -1713,6 +1715,7 @@ fn llm_mode_label(mode: LlmMode) -> &'static str {
     match mode {
         LlmMode::Off => "off",
         LlmMode::Mock => "mock",
+        LlmMode::Auto => "auto",
         LlmMode::OpenAI => "openai",
     }
 }
@@ -1725,6 +1728,10 @@ fn select_llm_client(
     match mode {
         LlmMode::Off => Ok(None),
         LlmMode::Mock => Ok(Some(Box::new(MockLlm))),
+        LlmMode::Auto => Ok(Some(Box::new(AutoLlmClient::from_env_or_file(
+            model,
+            openai_key_file,
+        )))),
         LlmMode::OpenAI => Ok(Some(Box::new(OpenAIClient::from_env_or_file(
             model,
             openai_key_file,

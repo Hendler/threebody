@@ -8,6 +8,7 @@ use std::fs;
 use std::path::Path;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
 
 #[derive(Debug)]
 pub struct LlmError(pub String);
@@ -176,7 +177,10 @@ impl OpenAIClient {
         }
 
         let url = format!("{}/responses", self.base_url);
-        let client = reqwest::blocking::Client::new();
+        let client = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(60))
+            .build()
+            .map_err(|e| LlmError(e.to_string()))?;
         let resp = client
             .post(url)
             .bearer_auth(&self.api_key)
@@ -229,6 +233,94 @@ impl LlmClient for OpenAIClient {
             prompt,
             response: text,
         })
+    }
+}
+
+#[derive(Debug)]
+pub struct AutoLlmClient {
+    primary: Option<OpenAIClient>,
+    fallback: MockLlm,
+    state: Mutex<AutoLlmState>,
+}
+
+#[derive(Debug, Clone)]
+struct AutoLlmState {
+    primary_enabled: bool,
+    warned: bool,
+    last_error: Option<String>,
+}
+
+impl AutoLlmClient {
+    pub fn from_env_or_file(model: &str, key_file: Option<&Path>) -> Self {
+        let primary = OpenAIClient::from_env_or_file(model, key_file).ok();
+        let primary_enabled = primary.is_some();
+        Self {
+            primary,
+            fallback: MockLlm,
+            state: Mutex::new(AutoLlmState {
+                primary_enabled,
+                warned: false,
+                last_error: None,
+            }),
+        }
+    }
+
+    fn note_primary_failure(&self, err: &LlmError) {
+        let mut state = self.state.lock().unwrap();
+        state.primary_enabled = false;
+        state.last_error = Some(err.to_string());
+        if !state.warned {
+            eprintln!(
+                "OpenAI LLM disabled for remainder of run (falling back to mock): {}",
+                err
+            );
+            state.warned = true;
+        }
+    }
+
+    fn try_primary<T>(
+        &self,
+        f: impl FnOnce(&OpenAIClient) -> Result<LlmResult<T>, LlmError>,
+    ) -> Option<Result<LlmResult<T>, LlmError>> {
+        let state = self.state.lock().unwrap();
+        if !state.primary_enabled {
+            return None;
+        }
+        let primary = self.primary.as_ref()?;
+        drop(state);
+        Some(f(primary))
+    }
+}
+
+impl LlmClient for AutoLlmClient {
+    fn propose_initial_conditions(&self, request: &IcRequest) -> Result<LlmResult<InitialConditionSpec>, LlmError> {
+        if let Some(result) = self.try_primary(|p| p.propose_initial_conditions(request)) {
+            match result {
+                Ok(v) => return Ok(v),
+                Err(err) => self.note_primary_failure(&err),
+            }
+        }
+        self.fallback.propose_initial_conditions(request)
+    }
+
+    fn judge_candidates(&self, input: &JudgeInput) -> Result<LlmResult<JudgeResponse>, LlmError> {
+        if let Some(result) = self.try_primary(|p| p.judge_candidates(input)) {
+            match result {
+                Ok(v) => return Ok(v),
+                Err(err) => self.note_primary_failure(&err),
+            }
+        }
+        self.fallback.judge_candidates(input)
+    }
+
+    fn explain_factory_evaluation(&self, input: &FactoryEvaluationInput) -> Result<LlmResult<String>, LlmError> {
+        if let Some(result) = self.try_primary(|p| p.explain_factory_evaluation(input)) {
+            match result {
+                Ok(v) => return Ok(v),
+                Err(err) => self.note_primary_failure(&err),
+            }
+        }
+        self.fallback.explain_factory_evaluation(input)
     }
 }
 
@@ -337,7 +429,7 @@ fn parse_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, LlmError>
 
 #[cfg(test)]
 mod tests {
-    use super::{LlmClient, MockLlm, OpenAIClient};
+    use super::{AutoLlmClient, LlmClient, MockLlm, OpenAIClient};
     use crate::judge::{
         CandidateMetrics, CandidateSummary, DatasetSummary, FactoryEvaluationCandidate, FactoryEvaluationInput,
         FactoryEvaluationIteration, FeatureDescription, IcBounds, IcRequest, JudgeInput, Rubric,
@@ -447,6 +539,47 @@ mod tests {
         assert_eq!(client.api_key, "sk-test-key");
 
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn auto_llm_falls_back_when_primary_fails() {
+        let primary = OpenAIClient {
+            api_key: "sk-test".to_string(),
+            model: "gpt-test".to_string(),
+            base_url: "http://127.0.0.1:1".to_string(),
+        };
+        let llm = AutoLlmClient {
+            primary: Some(primary),
+            fallback: MockLlm,
+            state: std::sync::Mutex::new(super::AutoLlmState {
+                primary_enabled: true,
+                warned: false,
+                last_error: None,
+            }),
+        };
+        let req = IcRequest {
+            bounds: IcBounds {
+                mass_min: 0.1,
+                mass_max: 10.0,
+                charge_min: -1.0,
+                charge_max: 1.0,
+                pos_min: -1.0,
+                pos_max: 1.0,
+                vel_min: -1.0,
+                vel_max: 1.0,
+                min_pair_dist: 0.2,
+                recommend_barycentric: true,
+            },
+            regime: "gravity_only".to_string(),
+            notes: vec![],
+            seed: Some(1),
+        };
+        let ic = llm.propose_initial_conditions(&req).unwrap();
+        assert_eq!(ic.value.bodies.len(), 3);
+
+        let state = llm.state.lock().unwrap();
+        assert!(!state.primary_enabled);
+        assert!(state.last_error.as_ref().is_some());
     }
 
     #[test]
