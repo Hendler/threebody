@@ -77,6 +77,21 @@ Outputs:
 **Status**
 This repo is currently documentation and a build plan. Implementation is intended in Rust, with a workspace containing `threebody-core` (library) and `threebody-cli` (binary). The discovery crate is optional and only planned if discovery is implemented in Rust.
 
+**Quick Start (Planned)**
+Once the Rust workspace exists, the intended flow is:
+1. Generate an example config with the CLI.
+2. Run a simulation from that config and produce a CSV.
+3. Inspect or visualize outputs, and then feed them into discovery.
+
+Expected commands (exact flags will be finalized during implementation):
+```bash
+# Generate a starter config
+cargo run -p threebody-cli -- example-config > config.json
+
+# Run a simulation and emit CSV output
+cargo run -p threebody-cli -- simulate --config config.json --out run.csv
+```
+
 **Implementation Plan (TDD-first, condensed from `todo.md`)**
 1. Create a Cargo workspace with crates `threebody-core` and `threebody-cli`. Tests: placeholder smoke test.
 2. Establish code conventions in `threebody-core/src/lib.rs` and `threebody-core/src/prelude.rs` with re-exports. Tests: rustdoc examples compile.

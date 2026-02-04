@@ -8,6 +8,8 @@ pub mod frames;
 pub mod forces;
 pub mod regime;
 pub mod diagnostics;
+pub mod config;
+pub mod integrators;
 
 // Re-export common items via the prelude to keep imports DRY.
 pub use crate::prelude::*;
