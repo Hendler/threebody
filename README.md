@@ -142,10 +142,10 @@ cargo run -p threebody-cli -- discover --solver stls --out top_equations.json
 cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode mock --solver stls --rollout-integrator euler --fitness mse
 
 # Run one factory iteration with OpenAI (uses .openai_key by default if present)
-cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5 --solver stls --rollout-integrator leapfrog --fitness mse_parsimony
+cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5.2 --solver stls --rollout-integrator leapfrog --fitness mse_parsimony
 
 # Or override with a key file (ignores OPENAI_API_KEY and .openai_key)
-cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5 --openai-key-file .openai_key
+cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5.2 --openai-key-file .openai_key
 
 # Or use env var when no key file is present
 export OPENAI_API_KEY="your_key_here"

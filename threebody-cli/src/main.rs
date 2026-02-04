@@ -156,7 +156,7 @@ enum Commands {
         #[arg(long)]
         llm: bool,
         /// LLM model name.
-        #[arg(long, default_value = "gpt-5")]
+        #[arg(long, default_value = "gpt-5.2")]
         model: String,
         /// OpenAI API key file (overrides OPENAI_API_KEY).
         #[arg(long)]
@@ -271,7 +271,7 @@ enum Commands {
         #[arg(long, default_value = "mock")]
         llm_mode: String,
         /// LLM model name (openai mode).
-        #[arg(long, default_value = "gpt-5")]
+        #[arg(long, default_value = "gpt-5.2")]
         model: String,
         /// OpenAI API key file (overrides OPENAI_API_KEY).
         #[arg(long)]

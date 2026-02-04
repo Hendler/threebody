@@ -326,7 +326,7 @@ mod tests {
         path.push(format!("openai_key_test_{now}.txt"));
         fs::write(&path, "sk-test-key\n").unwrap();
 
-        let client = OpenAIClient::from_env_or_file("gpt-5", Some(&path)).unwrap();
+        let client = OpenAIClient::from_env_or_file("gpt-5.2", Some(&path)).unwrap();
         assert_eq!(client.api_key, "sk-test-key");
 
         fs::remove_file(path).unwrap();
