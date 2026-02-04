@@ -66,7 +66,7 @@ pub fn write_csv<W: Write>(mut writer: W, steps: &[SimStep], cfg: &Config) -> io
     for (idx, step) in steps.iter().enumerate() {
         let acc = compute_accel(&step.system, &force_cfg);
         let fields = compute_fields(&step.system, &force_cfg);
-        let diagnostics = compute_diagnostics(&step.system, cfg.constants.g, cfg.constants.k_e, cfg.softening);
+        let diagnostics = compute_diagnostics(&step.system, cfg);
         let regime = compute_regime(&step.system, &acc, step.dt);
 
         let mut row = Vec::with_capacity(header.len());

@@ -120,7 +120,7 @@ impl Default for Config {
             integrator: IntegratorConfig::default(),
             softening: 0.0,
             enable_gravity: true,
-            enable_em: true,
+            enable_em: false,
             output: OutputConfig::default(),
             close_encounter: CloseEncounterConfig::default(),
             allow_leapfrog_with_em: false,

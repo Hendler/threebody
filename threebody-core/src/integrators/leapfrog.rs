@@ -56,11 +56,11 @@ mod tests {
 
         let integrator = Leapfrog;
         let dt = 0.01;
-        let e0 = energy_proxy(&system, cfg.constants.g, cfg.constants.k_e, cfg.softening);
+        let e0 = energy_proxy(&system, &cfg);
         for _ in 0..1000 {
             system = integrator.step(&system, dt, &cfg);
         }
-        let e1 = energy_proxy(&system, cfg.constants.g, cfg.constants.k_e, cfg.softening);
+        let e1 = energy_proxy(&system, &cfg);
         assert!((e1 - e0).abs() < 1e-2);
     }
 }

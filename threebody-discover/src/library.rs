@@ -10,11 +10,15 @@ impl FeatureLibrary {
     pub fn default_physics() -> Self {
         Self {
             features: vec![
-                "r_inv2".to_string(),
-                "r_inv3".to_string(),
-                "v".to_string(),
-                "v_cross_r".to_string(),
-                "v_cross_v_cross_r".to_string(),
+                "grav_x".to_string(),
+                "grav_y".to_string(),
+                "grav_z".to_string(),
+                "elec_x".to_string(),
+                "elec_y".to_string(),
+                "elec_z".to_string(),
+                "mag_x".to_string(),
+                "mag_y".to_string(),
+                "mag_z".to_string(),
             ],
         }
     }
@@ -34,30 +38,50 @@ impl FeatureLibrary {
         self.features
             .iter()
             .map(|name| match name.as_str() {
-                "r_inv2" => FeatureDescription {
+                "grav_x" => FeatureDescription {
                     name: name.clone(),
-                    description: "sum of inverse-square distances (proxy for gravity magnitude)".to_string(),
-                    tags: vec!["distance".to_string(), "gravity".to_string()],
+                    description: "gravitational basis x-component: Σ m_j (r_j - r_i)_x / |r_j-r_i|^3 (no G)".to_string(),
+                    tags: vec!["gravity".to_string(), "vector_component".to_string()],
                 },
-                "r_inv3" => FeatureDescription {
+                "grav_y" => FeatureDescription {
                     name: name.clone(),
-                    description: "sum of inverse-cube distances (directional gravity proxy)".to_string(),
-                    tags: vec!["distance".to_string(), "gravity".to_string()],
+                    description: "gravitational basis y-component: Σ m_j (r_j - r_i)_y / |r_j-r_i|^3 (no G)".to_string(),
+                    tags: vec!["gravity".to_string(), "vector_component".to_string()],
                 },
-                "v" => FeatureDescription {
+                "grav_z" => FeatureDescription {
                     name: name.clone(),
-                    description: "speed magnitude of the target body".to_string(),
-                    tags: vec!["velocity".to_string()],
+                    description: "gravitational basis z-component: Σ m_j (r_j - r_i)_z / |r_j-r_i|^3 (no G)".to_string(),
+                    tags: vec!["gravity".to_string(), "vector_component".to_string()],
                 },
-                "v_cross_r" => FeatureDescription {
+                "elec_x" => FeatureDescription {
                     name: name.clone(),
-                    description: "magnitude of v x r scaled by distance (magnetic-like proxy)".to_string(),
-                    tags: vec!["velocity".to_string(), "cross".to_string(), "em".to_string()],
+                    description: "electric basis x-component: (q_i/m_i) Σ q_j (r_i - r_j)_x / |r_i-r_j|^3 (no k_e)".to_string(),
+                    tags: vec!["em".to_string(), "electric".to_string(), "vector_component".to_string()],
                 },
-                "v_cross_v_cross_r" => FeatureDescription {
+                "elec_y" => FeatureDescription {
                     name: name.clone(),
-                    description: "magnitude of v x (v x r) scaled by distance (Lorentz-like proxy)".to_string(),
-                    tags: vec!["velocity".to_string(), "cross".to_string(), "em".to_string()],
+                    description: "electric basis y-component: (q_i/m_i) Σ q_j (r_i - r_j)_y / |r_i-r_j|^3 (no k_e)".to_string(),
+                    tags: vec!["em".to_string(), "electric".to_string(), "vector_component".to_string()],
+                },
+                "elec_z" => FeatureDescription {
+                    name: name.clone(),
+                    description: "electric basis z-component: (q_i/m_i) Σ q_j (r_i - r_j)_z / |r_i-r_j|^3 (no k_e)".to_string(),
+                    tags: vec!["em".to_string(), "electric".to_string(), "vector_component".to_string()],
+                },
+                "mag_x" => FeatureDescription {
+                    name: name.clone(),
+                    description: "magnetic basis x-component: (q_i/m_i) (v_i × B_basis)_x where B_basis=(1/4π)Σ q_j (v_j×(r_i-r_j))/|r|^3 (no μ0)".to_string(),
+                    tags: vec!["em".to_string(), "magnetic".to_string(), "vector_component".to_string()],
+                },
+                "mag_y" => FeatureDescription {
+                    name: name.clone(),
+                    description: "magnetic basis y-component: (q_i/m_i) (v_i × B_basis)_y (no μ0)".to_string(),
+                    tags: vec!["em".to_string(), "magnetic".to_string(), "vector_component".to_string()],
+                },
+                "mag_z" => FeatureDescription {
+                    name: name.clone(),
+                    description: "magnetic basis z-component: (q_i/m_i) (v_i × B_basis)_z (no μ0)".to_string(),
+                    tags: vec!["em".to_string(), "magnetic".to_string(), "vector_component".to_string()],
                 },
                 _ => FeatureDescription {
                     name: name.clone(),

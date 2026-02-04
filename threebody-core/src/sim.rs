@@ -81,8 +81,7 @@ pub fn simulate(
         };
         let acc = compute_accel(&system, &force_cfg);
         let regime = compute_regime(&system, &acc, dt);
-        let diagnostics =
-            compute_diagnostics(&system, local_cfg.constants.g, local_cfg.constants.k_e, local_cfg.softening);
+        let diagnostics = compute_diagnostics(&system, &local_cfg);
         if encounter.is_none() && regime.min_pair_dist < cfg.close_encounter.r_min {
             encounter = Some(EncounterEvent {
                 step,

@@ -60,6 +60,9 @@ enum Commands {
         /// Override integrator.
         #[arg(long)]
         integrator: Option<String>,
+        /// Enable EM (overrides config default).
+        #[arg(long)]
+        em: bool,
         /// Disable EM.
         #[arg(long)]
         no_em: bool,
@@ -92,6 +95,9 @@ enum Commands {
         preset: String,
         #[arg(long)]
         integrator: Option<String>,
+        /// Enable EM (overrides config default).
+        #[arg(long)]
+        em: bool,
         #[arg(long)]
         no_em: bool,
         #[arg(long)]
@@ -153,6 +159,9 @@ enum Commands {
         /// Preset used when LLM is off or fails.
         #[arg(long, default_value = "two-body")]
         preset: String,
+        /// Enable EM (overrides config default).
+        #[arg(long)]
+        em: bool,
         /// Disable EM.
         #[arg(long)]
         no_em: bool,
@@ -203,6 +212,7 @@ fn main() -> anyhow::Result<()> {
             mode,
             preset,
             integrator,
+            em,
             no_em,
             no_gravity,
             format,
@@ -217,6 +227,7 @@ fn main() -> anyhow::Result<()> {
                 mode,
                 preset,
                 integrator,
+                em,
                 no_em,
                 no_gravity,
                 format,
@@ -232,6 +243,7 @@ fn main() -> anyhow::Result<()> {
             mode,
             preset,
             integrator,
+            em,
             no_em,
             no_gravity,
             format,
@@ -246,6 +258,7 @@ fn main() -> anyhow::Result<()> {
                 mode,
                 preset,
                 integrator,
+                em,
                 no_em,
                 no_gravity,
                 format,
@@ -273,6 +286,7 @@ fn main() -> anyhow::Result<()> {
             dt,
             mode,
             preset,
+            em,
             no_em,
             no_gravity,
             runs,
@@ -292,6 +306,7 @@ fn main() -> anyhow::Result<()> {
                 dt,
                 mode,
                 preset,
+                em,
                 no_em,
                 no_gravity,
                 runs,
@@ -315,6 +330,7 @@ fn run_simulation(
     mode: String,
     preset: String,
     integrator_override: Option<String>,
+    em: bool,
     no_em: bool,
     no_gravity: bool,
     format: String,
@@ -324,7 +340,7 @@ fn run_simulation(
     if format != "csv" {
         anyhow::bail!("unsupported format: {format}");
     }
-    let cfg = build_config(config_path, &mode, integrator_override, no_em, no_gravity)?;
+    let cfg = build_config(config_path, &mode, integrator_override, em, no_em, no_gravity)?;
     let system = preset_system(&preset)?;
     let options = SimOptions { steps, dt };
     let result = simulate_with_cfg(system, &cfg, options);
@@ -356,6 +372,7 @@ fn build_config(
     config_path: Option<PathBuf>,
     mode: &str,
     integrator_override: Option<String>,
+    em: bool,
     no_em: bool,
     no_gravity: bool,
 ) -> anyhow::Result<Config> {
@@ -370,6 +387,12 @@ fn build_config(
     } else {
         Config::default()
     };
+    if em && no_em {
+        anyhow::bail!("conflicting flags: --em and --no-em");
+    }
+    if em {
+        cfg.enable_em = true;
+    }
     if no_em {
         cfg.enable_em = false;
     }
@@ -1048,6 +1071,7 @@ fn run_factory(
     dt: f64,
     mode: String,
     preset: String,
+    em: bool,
     no_em: bool,
     no_gravity: bool,
     runs: usize,
@@ -1070,7 +1094,7 @@ fn run_factory(
         let run_dir = out_dir.join(&run_id);
         fs::create_dir_all(&run_dir)?;
 
-        let cfg = build_config(config.clone(), &mode, None, no_em, no_gravity)?;
+        let cfg = build_config(config.clone(), &mode, None, em, no_em, no_gravity)?;
         let regime = if cfg.enable_em { "em_quasistatic" } else { "gravity_only" };
         let ic_bounds = default_ic_bounds();
         let ic_request = IcRequest {
