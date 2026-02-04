@@ -10,6 +10,7 @@ fn help_includes_commands() {
     assert!(stdout.contains("example-config"));
     assert!(stdout.contains("simulate"));
     assert!(stdout.contains("run"));
+    assert!(stdout.contains("factory"));
 }
 
 #[test]
@@ -74,4 +75,37 @@ fn discover_writes_top3() {
     let value: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert!(value.get("top3").is_some());
     assert!(value.get("grid_top3").is_some());
+}
+
+#[test]
+fn factory_runs_once_with_mock_llm() {
+    let exe = env!("CARGO_BIN_EXE_threebody-cli");
+    let tmp_dir = env::temp_dir().join(format!("threebody_factory_{}", std::process::id()));
+    if tmp_dir.exists() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+    let output = Command::new(exe)
+        .args([
+            "factory",
+            "--out-dir",
+            tmp_dir.to_str().unwrap(),
+            "--max-iters",
+            "1",
+            "--auto",
+            "--steps",
+            "5",
+            "--dt",
+            "0.01",
+            "--runs",
+            "2",
+            "--population",
+            "4",
+            "--llm-mode",
+            "mock",
+        ])
+        .output()
+        .expect("run factory");
+    assert!(output.status.success());
+    let report = tmp_dir.join("run_001").join("report.json");
+    assert!(report.exists());
 }

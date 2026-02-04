@@ -79,14 +79,14 @@ Outputs:
 - Per-step `dt` recorded in output; close-encounter policy configurable.
 - Intended for “truth-grade” runs where accuracy is prioritized over speed. The default config uses adaptive RK45.
 
-**LLM-Assisted Discovery (Optional)**
-- The discovery loop can use a ChatGPT 5.2 client to rank equations and interpret results.
-- Requires an API key in `OPENAI_API_KEY`.
-- This is optional; the system runs fully offline without LLM ranking.
-- Discovery output includes GA top-3 equations and a grid-search top-3 (LLM-ranked when enabled).
+**LLM Judge + Factory Loop (Optional)**
+- The LLM is a supplemental judge, not a generator. It scores candidates with a fixed rubric (fidelity, parsimony, physical plausibility, regime consistency, stability risk) and outputs JSON only.
+- The LLM can propose initial conditions within strict bounds to drive the `factory` loop.
+- Prompts and responses are logged for reproducibility; numeric metrics remain the primary ranking.
+- Requires an API key in `OPENAI_API_KEY` for `--llm-mode openai`. Offline and `--llm-mode mock` are supported.
 
 **Status**
-This repo now includes a working Rust workspace with `threebody-core` (library), `threebody-cli` (binary), and `threebody-discover` (discovery engine). The core simulator supports gravity + quasi-static EM, adaptive RK45 truth mode, and CSV + JSON sidecar output. The discovery engine runs a genetic search and can optionally use an LLM to rank and interpret candidate equations.
+This repo now includes a working Rust workspace with `threebody-core` (library), `threebody-cli` (binary), and `threebody-discover` (discovery engine). The core simulator supports gravity + quasi-static EM, adaptive RK45 truth mode, and CSV + JSON sidecar output. The discovery engine runs a genetic search and can optionally use an LLM judge plus an end-to-end `factory` workflow.
 
 **Quick Start**
 The intended flow is:
@@ -107,7 +107,21 @@ cargo run -p threebody-cli -- simulate --config config.json --output run_truth.c
 
 # Run discovery (writes top 3 equations)
 cargo run -p threebody-cli -- discover --runs 50 --population 20 --out top_equations.json
+
+# Run one factory iteration with a mock LLM (no API key needed)
+cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode mock
+
+# Run one factory iteration with OpenAI (requires OPENAI_API_KEY)
+export OPENAI_API_KEY="your_key_here"
+cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --model gpt-5
 ```
+
+**Factory Outputs (Per Iteration)**
+- `traj.csv` and `traj.json` sidecar.
+- `initial_conditions.json` and `ic_request.json`.
+- `discovery.json` with numeric top-3 candidates.
+- `judge_input.json` plus `judge_prompt.txt` and `judge_response.txt` (when LLM is enabled).
+- `report.json` and `report.md` summaries.
 
 **Implementation Plan (TDD-first, condensed from `todo.md`)**
 1. Create a Cargo workspace with crates `threebody-core` and `threebody-cli`. Tests: placeholder smoke test.

@@ -193,7 +193,7 @@ Pointwise acceleration fit is not sufficient. We evaluate:
 Editorial uncertainty: In chaotic regimes, long-horizon point prediction is not meaningful\cite{Lorenz1963}; evaluation should shift toward short-horizon deterministic accuracy, ensemble/statistical predictions, and qualitative invariants and manifold structure. We are not yet fully implementing those alternative evaluation regimes.
 
 \subsection{LLM-assisted interpretation (optional)}
-We add an optional LLM layer to rank candidate equations and interpret results from grid search or genetic search. This is not used to generate equations directly; rather, it provides a human-readable synthesis of tradeoffs and highlights plausible forms. The LLM layer is advisory and fully optional; all discovery remains reproducible without it.
+We add an optional LLM judge layer to interpret candidate equations and propose next experiments. The LLM does \emph{not} generate equations and does \emph{not} override numeric ranking; it is a supplemental reviewer that produces a structured scorecard and narrative synthesis. The rubric is explicit and machine-readable, with component scores for (i) predictive fidelity, (ii) parsimony, (iii) physical plausibility, (iv) regime consistency, and (v) stability risk. We pass only evidence summaries (equation forms, numeric metrics, regime diagnostics) and require JSON-only output to preserve determinism. When enabled, the LLM may also propose the next initial conditions within strict bounds; proposals are validated and clipped before use. All prompts and responses are logged as reproducibility artifacts.
 
 \section{System Integration and Reproducibility}
 \subsection{CLI-driven workflow}
@@ -201,10 +201,14 @@ The systems are controlled by CLI:
 \begin{itemize}
 \item \textbf{simulate}: produce truth trajectories and diagnostics.
 \item \textbf{discover}: fit sparse equations using a chosen library.
+\item \textbf{factory}: an optional LLM-guided loop that selects initial conditions, runs simulation, performs discovery, and emits a judged report with suggested next runs.
 \item \textbf{predict} (planned): roll out discovered equations and compare to truth.
 \item \textbf{score} (planned): compute quantitative benchmarks.
 \item \textbf{render}: visualization (with robust header-based parsing).
 \end{itemize}
+
+\subsection{LLM-guided ``factory'' loop (optional)}
+The factory loop operationalizes a scientific workflow: (1) propose initial conditions, (2) simulate, (3) discover equations, (4) judge results under a fixed rubric, and (5) decide whether to continue. The LLM assists only in steps (1) and (4), and all artifacts (config, initial conditions, prompts, responses, metrics) are saved per iteration to ensure reproducibility and auditability.
 
 \subsection{Robust I/O design}
 We explicitly fixed a key fragility: rigid CSV schemas break as output evolves. We therefore parse by header name and extract only needed columns for any given task. This enables rapid iteration.
@@ -267,7 +271,7 @@ We interpret ``novel'' as compact approximations that outperform naive baselines
 \item Add an \textbf{em\_fields} library that learns directly from simulator fields $E, B$ to obtain even simpler discovered laws.
 \item Implement regime partitioning (``atlas of models''): train multiple sparse models with a lightweight regime classifier.
 \item Extend discovery to probabilistic forecasts for chaotic regimes.
-\item Add LLM-assisted review to triage large candidate sets and summarize top equations.
+\item Extend the LLM judge rubric and experiment-planning prompts (ablation suggestions, regime partitioning), while keeping numeric scoring primary.
 \end{itemize}
 
 \section{Conclusion}

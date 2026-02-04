@@ -42,6 +42,7 @@ impl Rubric {
                 "Fidelity is primary; do not up-rank higher-error models unless evidence shows improved stability or regime validity."
                     .to_string(),
                 "Use only provided evidence; if unknown, score low and state uncertainty.".to_string(),
+                "Separate observation (metrics) from inference; avoid new physical claims.".to_string(),
             ],
         }
     }
@@ -268,6 +269,8 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     for note in &input.rubric.notes {
         prompt.push_str(&format!("- {}\n", note));
     }
+    prompt.push_str("- Compute total = sum(weight_i * component_i).\n");
+    prompt.push_str("- If MSE values are within 5%, you may break ties using parsimony and plausibility.\n");
     prompt.push_str("\nDataset summary:\n");
     prompt.push_str(&format!(
         "samples={}, target={}\n",
