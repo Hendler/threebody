@@ -12,7 +12,7 @@
 \maketitle
 
 \begin{abstract}
-We present a two-system framework for studying and predicting three-body dynamics under coupled gravitational and electromagnetic interactions. The first system is a high-fidelity numerical simulator (``oracle'') designed for reproducibility, performance, and explicit error control. It supports Newtonian gravity and a nonrelativistic electromagnetic interaction model including electric and magnetic fields as well as scalar and vector potentials ($\phi$, $A$). The second system is a model-discovery engine that searches for sparse, interpretable equations that predict the oracle's trajectories with minimal complexity. In the current implementation, discovery proceeds via structured feature libraries and a lightweight genetic search over sparse equations, using simulator-provided accelerations to avoid derivative noise; related work includes sparse regression approaches such as SINDy/STLS\cite{Brunton2016}. We provide an implementation-centric description and emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. We argue that novelty arises not from claiming a universal closed-form solution, but from automatically discovering compact regime-specific laws with explicit validity domains and verified rollout performance against the oracle.
+We present a two-system framework for studying and predicting three-body dynamics under coupled gravitational and electromagnetic interactions. The first system is a high-fidelity numerical simulator (``oracle'') designed for reproducibility, performance, and explicit error control. It supports Newtonian gravity and a nonrelativistic electromagnetic interaction model including electric and magnetic fields as well as scalar and vector potentials ($\phi$, $A$). The second system is a model-discovery engine that searches for sparse, interpretable equations that predict the oracle's trajectories with minimal complexity. In the current implementation, discovery proceeds via structured feature libraries and sparse regression (STLS/LASSO)\cite{Brunton2016,Tibshirani1996}, using simulator-provided accelerations to avoid derivative noise; an optional GA baseline is also available. We provide an implementation-centric description and emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. We argue that novelty arises not from claiming a universal closed-form solution, but from automatically discovering compact regime-specific laws with explicit validity domains and verified rollout performance against the oracle.
 \end{abstract}
 
 \section{Introduction}
@@ -174,20 +174,19 @@ Under our quasi-static model, this yields $a_i \approx G\,g_i^\ast + k_e\,e_i^\a
 
 Editorial note: The library design is where most ``new math'' leverage lives. If the library is too broad, discovery becomes unstable and non-interpretable; too narrow, it cannot capture dynamics. We currently err toward small, interpretable libraries.
 
-\subsection{Sparse discovery via genetic search (current implementation)}
+\subsection{Sparse discovery via sparse regression (current implementation)}
 Let $y$ be a target acceleration component (e.g., $a_{i,x}$) and let $\Theta$ be the feature matrix evaluated over time (columns are library terms evaluated at each time step). We restrict to models linear in features,
 \begin{equation*}
 y \approx \Theta \xi,
 \end{equation*}
-but rather than estimating $\xi$ via a regression solver, the current Rust implementation performs a lightweight genetic search over \emph{sparse} coefficient vectors:
+and in the current Rust implementation we estimate $\xi$ on a fixed library via sparse regression (retaining the top-3 equations per component across a small hyperparameter path):
 \begin{itemize}
-\item Each candidate ``equation'' is a short list of $(\text{feature}, \text{coefficient})$ terms with a maximum term budget $K$.
-\item Fitness is mean squared error (MSE) on $y$, optionally multiplied by a parsimony penalty increasing with the number of terms.
-\item We iterate: score a population, keep the best survivors, then mutate (perturb coefficients; add/remove terms) to repopulate.
-\item We retain the top-3 equations per component and then combine component-wise equations into vector candidates that are evaluated by forward rollout (next subsection).
+\item \textbf{STLS} (sequential thresholded least squares): normalize library columns, solve ridge/OLS for $\xi$, hard-threshold small coefficients below $\tau$, refit on the surviving support, and iterate until the support stabilizes.
+\item \textbf{LASSO}: coordinate descent along an $\ell_1$ path parameterized by $\alpha$ (warm-started), yielding sparse $\xi$ on a fixed library.
+\item A lightweight genetic algorithm (GA) over sparse coefficient vectors remains available as an optional baseline; it is slower and non-deterministic but provides an alternative search dynamic.
 \end{itemize}
 
-Related work: A natural alternative is sparse regression (SINDy/STLS)\cite{Brunton2016} or LASSO-style solvers\cite{Tibshirani1996} to estimate $\xi$ for a fixed library. These are not yet implemented in the current Rust codebase; the data contract (header-based CSV plus sidecar metadata) is designed to support them.
+Related work: Sparse regression (SINDy/STLS)\cite{Brunton2016} and LASSO-style solvers\cite{Tibshirani1996} are natural coefficient estimators for fixed libraries and are implemented in the Rust codebase; the data contract (header-based CSV plus sidecar metadata) supports reproducible regression and search-based baselines.
 
 \subsection{What counts as ``predicts well''}
 Pointwise acceleration fit is not sufficient. We evaluate:
@@ -200,8 +199,8 @@ Pointwise acceleration fit is not sufficient. We evaluate:
 Editorial uncertainty: In chaotic regimes, long-horizon point prediction is not meaningful\cite{Lorenz1963}; evaluation should shift toward short-horizon deterministic accuracy, ensemble/statistical predictions, and qualitative invariants and manifold structure. We are not yet fully implementing those alternative evaluation regimes.
 
 \subsection{LLM-assisted interpretation (optional)}
-We add an optional LLM judge layer to interpret candidate equations and propose next experiments. The LLM does \emph{not} generate equations and does \emph{not} override numeric ranking; it is a supplemental reviewer that produces a structured scorecard and narrative synthesis. Concretely, it decides (a) proposed initial conditions within bounds, (b) an interpretable ranking of candidates under a fixed rubric, and (c) next-step recommendations (rollout integrator, GA fitness heuristic, and search directions), while the GA still performs equation search. The rubric is explicit and machine-readable, with component scores for (i) predictive fidelity, (ii) parsimony, (iii) physical plausibility, (iv) regime consistency, and (v) stability risk. Evidence passed to the judge includes equation forms plus numeric metrics (MSE, rollout RMSE, divergence time) and regime diagnostics. We require JSON-only output to preserve determinism. When enabled, the LLM may also propose the next initial conditions within strict bounds; proposals are validated and clipped before use. All prompts and responses are logged as reproducibility artifacts.
-The judge can additionally recommend (a) which rollout integrator to use for evaluation (Euler vs.\ leapfrog) and (b) which baseline genetic-algorithm fitness heuristic to employ (MSE vs.\ MSE with parsimony penalty), allowing controlled ablations without compromising reproducibility.
+We add an optional LLM judge layer to interpret candidate equations and propose next experiments. The LLM does \emph{not} generate equations and does \emph{not} override numeric ranking; it is a supplemental reviewer that produces a structured scorecard and narrative synthesis. Concretely, it decides (a) proposed initial conditions within bounds, (b) an interpretable ranking of candidates under a fixed rubric, and (c) next-step recommendations (rollout integrator, discovery solver/hyperparameters, and search directions), while the discovery engine performs coefficient estimation/search (STLS/LASSO or an optional GA baseline). The rubric is explicit and machine-readable, with component scores for (i) predictive fidelity, (ii) parsimony, (iii) physical plausibility, (iv) regime consistency, and (v) stability risk. Evidence passed to the judge includes equation forms plus numeric metrics (MSE, rollout RMSE, divergence time) and regime diagnostics. We require JSON-only output to preserve determinism. When enabled, the LLM may also propose the next initial conditions within strict bounds; proposals are validated and clipped before use. All prompts and responses are logged as reproducibility artifacts.
+The judge can additionally recommend (a) which rollout integrator to use for evaluation (Euler vs.\ leapfrog), (b) which fitness heuristic to use for candidate selection (MSE vs.\ MSE with a parsimony penalty), and (c) which discovery solver/hyperparameters to try next (STLS/LASSO/GA), enabling controlled ablations without compromising reproducibility.
 
 \section{System Integration and Reproducibility}
 \subsection{CLI-driven workflow}
@@ -345,8 +344,7 @@ S. Mikkola and S. J. Aarseth, ``An implementation of N-body chain regularization
 \section{Implementation Notes (brief)}
 \begin{itemize}
 \item CSV parsing must be header-based to remain stable as columns evolve.
-\item Discovery expands vector bases into x/y/z component features and searches for sparse linear combinations via a GA (with an optional parsimony penalty).
-\item Sparse-regression solvers (e.g., STLS/LASSO) are promising alternatives for estimating coefficients on a fixed library, but are not yet implemented in the current Rust codebase.
+\item Discovery expands vector bases into x/y/z component features and estimates sparse linear combinations via STLS/LASSO sparse regression (with an optional GA baseline).
 \end{itemize}
 
 \end{document}
