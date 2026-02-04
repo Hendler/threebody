@@ -72,7 +72,7 @@ Outputs:
 **Discovery Engine (Predictor) Overview**
 - Learns sparse, interpretable models of acceleration from simulator output.
 - Uses structured feature libraries (relative positions, distances, cross products, etc.).
-- Searches for sparse, interpretable equations via a simple genetic algorithm (GA) over the feature library (with optional parsimony penalty). Related work includes sparse regression approaches such as SINDy/STLS, but the current Rust implementation is GA-based.
+- Fits sparse, interpretable equations on a fixed feature library using sparse regression (STLS or LASSO; STLS is the default). A simple GA baseline remains available.
 - Evaluates models by rollout accuracy (position RMSE), divergence time, stability, and generalization within a regime.
 
 **Accuracy / Truth Mode**
@@ -84,15 +84,15 @@ Outputs:
 - The LLM is a supplemental judge, not a generator. It scores candidates with a fixed rubric (fidelity, parsimony, physical plausibility, regime consistency, stability risk) and outputs JSON only.
 - The LLM can propose initial conditions within strict bounds to drive the `factory` loop.
 - Prompts and responses are logged for reproducibility; numeric metrics (MSE, rollout RMSE, divergence time) remain the primary ranking.
-- The rollout evaluator supports `euler` and `leapfrog`; the LLM can recommend which to use next, along with the GA fitness heuristic (`mse` vs `mse_parsimony`).
-- The LLM does not search equation space or fit coefficients; it only steers the loop (IC proposals, candidate ranking/interpretation, and next-step recommendations).
+- The rollout evaluator supports `euler` and `leapfrog`; the LLM can recommend which to use next, along with the discovery configuration (solver: `stls`/`lasso`/`ga` and key hyperparameters).
+- The LLM does not directly generate equations or fit coefficients; it steers the loop (IC proposals, candidate ranking/interpretation, and next-step recommendations).
 - If `.openai_key` exists in the working directory, it is used by default for `--llm-mode openai` and overrides `OPENAI_API_KEY`.
 - You can pass `--openai-key-file` to use a specific key file.
 - If no key file is found, `OPENAI_API_KEY` is used. Offline and `--llm-mode mock` are supported.
 - Create the key file with: `echo "sk-your-key" > .openai_key`.
 
 **Status**
-This repo now includes a working Rust workspace with `threebody-core` (library), `threebody-cli` (binary), and `threebody-discover` (discovery engine). The core simulator supports gravity + quasi-static EM, adaptive RK45 truth mode, and CSV + JSON sidecar output. The discovery engine runs a genetic search and can optionally use an LLM judge plus an end-to-end `factory` workflow.
+This repo now includes a working Rust workspace with `threebody-core` (library), `threebody-cli` (binary), and `threebody-discover` (discovery engine). The core simulator supports gravity + quasi-static EM, adaptive RK45 truth mode, and CSV + JSON sidecar output. The discovery engine supports STLS/LASSO sparse regression (default) plus an optional GA baseline, and can optionally use an LLM judge plus an end-to-end `factory` workflow.
 
 **Quick Start**
 The intended flow is:
@@ -117,8 +117,11 @@ cargo run -p threebody-cli -- simulate --config config.json --ic ic.json --outpu
 # Enable EM explicitly (EM is off by default)
 cargo run -p threebody-cli -- simulate --config config.json --ic ic.json --output traj_em.csv --em
 
-# Run discovery (writes top 3 equations)
-cargo run -p threebody-cli -- discover --runs 50 --population 20 --out top_equations.json
+# Run discovery (writes top 3 equations; default solver is STLS)
+cargo run -p threebody-cli -- discover --solver stls --out top_equations.json
+
+# Or run the GA baseline:
+# cargo run -p threebody-cli -- discover --solver ga --runs 50 --population 20 --out top_equations.json
 
 # If your simulation output isn't named traj.csv/traj.json, pass explicit paths:
 # cargo run -p threebody-cli -- discover --input run.csv --sidecar run.json --out top_equations.json
@@ -145,7 +148,7 @@ export OPENAI_API_KEY="your_key_here"
 **Factory Outputs (Per Iteration)**
 - `traj.csv` and `traj.json` sidecar.
 - `initial_conditions.json` and `ic_request.json`.
-- `discovery.json` with `top3_x/top3_y/top3_z` and `vector_candidates`.
+- `discovery.json` with solver metadata plus `top3_x/top3_y/top3_z` and `vector_candidates`.
 - `rollout_trace.json` for the best vector candidate under the selected rollout integrator.
 - `judge_input.json` plus `judge_prompt.txt` and `judge_response.txt` (when LLM is enabled).
 - `report.json` and `report.md` summaries.
@@ -175,7 +178,7 @@ export OPENAI_API_KEY="your_key_here"
 22. Add deterministic fixtures in `threebody-core/tests/fixtures/`. Tests: output matches within tolerance, no NaNs.
 23. Add benchmarks in `threebody-core/benches/` using `criterion`. Tests: benches compile.
 24. Add docs in `threebody-core/README.md` and `threebody-cli/README.md`. Tests: `cargo test --doc`.
-25. Optional discovery crate `threebody-discover` with feature library, GA search, and rollout evaluator. Tests: recover synthetic coefficients in a controlled synthetic case; rollout checks.
+25. Optional discovery crate `threebody-discover` with feature library, STLS/LASSO sparse regression, GA baseline, and rollout evaluator. Tests: recover synthetic coefficients in a controlled synthetic case; rollout checks.
 
 **Mitigation Insertions (placed after referenced steps)**
 1. After step 3: add a model validity matrix in `threebody-core/src/physics.rs` listing supported regimes and non-claims. Tests: doc test asserts regimes and non-claims are present.
