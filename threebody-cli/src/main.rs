@@ -1059,10 +1059,27 @@ fn build_dataset_summary(
 }
 
 fn stability_flags_for(eq: &threebody_discover::Equation, regime: &str) -> Vec<String> {
-    let uses_velocity = eq.terms.iter().any(|t| t.feature.contains('v'));
     let mut flags = Vec::new();
-    if regime == "gravity_only" && uses_velocity {
-        flags.push("velocity_terms_in_gravity_only".to_string());
+    if regime == "gravity_only" {
+        let uses_em = eq
+            .terms
+            .iter()
+            .any(|t| t.feature.starts_with("elec_") || t.feature.starts_with("mag_"));
+        if uses_em {
+            flags.push("em_terms_in_gravity_only".to_string());
+        }
+        let uses_velocity = eq.terms.iter().any(|t| {
+            t.feature.starts_with("mag_")
+                || t.feature.starts_with("vel")
+                || t.feature.starts_with("v_")
+                || t.feature.contains("_vel")
+                || t.feature.contains("vel_")
+                || t.feature.contains("vrel")
+                || t.feature.contains("dv")
+        });
+        if uses_velocity {
+            flags.push("velocity_terms_in_gravity_only".to_string());
+        }
     }
     flags
 }
@@ -2301,6 +2318,34 @@ mod tests {
             rollout_metrics(&model, &vec_data.feature_names, &result, &cfg, RolloutIntegrator::Leapfrog);
         assert!(rmse_e.is_finite());
         assert!(rmse_l.is_finite());
+    }
+
+    #[test]
+    fn stability_flags_do_not_false_positive_on_gravity_terms() {
+        let eq = Equation {
+            terms: vec![threebody_discover::equation::Term {
+                feature: "grav_x".to_string(),
+                coeff: 1.0,
+            }],
+        };
+        let flags = stability_flags_for(&eq, "gravity_only");
+        assert!(
+            flags.is_empty(),
+            "expected no flags for grav_x in gravity_only, got: {flags:?}"
+        );
+    }
+
+    #[test]
+    fn stability_flags_flag_mag_terms_in_gravity_only() {
+        let eq = Equation {
+            terms: vec![threebody_discover::equation::Term {
+                feature: "mag_x".to_string(),
+                coeff: 1.0,
+            }],
+        };
+        let flags = stability_flags_for(&eq, "gravity_only");
+        assert!(flags.contains(&"em_terms_in_gravity_only".to_string()));
+        assert!(flags.contains(&"velocity_terms_in_gravity_only".to_string()));
     }
 
     #[test]
