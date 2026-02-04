@@ -1,7 +1,9 @@
 use crate::math::vec3::Vec3;
 use crate::state::System;
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RegimeDiagnostics {
     pub min_pair_dist: f64,
     pub max_speed: f64,
