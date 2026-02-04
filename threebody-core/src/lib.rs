@@ -15,6 +15,9 @@ pub mod output;
 
 // Re-export common items via the prelude to keep imports DRY.
 pub use crate::prelude::*;
+pub use crate::config::Config;
+pub use crate::integrators::{boris::Boris, leapfrog::Leapfrog, rk45::Rk45};
+pub use crate::sim::{simulate, SimOptions, SimResult};
 
 #[cfg(test)]
 mod tests {
