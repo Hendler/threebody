@@ -25,13 +25,4 @@ bench:
   cargo bench
 
 paper:
-  if command -v pdflatex >/dev/null 2>&1; then
-    PDFLATEX="pdflatex"
-  elif [ -x "/Library/TeX/texbin/pdflatex" ]; then
-    PDFLATEX="/Library/TeX/texbin/pdflatex"
-  else
-    echo "pdflatex not found. Install BasicTeX or TeX Live." >&2
-    echo "macOS: brew install --cask basictex" >&2
-    exit 1
-  fi
-  "$PDFLATEX" -interaction=nonstopmode academic_paper.tex
+  if command -v pdflatex >/dev/null 2>&1; then PDFLATEX="pdflatex"; elif [ -x "/Library/TeX/texbin/pdflatex" ]; then PDFLATEX="/Library/TeX/texbin/pdflatex"; else echo "pdflatex not found. Install BasicTeX or TeX Live." >&2; echo "macOS: brew install --cask basictex" >&2; exit 1; fi; "$PDFLATEX" -interaction=nonstopmode academic_paper.tex
