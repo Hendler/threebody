@@ -8,6 +8,14 @@ use crate::config::Config;
 use crate::regime::RegimeDiagnostics;
 use crate::sim::{SimResult, SimStats};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct SidecarInitialState {
+    pub mass: [f64; 3],
+    pub charge: [f64; 3],
+    pub pos: [[f64; 3]; 3],
+    pub vel: [[f64; 3]; 3],
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Sidecar {
     pub config: Config,
@@ -15,17 +23,39 @@ pub struct Sidecar {
     pub warnings: Vec<String>,
     pub last_regime: Option<RegimeDiagnostics>,
     pub sim_stats: SimStats,
+    pub initial_state: Option<SidecarInitialState>,
 }
 
 pub fn build_sidecar(cfg: &Config, header: &[String], result: &SimResult) -> Sidecar {
     let header_hash = hash_header(header);
     let last_regime = result.steps.last().map(|s| s.regime);
+    let initial_state = result.steps.first().map(|s| {
+        let mut mass = [0.0; 3];
+        let mut charge = [0.0; 3];
+        let mut pos = [[0.0; 3]; 3];
+        let mut vel = [[0.0; 3]; 3];
+        for i in 0..3 {
+            mass[i] = s.system.bodies[i].mass;
+            charge[i] = s.system.bodies[i].charge;
+            let p = s.system.state.pos[i];
+            let v = s.system.state.vel[i];
+            pos[i] = [p.x, p.y, p.z];
+            vel[i] = [v.x, v.y, v.z];
+        }
+        SidecarInitialState {
+            mass,
+            charge,
+            pos,
+            vel,
+        }
+    });
     Sidecar {
         config: *cfg,
         header_hash,
         warnings: result.warnings.clone(),
         last_regime,
         sim_stats: result.stats,
+        initial_state,
     }
 }
 

@@ -932,7 +932,7 @@ fn rollout_step(
                 new_pos[b] = new_pos[b] + v_half[b] * dt;
             }
             let interim = System::new(system.bodies, State::new(new_pos, v_half));
-            let acc_new = predict_accel(&interim, feature_dataset, model, eps);
+            let acc_new = predict_accel(&interim, feature_dataset, model, cfg);
             let mut new_vel = v_half;
             for b in 0..3 {
                 new_vel[b] = new_vel[b] + acc_new[b] * (0.5 * dt);
