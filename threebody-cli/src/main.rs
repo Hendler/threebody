@@ -824,7 +824,6 @@ fn rollout_metrics(
         System::new(bodies, State::new(pos, vel))
     });
     let feature_dataset = Dataset::new(feature_names.to_vec(), vec![], vec![]);
-    let eps = cfg.softening.max(1e-9);
     let mut sum_sq = 0.0;
     let mut count = 0usize;
     let mut t = 0.0;
@@ -832,7 +831,7 @@ fn rollout_metrics(
     let mut divergence_time = None;
     for i in 0..(result.steps.len().saturating_sub(1)) {
         let dt = result.steps[i].dt;
-        system = rollout_step(&system, &feature_dataset, model, eps, dt, rollout_integrator);
+        system = rollout_step(&system, &feature_dataset, model, cfg, dt, rollout_integrator);
         t += dt;
         let err = rms_pos_error(&system, &result.steps[i + 1].system);
         sum_sq += err * err;
@@ -859,12 +858,11 @@ fn rollout_trace(
         System::new(bodies, State::new(pos, vel))
     });
     let feature_dataset = Dataset::new(feature_names.to_vec(), vec![], vec![]);
-    let eps = cfg.softening.max(1e-9);
     let mut trace = Vec::new();
     let mut t = 0.0;
     for i in 0..(result.steps.len().saturating_sub(1)) {
         let dt = result.steps[i].dt;
-        system = rollout_step(&system, &feature_dataset, model, eps, dt, rollout_integrator);
+        system = rollout_step(&system, &feature_dataset, model, cfg, dt, rollout_integrator);
         t += dt;
         let err = rms_pos_error(&system, &result.steps[i + 1].system);
         trace.push(RolloutTraceStep {
@@ -892,11 +890,11 @@ fn predict_accel(
     system: &System,
     feature_dataset: &Dataset,
     model: &VectorModel,
-    eps: f64,
+    cfg: &Config,
 ) -> [Vec3; 3] {
     let mut acc = [Vec3::zero(); 3];
     for body in 0..3 {
-        let features = compute_feature_vector(system, body, eps, &feature_dataset.feature_names);
+        let features = compute_feature_vector(system, body, cfg, &feature_dataset.feature_names);
         let ax = model.eq_x.predict(feature_dataset, &features);
         let ay = model.eq_y.predict(feature_dataset, &features);
         let az = model.eq_z.predict(feature_dataset, &features);
@@ -909,11 +907,11 @@ fn rollout_step(
     system: &System,
     feature_dataset: &Dataset,
     model: &VectorModel,
-    eps: f64,
+    cfg: &Config,
     dt: f64,
     integrator: RolloutIntegrator,
 ) -> System {
-    let acc = predict_accel(system, feature_dataset, model, eps);
+    let acc = predict_accel(system, feature_dataset, model, cfg);
     match integrator {
         RolloutIntegrator::Euler => {
             let mut new_pos = system.state.pos;
