@@ -4800,7 +4800,7 @@ fn scan_best_results(results_root: &std::path::Path) -> anyhow::Result<BestResul
         updated_at_utc: updated_at_unix_utc(),
         buckets,
         notes: vec![
-            "Selection rule: minimize (benchmark_rmse_mean when present, else rollout_rmse, then mse, complexity)."
+            "Selection rule: minimize (benchmark_rmse_mean when present, else rollout_rmse, then mse; complexity only breaks ties)."
                 .to_string(),
             "Buckets are grouped by (steps, dt).".to_string(),
             "Only */factory/evaluation_input.json files are considered.".to_string(),
@@ -4825,7 +4825,7 @@ fn render_best_results_md(index: &BestResultsIndexV1, progress: &[BucketProgress
 
     md.push_str("## Executive Summary\n\n");
     md.push_str("- This file is the single top-level place to see the best discovered equations so far.\n");
-    md.push_str("- Comparator: minimize `benchmark_rmse_mean` (when present), else `rollout_rmse`, then `mse`, then `complexity`.\n");
+    md.push_str("- Comparator: minimize `benchmark_rmse_mean` (when present), else `rollout_rmse`, then `mse` (complexity only breaks ties).\n");
     md.push_str("- Buckets: grouped by `(steps, dt)` to avoid apples-to-oranges comparisons.\n");
     md.push_str("- Safety: runs are skipped if the oracle simulation terminated early or did not reach `steps+1` samples.\n");
     if index.buckets.is_empty() {
@@ -5069,7 +5069,7 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
     tex.push_str("\\section*{Executive Summary}\n");
     tex.push_str("This report summarizes the best equation(s) discovered by local runs of the threebody system.\\\\\n");
     tex.push_str(
-        "Comparator: minimize benchmark\\_rmse\\_mean (when available), else rollout\\_rmse, then mse, then complexity (lower is better).\\\\\n",
+        "Comparator: minimize benchmark\\_rmse\\_mean (when available), else rollout\\_rmse, then mse (complexity only breaks ties).\\\\\n",
     );
     tex.push_str("Buckets are grouped by (steps, dt) to avoid apples-to-oranges comparisons.\\\\\n\n");
     tex.push_str("Safety: runs are skipped if the oracle simulation terminated early or did not reach the requested horizon.\\\\\n\n");
@@ -5475,7 +5475,8 @@ fn incumbent_prompt_notes(record: &BestRecord) -> Vec<String> {
             record.metrics.complexity
         ),
         format!("INCUMBENT_SOURCE_RUN_DIR: {}", record.run_dir),
-        "GOAL: reduce rollout_rmse without increasing complexity.".to_string(),
+        "GOAL: reduce rollout_rmse. Complexity may increase during exploration; simplify later if possible."
+            .to_string(),
     ]
 }
 
@@ -6745,7 +6746,7 @@ fn render_executive_summary_md(
     }
 
     md.push_str("\n## Evidence: Per-Iteration Best Candidates\n");
-    md.push_str("Selection rule: pick the lowest `rollout_rmse`, break ties by lower `mse`, then lower `complexity`.\n\n");
+    md.push_str("Selection rule: pick the lowest `rollout_rmse`, break ties by lower `mse` (complexity only breaks ties, and is not a hard constraint during exploration).\n\n");
     md.push_str("| run | rollout_integrator | rollout_rmse | mse | complexity | equation |\n");
     md.push_str("|---|---|---:|---:|---:|---|\n");
     for iter in &eval_input.iterations {

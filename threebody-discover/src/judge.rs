@@ -731,7 +731,8 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
         prompt.push_str(&format!("- {}\n", note));
     }
     prompt.push_str("- Compute total = sum(weight_i * component_i).\n");
-    prompt.push_str("- If MSE values are within 5%, you may break ties using parsimony and plausibility.\n");
+    prompt.push_str("- If primary numeric metrics are within ~5%, you may break ties using parsimony and plausibility.\n");
+    prompt.push_str("- During exploration, do not treat low complexity as a hard constraint: a more complex model is acceptable if it improves fidelity.\n");
     prompt.push_str("\nDataset summary:\n");
     prompt.push_str(&format!(
         "samples={}, target={}\n",
@@ -969,7 +970,7 @@ pub fn build_factory_evaluation_prompt(input: &FactoryEvaluationInput) -> String
 
     prompt.push_str("When describing best results:\n");
     prompt.push_str("- Prefer models with low mse AND low rollout_rmse.\n");
-    prompt.push_str("- If two models have similar errors, prefer lower complexity.\n");
+    prompt.push_str("- If two models have similar errors, mention the simplest near-best option as a potential reduction target (but keep fidelity primary).\n");
     prompt.push_str("- Call out any stability_flags and what they might mean.\n");
     prompt.push_str("- Reference artifact paths like `run_003/report.md` when useful.\n\n");
 

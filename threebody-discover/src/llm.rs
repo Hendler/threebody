@@ -91,18 +91,18 @@ impl LlmClient for MockLlm {
         }
         scores.sort_by(|a, b| b.total.partial_cmp(&a.total).unwrap());
         let ranking = scores.iter().map(|s| s.id).collect();
-        let value = JudgeResponse {
+            let value = JudgeResponse {
             version: input.rubric.version.clone(),
             ranking,
             scores,
-            recommendations: JudgeRecommendations {
-                next_initial_conditions: None,
-                next_rollout_integrator: Some("leapfrog".to_string()),
-                next_ga_heuristic: Some("mse_parsimony".to_string()),
-                next_discovery_solver: Some("stls".to_string()),
-                next_normalize: Some(true),
-                next_feature_library: None,
-                next_stls_threshold: None,
+                recommendations: JudgeRecommendations {
+                    next_initial_conditions: None,
+                    next_rollout_integrator: Some("leapfrog".to_string()),
+                    next_ga_heuristic: Some("mse".to_string()),
+                    next_discovery_solver: Some("stls".to_string()),
+                    next_normalize: Some(true),
+                    next_feature_library: None,
+                    next_stls_threshold: None,
                 next_ridge_lambda: None,
                 next_lasso_alpha: None,
                 next_manual_equation_text: None,

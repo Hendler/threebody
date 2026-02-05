@@ -264,7 +264,7 @@ Where to look:
 
 Practical checklist (for non-math users):
 1. Prefer the model with **lower `rollout_rmse`** and **higher `divergence_time`** on the same regime/config.
-2. If two models are within ~5% on `rollout_rmse`, prefer the **simpler** one (lower `complexity`).
+2. If two models are within ~5% on `rollout_rmse`, keep both: use the lower-error model as the working hypothesis, then try to simplify it (reduce `complexity`) without hurting rollout.
 3. Don’t trust “good `mse`” if rollout is bad—rollout is the real test.
 4. Change only one thing at a time (solver, thresholds/alphas, rollout integrator, EM on/off).
 
