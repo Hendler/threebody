@@ -233,6 +233,7 @@ The systems are controlled by CLI:
 \subsection{LLM-guided ``factory'' loop (optional)}
 The factory loop operationalizes a scientific workflow: (1) propose initial conditions, (2) simulate, (3) discover equations, (4) judge results under a fixed rubric, and (5) decide whether to continue. The LLM assists only in steps (1) and (4), and all artifacts (config, initial conditions, prompts, responses, metrics) are saved per iteration to ensure reproducibility and auditability.
 At the end of a run, we additionally render reproducible evaluation artifacts (Markdown and LaTeX) that record the best discovered equations (exact text), the best-run initial conditions, and a best-vs-history comparison over prior local attempts. We also save machine-readable numeric evidence: per-iteration rollout error curves (\texttt{rollout\_trace.json}) and a fixed held-out benchmark report (\texttt{benchmark\_eval.json}). The global best-results ledger is also updated to capture the current incumbent per simulation bucket.
+The LaTeX evaluation is designed for quick human review: it ends with a compact end-of-run summary and an evidence appendix that embeds small, truncated excerpts from key logs (deterministic executive summary plus optional LLM narrative), with footnotes pointing to the corresponding raw artifact files.
 
 \subsection{Robust I/O design}
 We explicitly fixed a key fragility: rigid CSV schemas break as output evolves. We therefore parse by header name and extract only needed columns for any given task. This enables rapid iteration.

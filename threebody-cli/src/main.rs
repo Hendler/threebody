@@ -1314,6 +1314,11 @@ fn run_bench_em(
         current_best.as_ref(),
         prior_best.as_ref(),
         best_ic.as_ref(),
+        EvaluationTexOptions {
+            factory_dir: Some(factory_dir.as_path()),
+            benchmark: None,
+            incumbent_on_best_run: incumbent_on_best_run.as_ref(),
+        },
     );
     fs::write(factory_dir.join("evaluation.tex"), eval_tex)?;
     if build_pdf {
@@ -4016,44 +4021,6 @@ fn run_factory(
         serde_json::to_string_pretty(&history)?,
     )?;
 
-    let eval_tex_path = out_dir.join("evaluation.tex");
-    let eval_tex = render_evaluation_tex(
-        &eval_input,
-        current_best.as_ref(),
-        prior_best.as_ref(),
-        best_ic.as_ref(),
-    );
-    fs::write(&eval_tex_path, eval_tex)?;
-
-    // Best-effort PDF build when pdflatex is available.
-    if let Some(pdflatex) = find_pdflatex() {
-        let output = std::process::Command::new(&pdflatex)
-            .current_dir(&out_dir)
-            .args(["-interaction=nonstopmode", "evaluation.tex"])
-            .output();
-        match output {
-            Ok(out) => {
-                if !out.status.success() && !out_dir.join("evaluation.pdf").exists() {
-                    let mut msg = String::new();
-                    msg.push_str("pdflatex failed\n");
-                    msg.push_str("stdout:\n");
-                    msg.push_str(&String::from_utf8_lossy(&out.stdout));
-                    msg.push_str("\nstderr:\n");
-                    msg.push_str(&String::from_utf8_lossy(&out.stderr));
-                    fs::write(out_dir.join("evaluation_pdf_error.txt"), msg)?;
-                }
-            }
-            Err(err) => {
-                if !out_dir.join("evaluation.pdf").exists() {
-                    fs::write(
-                        out_dir.join("evaluation_pdf_error.txt"),
-                        format!("failed to run pdflatex: {err}"),
-                    )?;
-                }
-            }
-        }
-    }
-
     let eval_prompt_path = out_dir.join("evaluation_prompt.txt");
     let eval_md_path = out_dir.join("evaluation.md");
     let eval_llm_md_path = out_dir.join("evaluation_llm.md");
@@ -4102,6 +4069,49 @@ fn run_factory(
     fs::write(&eval_prompt_path, prompt_text)?;
     fs::write(&eval_llm_md_path, &raw_md)?;
     fs::write(&eval_md_path, exec_md)?;
+
+    let eval_tex_path = out_dir.join("evaluation.tex");
+    let eval_tex = render_evaluation_tex(
+        &eval_input,
+        current_best.as_ref(),
+        prior_best.as_ref(),
+        best_ic.as_ref(),
+        EvaluationTexOptions {
+            factory_dir: Some(out_dir.as_path()),
+            benchmark: benchmark_eval.as_ref(),
+            incumbent_on_best_run: incumbent_on_best_run.as_ref(),
+        },
+    );
+    fs::write(&eval_tex_path, eval_tex)?;
+
+    // Best-effort PDF build when pdflatex is available.
+    if let Some(pdflatex) = find_pdflatex() {
+        let output = std::process::Command::new(&pdflatex)
+            .current_dir(&out_dir)
+            .args(["-interaction=nonstopmode", "evaluation.tex"])
+            .output();
+        match output {
+            Ok(out) => {
+                if !out.status.success() && !out_dir.join("evaluation.pdf").exists() {
+                    let mut msg = String::new();
+                    msg.push_str("pdflatex failed\n");
+                    msg.push_str("stdout:\n");
+                    msg.push_str(&String::from_utf8_lossy(&out.stdout));
+                    msg.push_str("\nstderr:\n");
+                    msg.push_str(&String::from_utf8_lossy(&out.stderr));
+                    fs::write(out_dir.join("evaluation_pdf_error.txt"), msg)?;
+                }
+            }
+            Err(err) => {
+                if !out_dir.join("evaluation.pdf").exists() {
+                    fs::write(
+                        out_dir.join("evaluation_pdf_error.txt"),
+                        format!("failed to run pdflatex: {err}"),
+                    )?;
+                }
+            }
+        }
+    }
 
     update_best_results_index_best_effort(std::path::Path::new("results"));
 
@@ -5402,7 +5412,7 @@ fn truncate_to_chars(input: &str, max_chars: usize) -> String {
         return input.to_string();
     }
     let mut out: String = input.chars().take(max_chars).collect();
-    out.push_str("…");
+    out.push_str("...");
     out
 }
 
@@ -5945,6 +5955,17 @@ struct IncumbentEvalOnBestRun {
     complexity: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct EvaluationTexOptions<'a> {
+    /// Root directory containing `evaluation.*` and `run_###/` artifacts. When present, the TeX
+    /// report embeds small excerpts from these files as an appendix.
+    factory_dir: Option<&'a std::path::Path>,
+    /// Optional held-out benchmark evidence for this run.
+    benchmark: Option<&'a BenchmarkEvalV1>,
+    /// Optional apples-to-apples re-score of the prior best equation on this run's oracle.
+    incumbent_on_best_run: Option<&'a IncumbentEvalOnBestRun>,
+}
+
 fn render_expanded_math_tex(equation_text: &str) -> String {
     let usage = basis_usage_from_equation_text(equation_text);
     let [tx, ty, tz] = parse_vector_equation_terms(equation_text);
@@ -6014,7 +6035,24 @@ fn render_evaluation_tex(
     current_best: Option<&BestFactoryCandidate>,
     prior_best: Option<&PriorAttemptBest>,
     best_ic: Option<&InitialConditionSpec>,
+    opts: EvaluationTexOptions<'_>,
 ) -> String {
+    let footnote_paths = |paths: &[String]| -> String {
+        if paths.is_empty() {
+            return String::new();
+        }
+        let mut out = String::new();
+        out.push_str("\\footnote{");
+        for (i, p) in paths.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(&format!("\\texttt{{{}}}", escape_latex(p)));
+        }
+        out.push('}');
+        out
+    };
+
     let mut tex = String::new();
     tex.push_str("\\documentclass[11pt]{article}\n");
     tex.push_str("\\usepackage[margin=1in]{geometry}\n");
@@ -6240,6 +6278,260 @@ fn render_evaluation_tex(
         ));
     } else {
         tex.push_str("No prior attempts found (or no candidates in this run).\n\n");
+    }
+
+    tex.push_str("\\section*{Evidence Appendix (Embedded Excerpts)}\n");
+    if let Some(factory_dir) = opts.factory_dir {
+        append_log_excerpt_tex(
+            &mut tex,
+            "evaluation.md (deterministic executive summary)",
+            &factory_dir.join("evaluation.md"),
+            8000,
+        );
+        append_log_excerpt_tex(
+            &mut tex,
+            "evaluation_llm.md (optional narrative; not used for numeric selection)",
+            &factory_dir.join("evaluation_llm.md"),
+            8000,
+        );
+        append_log_excerpt_tex(
+            &mut tex,
+            "evaluation_prompt.txt (prompt used to generate evaluation_llm.md when enabled)",
+            &factory_dir.join("evaluation_prompt.txt"),
+            4000,
+        );
+        append_log_excerpt_tex(
+            &mut tex,
+            "evaluation_error.txt (present only if LLM evaluation failed and fallback was used)",
+            &factory_dir.join("evaluation_error.txt"),
+            2000,
+        );
+        append_log_excerpt_tex(
+            &mut tex,
+            "evaluation_history.json (best-vs-prior summary over local history)",
+            &factory_dir.join("evaluation_history.json"),
+            4000,
+        );
+        append_log_excerpt_tex(
+            &mut tex,
+            "benchmark_eval.json (held-out suite; present only when computed)",
+            &factory_dir.join("benchmark_eval.json"),
+            6000,
+        );
+
+        if let Some(best) = current_best {
+            let run_dir = factory_dir.join(&best.run_id);
+            append_log_excerpt_tex(
+                &mut tex,
+                "run_###/report.md (per-iteration summary for the best run)",
+                &run_dir.join("report.md"),
+                4000,
+            );
+            append_log_excerpt_tex(
+                &mut tex,
+                "run_###/discovery.json (solver metadata + candidates for the best run)",
+                &run_dir.join("discovery.json"),
+                6000,
+            );
+            append_log_excerpt_tex(
+                &mut tex,
+                "run_###/rollout_trace.json (error curve for the best run)",
+                &run_dir.join("rollout_trace.json"),
+                5000,
+            );
+            append_log_excerpt_tex(
+                &mut tex,
+                "run_###/judge_prompt.txt (LLM judge prompt, best run)",
+                &run_dir.join("judge_prompt.txt"),
+                4000,
+            );
+            append_log_excerpt_tex(
+                &mut tex,
+                "run_###/judge_response.txt (LLM judge response, best run)",
+                &run_dir.join("judge_response.txt"),
+                4000,
+            );
+            append_log_excerpt_tex(
+                &mut tex,
+                "run_###/ic_prompt.txt (LLM IC prompt, best run)",
+                &run_dir.join("ic_prompt.txt"),
+                4000,
+            );
+            append_log_excerpt_tex(
+                &mut tex,
+                "run_###/ic_response.txt (LLM IC response, best run)",
+                &run_dir.join("ic_response.txt"),
+                4000,
+            );
+            append_log_excerpt_tex(
+                &mut tex,
+                "run_###/config.json (simulation config, best run)",
+                &run_dir.join("config.json"),
+                3000,
+            );
+            append_log_excerpt_tex(
+                &mut tex,
+                "run_###/initial_conditions.json (ICs, best run)",
+                &run_dir.join("initial_conditions.json"),
+                3000,
+            );
+        }
+    } else {
+        tex.push_str("No run directory provided; evidence embedding disabled.\\\\\n\n");
+    }
+
+    tex.push_str("\\section*{End-of-Run Summary (Checklist + Footnotes)}\n");
+    tex.push_str(
+        "This final section is designed as a single scrollable snapshot. Footnotes point to raw artifacts on disk for auditability.\\\\\n\n",
+    );
+    tex.push_str("\\begin{itemize}\n");
+    if let Some(best) = current_best {
+        let m = &best.candidate.metrics;
+        let mut best_artifacts: Vec<String> = Vec::new();
+        best_artifacts.push(format!("{}/report.md", best.run_id));
+        best_artifacts.push(format!("{}/report.json", best.run_id));
+        best_artifacts.push(format!("{}/discovery.json", best.run_id));
+        best_artifacts.push(format!("{}/rollout_trace.json", best.run_id));
+        best_artifacts.push(format!("{}/traj.csv", best.run_id));
+        best_artifacts.push(format!("{}/traj.json", best.run_id));
+        best_artifacts.push(format!("{}/config.json", best.run_id));
+        best_artifacts.push(format!("{}/initial_conditions.json", best.run_id));
+        tex.push_str(&format!(
+            "  \\item Best run: \\texttt{{{}}} (regime: \\texttt{{{}}}). {} \n",
+            escape_latex(&best.run_id),
+            escape_latex(&best.regime),
+            footnote_paths(&best_artifacts)
+        ));
+        tex.push_str(&format!(
+            "  \\item Best metrics: rollout\\_rmse={}, divergence\\_time={}, mse={:.6e}, complexity={}. \n",
+            format_opt_f64(m.rollout_rmse),
+            format_opt_f64(m.divergence_time),
+            m.mse,
+            m.complexity
+        ));
+    } else {
+        tex.push_str("  \\item Best run: n/a (no candidates recorded). \n");
+    }
+
+    let mut run_artifacts: Vec<String> = Vec::new();
+    run_artifacts.push("evaluation.md".to_string());
+    run_artifacts.push("evaluation_input.json".to_string());
+    if let Some(factory_dir) = opts.factory_dir {
+        for name in [
+            "evaluation_history.json",
+            "benchmark_eval.json",
+            "evaluation_llm.md",
+            "evaluation_prompt.txt",
+            "evaluation_error.txt",
+        ] {
+            if factory_dir.join(name).exists() {
+                run_artifacts.push(name.to_string());
+            }
+        }
+    }
+    tex.push_str(&format!(
+        "  \\item Core artifacts: \\texttt{{evaluation.md}} (deterministic), \\texttt{{evaluation.tex}} (this PDF), plus machine-readable JSON.{} \n",
+        footnote_paths(&run_artifacts)
+    ));
+    tex.push_str("\\end{itemize}\n\n");
+
+    tex.push_str("\\subsection*{Run Notes (key=value)}\n");
+    if eval_input.notes.is_empty() {
+        tex.push_str("No notes.\\\\\n\n");
+    } else {
+        tex.push_str("\\begin{itemize}\n");
+        for note in &eval_input.notes {
+            tex.push_str(&format!("  \\item \\texttt{{{}}}\n", escape_latex(note)));
+        }
+        tex.push_str("\\end{itemize}\n\n");
+    }
+
+    tex.push_str("\\subsection*{Per-Iteration Best Candidates (Condensed)}\n");
+    tex.push_str("\\small\n");
+    tex.push_str("\\begin{longtable}{lrrrrp{6cm}}\n");
+    tex.push_str("\\toprule\n");
+    tex.push_str("Run (integrator) & rollout\\_rmse & divergence\\_time & mse & complexity & equation (1-line)\\\\\n");
+    tex.push_str("\\midrule\n");
+    for iter in &eval_input.iterations {
+        let Some(best_iter) = best_candidate_in_iteration(iter) else {
+            continue;
+        };
+        let integrator = iter
+            .simulation
+            .as_ref()
+            .map(|s| s.rollout_integrator.as_str())
+            .unwrap_or("n/a");
+        let label = format!("{} ({integrator})", iter.run_id);
+        let eq_short = truncate_to_chars(&single_line(&best_iter.equation_text), 160);
+        tex.push_str(&format!(
+            "\\texttt{{{}}} & {} & {} & {:.6e} & {} & \\texttt{{{}}}\\\\\n",
+            escape_latex(&label),
+            format_opt_f64(best_iter.metrics.rollout_rmse),
+            format_opt_f64(best_iter.metrics.divergence_time),
+            best_iter.metrics.mse,
+            best_iter.metrics.complexity,
+            escape_latex(&eq_short)
+        ));
+    }
+    tex.push_str("\\bottomrule\n");
+    tex.push_str("\\end{longtable}\n");
+    tex.push_str("\\normalsize\n\n");
+
+    if let Some(inc) = opts.incumbent_on_best_run {
+        if let Some(best) = current_best {
+            let curr_roll = best.candidate.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+            let delta = curr_roll - inc.rollout_rmse;
+            tex.push_str("\\subsection*{Evidence: Prior Best Re-Scored on This Run}\n");
+            tex.push_str(
+                "This is an apples-to-apples check: we roll out the prior best equation on the current run’s oracle trajectory.\\\\\n",
+            );
+            tex.push_str(&format!(
+                "Prior best rollout\\_rmse on best-run oracle: {:.6} (divergence\\_time={}).\\\\\n",
+                inc.rollout_rmse,
+                format_opt_f64(inc.divergence_time)
+            ));
+            tex.push_str(&format!(
+                "Current best rollout\\_rmse on best-run oracle: {}.\\\\\n",
+                format_opt_f64(best.candidate.metrics.rollout_rmse)
+            ));
+            if delta.is_finite() {
+                tex.push_str(&format!("Delta (current - prior): {delta:+.6}.\\\\\n\n"));
+            } else {
+                tex.push_str("Delta (current - prior): n/a.\\\\\n\n");
+            }
+        }
+    }
+
+    if let Some(bm) = opts.benchmark {
+        tex.push_str("\\subsection*{Held-out Benchmark (Fixed IC Suite)}\n");
+        tex.push_str("This is an apples-to-apples check across runs in the same (steps, dt) bucket.\\\\\n");
+        tex.push_str(&format!(
+            "suite\\_id=\\texttt{{{}}}, cases={}, rollout\\_integrator=\\texttt{{{}}}.{}\\\\\n",
+            escape_latex(&bm.aggregate.suite_id),
+            bm.aggregate.cases,
+            escape_latex(&bm.aggregate.rollout_integrator),
+            footnote_paths(&vec!["benchmark_eval.json".to_string()])
+        ));
+        tex.push_str(&format!(
+            "aggregate: rmse\\_mean={}, rmse\\_max={}, divergence\\_time\\_min={}.\\\\\n\n",
+            format_opt_f64(bm.aggregate.rmse_mean),
+            format_opt_f64(bm.aggregate.rmse_max),
+            format_opt_f64(bm.aggregate.divergence_time_min)
+        ));
+        tex.push_str("\\begin{tabular}{lrr}\n");
+        tex.push_str("\\toprule\n");
+        tex.push_str("Case & rollout\\_rmse & divergence\\_time\\\\\n");
+        tex.push_str("\\midrule\n");
+        for c in &bm.cases {
+            tex.push_str(&format!(
+                "\\texttt{{{}}} & {} & {}\\\\\n",
+                escape_latex(&c.name),
+                format_opt_f64(c.rollout_rmse),
+                format_opt_f64(c.divergence_time)
+            ));
+        }
+        tex.push_str("\\bottomrule\n");
+        tex.push_str("\\end{tabular}\n\n");
     }
 
     tex.push_str("\\end{document}\n");
@@ -6959,13 +7251,21 @@ mod tests {
             barycentric: true,
             notes: "test".to_string(),
         };
-        let tex = render_evaluation_tex(&eval_input, Some(&best), None, Some(&ic));
+        let tex = render_evaluation_tex(
+            &eval_input,
+            Some(&best),
+            None,
+            Some(&ic),
+            EvaluationTexOptions::default(),
+        );
         for needle in [
             "\\section*{Executive Summary}",
             "\\section*{Best Equation (Exact)}",
             "\\section*{Candidate Equations Tried (Top 3 per Iteration)}",
             "\\section*{Initial Conditions (Best Run)}",
             "\\section*{Comparison to Prior Attempts}",
+            "\\section*{End-of-Run Summary (Checklist + Footnotes)}",
+            "\\section*{Evidence Appendix (Embedded Excerpts)}",
         ] {
             assert!(tex.contains(needle), "missing {needle}");
         }
@@ -7024,13 +7324,103 @@ mod tests {
         };
 
         let best = best_candidate_from_eval_input(&eval_input).unwrap();
-        let tex = render_evaluation_tex(&eval_input, Some(&best), None, None);
+        let tex = render_evaluation_tex(
+            &eval_input,
+            Some(&best),
+            None,
+            None,
+            EvaluationTexOptions::default(),
+        );
         assert!(tex.contains("LLM summary"));
         assert!(tex.contains(&escape_latex("judge_summary_marker")));
         assert!(tex.contains("LLM suggested next experiments"));
         assert!(tex.contains(&escape_latex("ablation: remove gate_close")));
         assert!(tex.contains("LLM notes"));
         assert!(tex.contains(&escape_latex("judge_notes_marker")));
+    }
+
+    #[test]
+    fn render_evaluation_tex_embeds_evidence_excerpts_when_factory_dir_present() {
+        let root = unique_temp_path("eval_tex_embed", "dir");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("evaluation.md"), "EXEC_MD_MARKER: hello\n").unwrap();
+        fs::write(root.join("evaluation_llm.md"), "LLM_MD_MARKER: world\n").unwrap();
+        fs::write(root.join("evaluation_prompt.txt"), "PROMPT_MARKER: p\n").unwrap();
+        fs::write(root.join("evaluation_history.json"), "HISTORY_MARKER: h\n").unwrap();
+
+        let run_dir = root.join("run_001");
+        fs::create_dir_all(&run_dir).unwrap();
+        fs::write(run_dir.join("report.md"), "REPORT_MARKER: r\n").unwrap();
+        fs::write(run_dir.join("discovery.json"), "DISCOVERY_MARKER: d\n").unwrap();
+        fs::write(run_dir.join("rollout_trace.json"), "TRACE_MARKER: t\n").unwrap();
+        fs::write(run_dir.join("judge_prompt.txt"), "JUDGE_PROMPT_MARKER: jp\n").unwrap();
+        fs::write(run_dir.join("judge_response.txt"), "JUDGE_RESPONSE_MARKER: jr\n").unwrap();
+        fs::write(run_dir.join("ic_prompt.txt"), "IC_PROMPT_MARKER: ip\n").unwrap();
+        fs::write(run_dir.join("ic_response.txt"), "IC_RESPONSE_MARKER: ir\n").unwrap();
+        fs::write(run_dir.join("config.json"), "{}\n").unwrap();
+        fs::write(run_dir.join("initial_conditions.json"), "{}\n").unwrap();
+
+        let eval_input = FactoryEvaluationInput {
+            version: FACTORY_EVALUATION_VERSION.to_string(),
+            notes: vec!["steps=5".to_string()],
+            iterations: vec![FactoryEvaluationIteration {
+                iteration: 1,
+                run_id: "run_001".to_string(),
+                regime: "gravity_only".to_string(),
+                solver: DiscoverySolverSummary {
+                    name: "stls".to_string(),
+                    normalize: true,
+                    fitness_heuristic: "mse".to_string(),
+                    stls: None,
+                    lasso: None,
+                    ga: None,
+                },
+                simulation: None,
+                top_candidates: vec![FactoryEvaluationCandidate {
+                    id: 0,
+                    equation_text: "ax=+1*grav_x".to_string(),
+                    metrics: CandidateMetrics {
+                        mse: 1.0,
+                        complexity: 1,
+                        rollout_rmse: Some(0.1),
+                        divergence_time: None,
+                        stability_flags: vec![],
+                    },
+                }],
+                judge: None,
+            }],
+        };
+
+        let best = best_candidate_from_eval_input(&eval_input).unwrap();
+        let tex = render_evaluation_tex(
+            &eval_input,
+            Some(&best),
+            None,
+            None,
+            EvaluationTexOptions {
+                factory_dir: Some(root.as_path()),
+                benchmark: None,
+                incumbent_on_best_run: None,
+            },
+        );
+        for marker in [
+            "EXEC_MD_MARKER",
+            "LLM_MD_MARKER",
+            "PROMPT_MARKER",
+            "HISTORY_MARKER",
+            "REPORT_MARKER",
+            "DISCOVERY_MARKER",
+            "TRACE_MARKER",
+            "JUDGE_PROMPT_MARKER",
+            "JUDGE_RESPONSE_MARKER",
+            "IC_PROMPT_MARKER",
+            "IC_RESPONSE_MARKER",
+        ] {
+            assert!(tex.contains(marker), "missing excerpt marker: {marker}");
+        }
+        assert!(tex.contains("\\footnote{"), "expected at least one footnote");
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

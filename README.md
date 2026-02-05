@@ -132,7 +132,7 @@ What it does:
 - Updates `results/best_results.md` after every run.
 - Writes a held-out benchmark report at `results/<run>/factory/benchmark_eval.json` and includes it in `results/<run>/RESULTS.md` under “Held-out Benchmark”. This is a fixed IC suite intended for apples-to-apples comparisons across runs in the same `(steps, dt)` bucket.
 - Requires a reachable LLM endpoint (OpenAI by default). Set `.openai_key` or `OPENAI_API_KEY`. To use a local OpenAI-compatible endpoint, set `OPENAI_BASE_URL` (e.g. `http://localhost:11434/v1`). If your endpoint only supports Chat Completions, set `OPENAI_API_STYLE=chat`. If your endpoint needs a different model name, set `THREEBODY_LLM_MODEL`.
-- Writes an aggregated findings report to `results/findings.tex` (and `results/findings.pdf` when `pdflatex` is available). Each run also copies a timestamped PDF snapshot (e.g. `results/findings_<unix_seconds>.pdf`).
+- Writes an aggregated findings report to `results/findings.tex` (and `results/findings.pdf` when `pdflatex` is available). Each run also copies a timestamped PDF snapshot (e.g. `results/findings_<unix_seconds>.pdf`). The findings paper embeds small excerpts from each run’s evaluation logs to aid interpretation without chasing files.
 
 Notes on 3D learning:
 - The factory loop forces a small deterministic `z` perturbation in initial conditions when the proposed ICs are planar. This prevents repeatedly rediscovering `az=0` from purely planar trajectories and makes `grav_z` identifiable in gravity-only runs.
@@ -238,7 +238,7 @@ cargo run -p threebody-cli -- findings --results-dir results --out-tex results/f
   - `evaluation_input.json`: structured summary of the run (for reproducibility).
   - `evaluation_history.json`: best-vs-prior-best comparison over all previous local attempts under `results/`.
   - `evaluation_prompt.txt`: the exact prompt used to generate `evaluation_llm.md` (when LLM mode is enabled).
-  - `evaluation.tex`: reproducible LaTeX evaluation (best equation, top candidates per iteration, LLM hypotheses, ICs, and gains vs prior attempts).
+  - `evaluation.tex`: reproducible LaTeX evaluation (best equation, top candidates per iteration, LLM hypotheses, ICs, and gains vs prior attempts) that ends with a compact end-of-run summary plus an evidence appendix (embedded excerpts + footnote paths).
   - `evaluation.pdf`: built when `pdflatex` is available (best-effort).
   - `evaluation_pdf_error.txt`: present only if `pdflatex` is available but fails.
   - `evaluation_error.txt`: only present if the LLM call failed and a fallback was used.
