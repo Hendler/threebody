@@ -211,12 +211,20 @@ pub struct JudgeRecommendations {
     pub next_ga_heuristic: Option<String>,
     pub next_discovery_solver: Option<String>,
     pub next_normalize: Option<bool>,
+    /// Optional: let the judge switch feature libraries between iterations.
+    /// Allowed values: "default" | "extended".
+    #[serde(default)]
+    pub next_feature_library: Option<String>,
     #[serde(default, deserialize_with = "deserialize_opt_f64_or_auto")]
     pub next_stls_threshold: Option<f64>,
     #[serde(default, deserialize_with = "deserialize_opt_f64_or_auto")]
     pub next_ridge_lambda: Option<f64>,
     #[serde(default, deserialize_with = "deserialize_opt_f64_or_auto")]
     pub next_lasso_alpha: Option<f64>,
+    /// Optional: a fully-specified vector equation to evaluate next iteration (must use known features).
+    /// Format: `ax=+1.0*grav_x ... ; ay=... ; az=...`
+    #[serde(default)]
+    pub next_manual_equation_text: Option<String>,
     #[serde(default)]
     pub next_search_directions: Vec<String>,
     #[serde(default)]
@@ -517,7 +525,12 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     prompt.push_str("Allowed next_rollout_integrator: \"euler\" or \"leapfrog\".\n");
     prompt.push_str("Allowed next_ga_heuristic: \"mse\" or \"mse_parsimony\".\n");
     prompt.push_str("Allowed next_discovery_solver: \"stls\", \"lasso\", or \"ga\".\n");
+    prompt.push_str("Allowed next_feature_library: \"default\" or \"extended\".\n");
     prompt.push_str("All numeric hyperparameters MUST be numbers or null. Do NOT output strings like \"auto\".\n");
+    prompt.push_str("If you provide next_manual_equation_text, it MUST:\n");
+    prompt.push_str("- use ONLY the listed feature names,\n");
+    prompt.push_str("- be a single-line string, and\n");
+    prompt.push_str("- match the exact vector format: `ax=... ; ay=... ; az=...` where terms look like `+1.000000*grav_x` separated by spaces.\n");
     prompt.push_str("If you are unsure about next_initial_conditions, set it to null. Do NOT use ellipses (`...`) in JSON.\n");
     prompt.push_str("{\n");
     prompt.push_str("  \"version\": \"v1\",\n");
@@ -531,9 +544,11 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     prompt.push_str("    \"next_ga_heuristic\": \"mse\",\n");
     prompt.push_str("    \"next_discovery_solver\": \"stls\",\n");
     prompt.push_str("    \"next_normalize\": true,\n");
+    prompt.push_str("    \"next_feature_library\": \"default\",\n");
     prompt.push_str("    \"next_stls_threshold\": 0.1,\n");
     prompt.push_str("    \"next_ridge_lambda\": 1e-8,\n");
     prompt.push_str("    \"next_lasso_alpha\": 0.01,\n");
+    prompt.push_str("    \"next_manual_equation_text\": null,\n");
     prompt.push_str("    \"next_search_directions\": [\"...\"],\n");
     prompt.push_str("    \"notes\": \"...\"\n");
     prompt.push_str("  },\n");
@@ -550,9 +565,11 @@ pub struct JudgeRecommendationsLite {
     pub next_ga_heuristic: Option<String>,
     pub next_discovery_solver: Option<String>,
     pub next_normalize: Option<bool>,
+    pub next_feature_library: Option<String>,
     pub next_stls_threshold: Option<f64>,
     pub next_ridge_lambda: Option<f64>,
     pub next_lasso_alpha: Option<f64>,
+    pub next_manual_equation_text: Option<String>,
     pub next_search_directions: Vec<String>,
     pub notes: String,
 }
@@ -564,9 +581,11 @@ impl From<&JudgeRecommendations> for JudgeRecommendationsLite {
             next_ga_heuristic: value.next_ga_heuristic.clone(),
             next_discovery_solver: value.next_discovery_solver.clone(),
             next_normalize: value.next_normalize,
+            next_feature_library: value.next_feature_library.clone(),
             next_stls_threshold: value.next_stls_threshold,
             next_ridge_lambda: value.next_ridge_lambda,
             next_lasso_alpha: value.next_lasso_alpha,
+            next_manual_equation_text: value.next_manual_equation_text.clone(),
             next_search_directions: value.next_search_directions.clone(),
             notes: value.notes.clone(),
         }
@@ -743,9 +762,11 @@ mod tests {
                 next_ga_heuristic: None,
                 next_discovery_solver: None,
                 next_normalize: None,
+                next_feature_library: None,
                 next_stls_threshold: None,
                 next_ridge_lambda: None,
                 next_lasso_alpha: None,
+                next_manual_equation_text: None,
                 next_search_directions: vec![],
                 notes: String::new(),
             },

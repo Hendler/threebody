@@ -1240,7 +1240,7 @@ fn run_bench_em(
         let complexity = incumbent_model.eq_x.complexity()
             + incumbent_model.eq_y.complexity()
             + incumbent_model.eq_z.complexity();
-        let feature_names = FeatureLibrary::default_physics().features;
+        let feature_names = feature_names_for_equation_text(&prior.best.candidate.equation_text);
         let (rmse, div) = rollout_metrics(
             &incumbent_model,
             &feature_names,
@@ -2604,6 +2604,60 @@ fn build_vector_candidates(
     candidates
 }
 
+fn append_manual_vector_candidate_from_equation_text(
+    vector_candidates: &mut Vec<CandidateSummary>,
+    equation_text: &str,
+    dataset_x: &Dataset,
+    dataset_y: &Dataset,
+    dataset_z: &Dataset,
+    feature_names: &[String],
+    result: &threebody_core::sim::SimResult,
+    cfg: &Config,
+    regime: &str,
+    rollout_integrator: RolloutIntegrator,
+    notes: Vec<String>,
+) {
+    let Some(model) = vector_model_from_equation_text(equation_text) else {
+        return;
+    };
+
+    let allowed: std::collections::HashSet<&str> = feature_names.iter().map(|s| s.as_str()).collect();
+    let mut sanitized = model;
+    for eq in [&mut sanitized.eq_x, &mut sanitized.eq_y, &mut sanitized.eq_z] {
+        eq.terms
+            .retain(|t| t.coeff.is_finite() && allowed.contains(t.feature.as_str()));
+    }
+
+    let mse_x = threebody_discover::equation::score_equation(&sanitized.eq_x, dataset_x);
+    let mse_y = threebody_discover::equation::score_equation(&sanitized.eq_y, dataset_y);
+    let mse_z = threebody_discover::equation::score_equation(&sanitized.eq_z, dataset_z);
+    let mse = (mse_x + mse_y + mse_z) / 3.0;
+    let complexity = sanitized.eq_x.complexity() + sanitized.eq_y.complexity() + sanitized.eq_z.complexity();
+    let (rmse, divergence_time) = rollout_metrics(&sanitized, feature_names, result, cfg, rollout_integrator);
+
+    let mut flags = Vec::new();
+    flags.extend(stability_flags_for(&sanitized.eq_x, regime));
+    flags.extend(stability_flags_for(&sanitized.eq_y, regime));
+    flags.extend(stability_flags_for(&sanitized.eq_z, regime));
+    flags.sort();
+    flags.dedup();
+
+    let id = vector_candidates.len();
+    vector_candidates.push(CandidateSummary {
+        id,
+        equation: sanitized.eq_x.clone(),
+        equation_text: format_vector_model(&sanitized),
+        metrics: CandidateMetrics {
+            mse,
+            complexity,
+            rollout_rmse: Some(rmse),
+            divergence_time,
+            stability_flags: flags,
+        },
+        notes,
+    });
+}
+
 fn build_sim_summary(
     result: &threebody_core::sim::SimResult,
     cfg: &Config,
@@ -2720,6 +2774,27 @@ enum LlmMode {
 enum RolloutIntegrator {
     Euler,
     Leapfrog,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FeatureLibraryKind {
+    DefaultPhysics,
+    ExtendedPhysics,
+}
+
+fn feature_library_kind_label(kind: FeatureLibraryKind) -> &'static str {
+    match kind {
+        FeatureLibraryKind::DefaultPhysics => "default",
+        FeatureLibraryKind::ExtendedPhysics => "extended",
+    }
+}
+
+fn parse_feature_library_kind(raw: &str) -> Option<FeatureLibraryKind> {
+    match raw.trim().to_lowercase().as_str() {
+        "default" | "default_physics" | "default-physics" => Some(FeatureLibraryKind::DefaultPhysics),
+        "extended" | "extended_physics" | "extended-physics" => Some(FeatureLibraryKind::ExtendedPhysics),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2966,11 +3041,13 @@ fn run_factory(
 ) -> anyhow::Result<()> {
     fs::create_dir_all(&out_dir)?;
     let mut next_ic: Option<InitialConditionSpec> = None;
+    let mut next_manual_equation_text: Option<String> = None;
     let llm_mode = parse_llm_mode(&llm_mode)?;
     let llm_client = select_llm_client(llm_mode, &model, openai_key_file.as_deref(), require_llm)?;
     let mut current_fitness = parse_fitness_heuristic(&fitness)?;
     let mut current_rollout = parse_rollout_integrator(&rollout_integrator)?;
     let mut current_solver = solver_settings;
+    let mut current_library = FeatureLibraryKind::DefaultPhysics;
     let mut evaluation_iterations: Vec<FactoryEvaluationIteration> = Vec::new();
     let incumbent_bucket = BucketKey { steps, dt };
     let incumbent = load_incumbent_for_bucket(std::path::Path::new("results"), &incumbent_bucket);
@@ -3221,7 +3298,10 @@ fn run_factory(
         let mut sidecar_file = fs::File::create(&sidecar_path)?;
         write_sidecar(&mut sidecar_file, &sidecar)?;
 
-        let library = FeatureLibrary::default_physics();
+        let library = match current_library {
+            FeatureLibraryKind::DefaultPhysics => FeatureLibrary::default_physics(),
+            FeatureLibraryKind::ExtendedPhysics => FeatureLibrary::extended_physics(),
+        };
         let vector_data = build_vector_dataset(&result, &cfg, &library.features, None);
         let [dataset_x, dataset_y, dataset_z] = component_datasets(&vector_data);
         let disc_cfg = DiscoveryConfig {
@@ -3260,7 +3340,7 @@ fn run_factory(
                 lasso_path_search(&dataset_z, &lasso_cfg, current_fitness),
             ),
         };
-        let vector_candidates = build_vector_candidates(
+        let mut vector_candidates = build_vector_candidates(
             &topk_x.entries,
             &topk_y.entries,
             &topk_z.entries,
@@ -3270,6 +3350,25 @@ fn run_factory(
             regime,
             current_rollout,
         );
+
+        if let Some(eq_text) = next_manual_equation_text.take() {
+            append_manual_vector_candidate_from_equation_text(
+                &mut vector_candidates,
+                &eq_text,
+                &dataset_x,
+                &dataset_y,
+                &dataset_z,
+                &vector_data.feature_names,
+                &result,
+                &cfg,
+                regime,
+                current_rollout,
+                vec![
+                    "source=llm".to_string(),
+                    "kind=carried_next_manual_equation_text".to_string(),
+                ],
+            );
+        }
         let grid_topk = grid_search(
             &vector_candidates
                 .iter()
@@ -3366,6 +3465,9 @@ fn run_factory(
         judge_input
             .notes
             .push(format!("rollout_integrator={}", rollout_integrator_label(current_rollout)));
+        judge_input
+            .notes
+            .push(format!("feature_library={}", feature_library_kind_label(current_library)));
         let judge_input_path = run_dir.join("judge_input.json");
         fs::write(&judge_input_path, serde_json::to_string_pretty(&judge_input)?)?;
         let mut judge_prompt = None;
@@ -3414,6 +3516,29 @@ fn run_factory(
             fs::write(run_dir.join("judge_response.txt"), resp)?;
         }
 
+        // If the judge proposed a concrete equation, evaluate it immediately on this run's data.
+        // This lets the LLM "write math" while numeric scoring still decides whether it helps.
+        if let Some(j) = judge.as_ref() {
+            if let Some(eq_text) = j.recommendations.next_manual_equation_text.as_deref() {
+                append_manual_vector_candidate_from_equation_text(
+                    &mut vector_candidates,
+                    eq_text,
+                    &dataset_x,
+                    &dataset_y,
+                    &dataset_z,
+                    &vector_data.feature_names,
+                    &result,
+                    &cfg,
+                    regime,
+                    current_rollout,
+                    vec![
+                        "source=llm".to_string(),
+                        "kind=judge_next_manual_equation_text_same_iter".to_string(),
+                    ],
+                );
+            }
+        }
+
         let discovery_out = run_dir.join("discovery.json");
         let ga_seed = seed + iter as u64;
         let solver_meta = build_solver_meta(
@@ -3436,6 +3561,7 @@ fn run_factory(
             iteration: usize,
             run_id: String,
             regime: String,
+            feature_library: String,
             config: Config,
             initial_conditions: InitialConditionSpec,
             simulation: SimulationSummary,
@@ -3455,6 +3581,7 @@ fn run_factory(
             iteration: iter + 1,
             run_id: run_id.clone(),
             regime: regime.to_string(),
+            feature_library: feature_library_kind_label(current_library).to_string(),
             config: cfg,
             initial_conditions: ic_spec.clone(),
             simulation: sim_summary.clone(),
@@ -3479,6 +3606,10 @@ fn run_factory(
         let mut md = String::new();
         md.push_str(&format!("# Factory Report {}\n\n", run_id));
         md.push_str(&format!("- Regime: {}\n", regime));
+        md.push_str(&format!(
+            "- Feature library: {}\n",
+            feature_library_kind_label(current_library)
+        ));
         md.push_str(&format!("- Steps: {}\n", sim_summary.steps));
         md.push_str(&format!("- Energy drift: {:?}\n", sim_summary.energy_drift));
         md.push_str(&format!("- Min pair dist: {:?}\n", sim_summary.min_pair_dist));
@@ -3494,7 +3625,12 @@ fn run_factory(
             "- mean(|a_em|)/mean(|a_grav|): {}\n",
             format_opt_f64(sim_summary.mean_abs_accel_ratio_em_over_grav)
         ));
-        if let Some(best_vec) = vector_candidates.first() {
+        if let Some(best_vec) = vector_candidates.iter().min_by(|a, b| {
+            a.metrics
+                .mse
+                .partial_cmp(&b.metrics.mse)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
             md.push_str(&format!(
                 "- Best vector model: mse={:.6}, rollout_rmse={:?}\n",
                 best_vec.metrics.mse,
@@ -3577,8 +3713,22 @@ fn run_factory(
         }
         if let Some(j) = judge {
             apply_discovery_recommendations(&mut current_solver, &j.recommendations);
+            if let Some(kind) = j
+                .recommendations
+                .next_feature_library
+                .as_deref()
+                .and_then(parse_feature_library_kind)
+            {
+                current_library = kind;
+            }
             if let Some(next) = j.recommendations.next_initial_conditions {
                 next_ic = Some(next);
+            }
+            if let Some(eq) = j.recommendations.next_manual_equation_text {
+                let trimmed = eq.trim();
+                if !trimmed.is_empty() {
+                    next_manual_equation_text = Some(trimmed.to_string());
+                }
             }
             if let Some(next) = j.recommendations.next_ga_heuristic.as_ref() {
                 if let Ok(parsed) = parse_fitness_heuristic(next) {
@@ -3644,7 +3794,7 @@ fn run_factory(
             None => return Ok(None),
         };
         let complexity = incumbent_model.eq_x.complexity() + incumbent_model.eq_y.complexity() + incumbent_model.eq_z.complexity();
-        let feature_names = FeatureLibrary::default_physics().features;
+        let feature_names = feature_names_for_equation_text(&prior.best.candidate.equation_text);
         let (rmse, div) = rollout_metrics(
             &incumbent_model,
             &feature_names,
@@ -4037,7 +4187,7 @@ fn compute_benchmark_eval_v1(
 
     let model = vector_model_from_equation_text(&best.candidate.equation_text)
         .ok_or_else(|| anyhow::anyhow!("failed to parse best equation into a model"))?;
-    let feature_names = FeatureLibrary::default_physics().features;
+    let feature_names = feature_names_for_equation_text(&best.candidate.equation_text);
 
     let suite = benchmark_suite_v1(&best.regime, &bounds);
     let mut cases: Vec<BenchmarkCaseEval> = Vec::new();
@@ -5015,6 +5165,24 @@ fn basis_usage_from_equation_text(text: &str) -> BasisUsage {
     }
 }
 
+fn feature_names_for_equation_text(equation_text: &str) -> Vec<String> {
+    let default = FeatureLibrary::default_physics();
+    let default_set: std::collections::HashSet<&str> = default.features.iter().map(|s| s.as_str()).collect();
+    let [tx, ty, tz] = parse_vector_equation_terms(equation_text);
+    let mut uses_extended = false;
+    for (_, f) in tx.iter().chain(ty.iter()).chain(tz.iter()) {
+        if !default_set.contains(f.as_str()) {
+            uses_extended = true;
+            break;
+        }
+    }
+    if uses_extended {
+        FeatureLibrary::extended_physics().features
+    } else {
+        default.features
+    }
+}
+
 fn parse_vector_equation_terms(equation_text: &str) -> [Vec<(f64, String)>; 3] {
     let mut x_terms: Vec<(f64, String)> = Vec::new();
     let mut y_terms: Vec<(f64, String)> = Vec::new();
@@ -5895,9 +6063,11 @@ mod tests {
             next_ga_heuristic: None,
             next_discovery_solver: None,
             next_normalize: None,
+            next_feature_library: None,
             next_stls_threshold: None,
             next_ridge_lambda: None,
             next_lasso_alpha: None,
+            next_manual_equation_text: None,
             next_search_directions: vec![],
             notes: String::new(),
         };
@@ -6685,9 +6855,11 @@ mod tests {
             next_ga_heuristic: None,
             next_discovery_solver: Some("stls".to_string()),
             next_normalize: Some(false),
+            next_feature_library: None,
             next_stls_threshold: Some(0.2),
             next_ridge_lambda: Some(1e-6),
             next_lasso_alpha: None,
+            next_manual_equation_text: None,
             next_search_directions: vec![],
             notes: String::new(),
         };

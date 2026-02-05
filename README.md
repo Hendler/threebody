@@ -81,11 +81,11 @@ Outputs:
 - Intended for “truth-grade” runs where accuracy is prioritized over speed. The default config uses adaptive RK45.
 
 **LLM Judge + Factory Loop (Optional)**
-- The LLM is a supplemental judge, not a generator. It scores candidates with a fixed rubric (fidelity, parsimony, physical plausibility, regime consistency, stability risk) and outputs JSON only.
+- The LLM is a supplemental judge and experiment steerer. It scores candidates with a fixed rubric (fidelity, parsimony, physical plausibility, regime consistency, stability risk) and outputs JSON only.
 - The LLM can propose initial conditions within strict bounds to drive the `factory` loop.
+- Optionally, the LLM can propose a concrete candidate equation in the project’s feature language and/or request switching to the extended feature library; these proposals are treated as hypotheses and are scored by the same numeric evaluators.
 - Prompts and responses are logged for reproducibility; numeric metrics (MSE, rollout RMSE, divergence time) remain the primary ranking.
 - The rollout evaluator supports `euler` and `leapfrog`; the LLM can recommend which to use next, along with the discovery configuration (solver: `stls`/`lasso`/`ga` and key hyperparameters).
-- The LLM does not directly generate equations or fit coefficients; it steers the loop (IC proposals, candidate ranking/interpretation, and next-step recommendations).
 - `--llm-mode auto` uses OpenAI when a key is available, and otherwise falls back to a local mock judge/explainer. If the OpenAI call fails once (offline / network blocked / auth), it switches to mock for the remainder of the run.
 - If `.openai_key` exists in the working directory, it is used for OpenAI mode and overrides `OPENAI_API_KEY`.
 - You can pass `--openai-key-file` to use a specific key file.
