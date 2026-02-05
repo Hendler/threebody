@@ -1,22 +1,28 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 
 example-config:
-  cargo run -p threebody-cli -- example-config --out config.json
+  mkdir -p results/manual
+  cargo run -p threebody-cli -- example-config --out results/manual/config.json
 
 example-ic:
-  cargo run -p threebody-cli -- example-ic --preset three-body --out ic.json
+  mkdir -p results/manual
+  cargo run -p threebody-cli -- example-ic --preset three-body --out results/manual/ic.json
 
 simulate:
-  cargo run -p threebody-cli -- simulate --config config.json --output traj.csv --steps 100 --dt 0.01
+  mkdir -p results/manual
+  cargo run -p threebody-cli -- simulate --config results/manual/config.json --output results/manual/traj.csv --steps 100 --dt 0.01
 
 simulate-ic:
-  cargo run -p threebody-cli -- simulate --config config.json --ic ic.json --output traj.csv --steps 100 --dt 0.01
+  mkdir -p results/manual
+  cargo run -p threebody-cli -- simulate --config results/manual/config.json --ic results/manual/ic.json --output results/manual/traj.csv --steps 100 --dt 0.01
 
 simulate-em:
-  cargo run -p threebody-cli -- simulate --config config.json --output traj_em.csv --steps 100 --dt 0.01 --em
+  mkdir -p results/manual
+  cargo run -p threebody-cli -- simulate --config results/manual/config.json --output results/manual/traj_em.csv --steps 100 --dt 0.01 --em
 
 discover:
-  cargo run -p threebody-cli -- discover --solver stls --out top_equations.json
+  mkdir -p results/manual
+  cargo run -p threebody-cli -- discover --solver stls --input results/manual/traj.csv --sidecar results/manual/traj.json --out results/manual/top_equations.json
 
 quickstart steps="200":
   #!/usr/bin/env bash

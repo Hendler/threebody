@@ -84,6 +84,7 @@ Outputs:
 - The LLM is a supplemental judge and experiment steerer. It scores candidates with a fixed rubric (fidelity, parsimony, physical plausibility, regime consistency, stability risk) and outputs JSON only.
 - The LLM can propose initial conditions within strict bounds to drive the `factory` loop.
 - Optionally, the LLM can propose a concrete candidate equation in the project’s feature language and/or request switching to the extended feature library; these proposals are treated as hypotheses and are scored by the same numeric evaluators.
+- The `factory` loop also runs a lightweight equation-GA: it carries forward the best equations across iterations and tries small, axis-consistent mutations (see `run_###/discovery.json` candidates with `source=equation_ga`).
 - Prompts and responses are logged for reproducibility; numeric metrics (MSE, rollout RMSE, divergence time) remain the primary ranking.
 - The rollout evaluator supports `euler` and `leapfrog`; the LLM can recommend which to use next, along with the discovery configuration (solver: `stls`/`lasso`/`ga` and key hyperparameters).
 - `--llm-mode auto` uses OpenAI when a key is available, and otherwise falls back to a local mock judge/explainer. If the OpenAI call fails once (offline / network blocked / auth), it switches to mock for the remainder of the run.
@@ -108,6 +109,7 @@ just quickstart
 What it does:
 - Creates a timestamped run directory under `results/quickstart_*/`.
 - Runs **10** `factory` iterations with an LLM judge (`--llm-mode auto`) and writes evidence under `results/quickstart_*/factory/run_###/`.
+- Carries forward elite equations and tries small equation mutations between iterations (equation-GA), so each iteration learns from previous attempts.
 - Writes a single novice-friendly results file to `results/quickstart_*/RESULTS.md` (and `RESULTS.pdf` when `pdflatex` is available).
 - Updates the global “best so far” index at `results/best_results.md` (and `results/best_results.json`).
 
@@ -211,7 +213,7 @@ cargo run -p threebody-cli -- findings --results-dir results --out-tex results/f
   - `evaluation_input.json`: structured summary of the run (for reproducibility).
   - `evaluation_history.json`: best-vs-prior-best comparison over all previous local attempts under `results/`.
   - `evaluation_prompt.txt`: the exact prompt used to generate `evaluation_llm.md` (when LLM mode is enabled).
-  - `evaluation.tex`: reproducible LaTeX evaluation (exact equation text + ICs + metrics).
+  - `evaluation.tex`: reproducible LaTeX evaluation (best equation, top candidates per iteration, LLM hypotheses, ICs, and gains vs prior attempts).
   - `evaluation.pdf`: built when `pdflatex` is available (best-effort).
   - `evaluation_pdf_error.txt`: present only if `pdflatex` is available but fails.
   - `evaluation_error.txt`: only present if the LLM call failed and a fallback was used.

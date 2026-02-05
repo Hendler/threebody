@@ -187,6 +187,8 @@ and in the current Rust implementation we estimate $\xi$ on a fixed library via 
 \item A lightweight genetic algorithm (GA) over sparse coefficient vectors remains available as an optional baseline; it is slower and non-deterministic but provides an alternative search dynamic.
 \end{itemize}
 
+In addition to per-component coefficient estimation, the CLI’s \texttt{factory} loop maintains a small \emph{population} of full vector equations across iterations: it carries forward the incumbent best and a few recent elites, injects a handful of axis-consistent mutations (an equation-level GA), and re-scores them under new initial conditions. This makes candidate equations the primary object of iteration while keeping numeric rollout metrics as the selection criterion.
+
 Related work: Sparse regression (SINDy/STLS)\cite{Brunton2016} and LASSO-style solvers\cite{Tibshirani1996} are natural coefficient estimators for fixed libraries and are implemented in the Rust codebase; the data contract (header-based CSV plus sidecar metadata) supports reproducible regression and search-based baselines.
 
 \subsection{What counts as ``predicts well''}
