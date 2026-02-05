@@ -5063,6 +5063,9 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
     );
     tex.push_str("Buckets are grouped by (steps, dt) to avoid apples-to-oranges comparisons.\\\\\n\n");
     tex.push_str("Safety: runs are skipped if the oracle simulation terminated early or did not reach the requested horizon.\\\\\n\n");
+    tex.push_str(
+        "For each bucket, we also embed small excerpts from the run’s evaluation logs (executive summary + optional LLM narrative) to aid interpretation without chasing files.\\\\\n\n",
+    );
 
     tex.push_str("\\section*{Plain-language context: state of the art}\n");
     tex.push_str("The modern (``state of the art'') way to discover equations from data usually looks like this:\\\\\n");
@@ -5220,6 +5223,34 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
         } else {
             tex.push_str("N/A.\\\\\n\n");
         }
+
+        tex.push_str("\\paragraph{Run Logs (Embedded Excerpts)}\n");
+        let factory_dir = PathBuf::from(&rec.factory_dir);
+        let best_iter_dir = factory_dir.join(&rec.run_id);
+        append_log_excerpt_tex(
+            &mut tex,
+            "evaluation.md (deterministic executive summary)",
+            &factory_dir.join("evaluation.md"),
+            8000,
+        );
+        append_log_excerpt_tex(
+            &mut tex,
+            "evaluation_llm.md (optional narrative; not used for numeric selection)",
+            &factory_dir.join("evaluation_llm.md"),
+            8000,
+        );
+        append_log_excerpt_tex(
+            &mut tex,
+            "evaluation_error.txt (present only if LLM evaluation failed and fallback was used)",
+            &factory_dir.join("evaluation_error.txt"),
+            2000,
+        );
+        append_log_excerpt_tex(
+            &mut tex,
+            "run_###/report.md (per-iteration summary for the best run_id)",
+            &best_iter_dir.join("report.md"),
+            3000,
+        );
     }
 
     tex.push_str("\\section*{How to Reproduce}\n");
@@ -5240,6 +5271,113 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
 
     tex.push_str("\\end{document}\n");
     tex
+}
+
+fn append_log_excerpt_tex(tex: &mut String, label: &str, path: &std::path::Path, max_chars: usize) {
+    tex.push_str(&format!("\\subparagraph{{{}}}\\\\\n", escape_latex(label)));
+    tex.push_str(&format!(
+        "Source: \\texttt{{{}}}.\\\\\n",
+        escape_latex(&path.display().to_string())
+    ));
+    let raw = match fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(_) => {
+            tex.push_str("Missing.\\\\\n\n");
+            return;
+        }
+    };
+    let excerpt = safe_verbatim_excerpt(&raw, max_chars, 110);
+    tex.push_str("\\begin{verbatim}\n");
+    tex.push_str(&excerpt);
+    tex.push_str("\n\\end{verbatim}\n\n");
+}
+
+fn safe_verbatim_excerpt(input: &str, max_chars: usize, wrap_width: usize) -> String {
+    let truncated = truncate_to_chars(input, max_chars);
+    let sanitized = truncated
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace("\\end{verbatim}", "\\\\end{verbatim}")
+        .replace("\\begin{verbatim}", "\\\\begin{verbatim}");
+    let wrapped = wrap_long_lines(&sanitized, wrap_width);
+    ensure_verbatim_safe_lines(&wrapped)
+}
+
+fn wrap_long_lines(input: &str, width: usize) -> String {
+    if width == 0 {
+        return input.to_string();
+    }
+    let mut out = String::new();
+    for (li, line) in input.lines().enumerate() {
+        if li > 0 {
+            out.push('\n');
+        }
+        out.push_str(&wrap_one_line(line, width));
+    }
+    out
+}
+
+fn ensure_verbatim_safe_lines(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for (li, line) in input.lines().enumerate() {
+        if li > 0 {
+            out.push('\n');
+        }
+        let trimmed = line.trim_start_matches(|c: char| c.is_whitespace());
+        if trimmed.starts_with("\\end{verbatim}") || trimmed.starts_with("\\begin{verbatim}") {
+            let prefix_len = line.len() - trimmed.len();
+            let (prefix, rest) = line.split_at(prefix_len);
+            out.push_str(prefix);
+            out.push('\\');
+            out.push_str(rest);
+        } else {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+fn wrap_one_line(mut line: &str, width: usize) -> String {
+    if width == 0 {
+        return line.to_string();
+    }
+    let mut out = String::new();
+    loop {
+        let len = line.chars().count();
+        if len <= width {
+            out.push_str(line);
+            break;
+        }
+
+        let mut break_byte: Option<usize> = None;
+        for (ci, (byte, ch)) in line.char_indices().enumerate() {
+            if ci >= width {
+                break;
+            }
+            if ch.is_whitespace() {
+                break_byte = Some(byte);
+            }
+        }
+
+        let (head, tail) = match break_byte {
+            Some(b) if b > 0 => (&line[..b], line[b..].trim_start_matches(|c: char| c.is_whitespace())),
+            _ => {
+                let b = line
+                    .char_indices()
+                    .nth(width)
+                    .map(|(i, _)| i)
+                    .unwrap_or(line.len());
+                (&line[..b], &line[b..])
+            }
+        };
+        out.push_str(head);
+        out.push('\n');
+        line = tail;
+        if line.is_empty() {
+            break;
+        }
+    }
+    out
 }
 
 fn write_best_results(results_root: &std::path::Path, index: &BestResultsIndexV1) -> anyhow::Result<()> {
@@ -6010,6 +6148,32 @@ fn render_evaluation_tex(
                 ));
             }
 
+            if !j.summary.trim().is_empty() {
+                let summary = truncate_to_chars(&single_line(&j.summary), 600);
+                tex.push_str(&format!(
+                    "\\noindent\\textbf{{LLM summary}}: \\texttt{{{}}}.\\\\\n\n",
+                    escape_latex(&summary)
+                ));
+            }
+
+            if !j.recommendations.next_search_directions.is_empty() {
+                tex.push_str("\\noindent\\textbf{LLM suggested next experiments:}\\\\\n");
+                tex.push_str("\\begin{itemize}\n");
+                for d in &j.recommendations.next_search_directions {
+                    let d = truncate_to_chars(&single_line(d), 400);
+                    tex.push_str(&format!("  \\item \\texttt{{{}}}\n", escape_latex(&d)));
+                }
+                tex.push_str("\\end{itemize}\n\n");
+            }
+
+            if !j.recommendations.notes.trim().is_empty() {
+                let notes = truncate_to_chars(&single_line(&j.recommendations.notes), 600);
+                tex.push_str(&format!(
+                    "\\noindent\\textbf{{LLM notes}}: \\texttt{{{}}}.\\\\\n\n",
+                    escape_latex(&notes)
+                ));
+            }
+
             if let Some(eq) = j.recommendations.next_manual_equation_text.as_ref() {
                 let trimmed = eq.trim();
                 if !trimmed.is_empty() {
@@ -6726,6 +6890,19 @@ mod tests {
     }
 
     #[test]
+    fn safe_verbatim_excerpt_does_not_emit_verbatim_terminator_lines() {
+        let input = "\\end{verbatim}\n\\begin{verbatim}\nnormal";
+        let out = safe_verbatim_excerpt(input, 10_000, 1);
+        for line in out.lines() {
+            let trimmed = line.trim_start_matches(|c: char| c.is_whitespace());
+            assert!(
+                !trimmed.starts_with("\\end{verbatim}") && !trimmed.starts_with("\\begin{verbatim}"),
+                "unsafe verbatim terminator emitted: {trimmed:?}"
+            );
+        }
+    }
+
+    #[test]
     fn render_evaluation_tex_includes_required_sections() {
         let eval_input = FactoryEvaluationInput {
             version: FACTORY_EVALUATION_VERSION.to_string(),
@@ -6793,6 +6970,67 @@ mod tests {
             assert!(tex.contains(needle), "missing {needle}");
         }
         assert!(tex.contains("ax=+1*grav_x"));
+    }
+
+    #[test]
+    fn render_evaluation_tex_includes_llm_summary_and_search_directions() {
+        let judge = FactoryEvaluationIterationJudge {
+            summary: "judge_summary_marker".to_string(),
+            ranking: vec![0],
+            recommendations: JudgeRecommendationsLite {
+                next_rollout_integrator: None,
+                next_ga_heuristic: None,
+                next_discovery_solver: None,
+                next_normalize: None,
+                next_feature_library: None,
+                next_stls_threshold: None,
+                next_ridge_lambda: None,
+                next_lasso_alpha: None,
+                next_manual_equation_text: None,
+                next_search_directions: vec!["ablation: remove gate_close".to_string()],
+                notes: "judge_notes_marker".to_string(),
+            },
+        };
+
+        let eval_input = FactoryEvaluationInput {
+            version: FACTORY_EVALUATION_VERSION.to_string(),
+            notes: vec!["steps=5".to_string()],
+            iterations: vec![FactoryEvaluationIteration {
+                iteration: 1,
+                run_id: "run_001".to_string(),
+                regime: "gravity_only".to_string(),
+                solver: DiscoverySolverSummary {
+                    name: "stls".to_string(),
+                    normalize: true,
+                    fitness_heuristic: "mse".to_string(),
+                    stls: None,
+                    lasso: None,
+                    ga: None,
+                },
+                simulation: None,
+                top_candidates: vec![FactoryEvaluationCandidate {
+                    id: 0,
+                    equation_text: "ax=+1*grav_x".to_string(),
+                    metrics: CandidateMetrics {
+                        mse: 1.0,
+                        complexity: 1,
+                        rollout_rmse: Some(0.1),
+                        divergence_time: None,
+                        stability_flags: vec![],
+                    },
+                }],
+                judge: Some(judge),
+            }],
+        };
+
+        let best = best_candidate_from_eval_input(&eval_input).unwrap();
+        let tex = render_evaluation_tex(&eval_input, Some(&best), None, None);
+        assert!(tex.contains("LLM summary"));
+        assert!(tex.contains(&escape_latex("judge_summary_marker")));
+        assert!(tex.contains("LLM suggested next experiments"));
+        assert!(tex.contains(&escape_latex("ablation: remove gate_close")));
+        assert!(tex.contains("LLM notes"));
+        assert!(tex.contains(&escape_latex("judge_notes_marker")));
     }
 
     #[test]
@@ -7213,7 +7451,54 @@ mod tests {
         let tex = render_findings_tex(&index, &[]);
         assert!(tex.contains("\\section*{Executive Summary}"));
         assert!(tex.contains("\\section*{Best Results by Bucket}"));
+        assert!(tex.contains("Run Logs (Embedded Excerpts)"));
         assert!(tex.contains("ax=+1.000000*grav_x"));
+    }
+
+    #[test]
+    fn render_findings_tex_embeds_log_excerpt_when_present() {
+        let root = unique_temp_path("findings_logs", "dir");
+        if root.exists() {
+            let _ = fs::remove_dir_all(&root);
+        }
+        let factory_dir = root.join("factory");
+        let best_run_dir = factory_dir.join("run_001");
+        fs::create_dir_all(&best_run_dir).unwrap();
+        fs::write(factory_dir.join("evaluation.md"), "EVAL_LOG_MARKER: hello\n").unwrap();
+        fs::write(best_run_dir.join("report.md"), "REPORT_LOG_MARKER: world\n").unwrap();
+
+        let index = BestResultsIndexV1 {
+            version: "v1".to_string(),
+            updated_at_utc: "unix_seconds=0".to_string(),
+            buckets: vec![BestRecord {
+                bucket: BucketKey { steps: 200, dt: 0.01 },
+                run_dir: root.to_string_lossy().to_string(),
+                factory_dir: factory_dir.to_string_lossy().to_string(),
+                eval_input_path: factory_dir
+                    .join("evaluation_input.json")
+                    .to_string_lossy()
+                    .to_string(),
+                run_id: "run_001".to_string(),
+                regime: "gravity_only".to_string(),
+                equation_text: "ax=+1.000000*grav_x ; ay=0 ; az=0".to_string(),
+                metrics: CandidateMetrics {
+                    mse: 1.0,
+                    complexity: 1,
+                    rollout_rmse: Some(0.1),
+                    divergence_time: None,
+                    stability_flags: vec![],
+                },
+                ic: None,
+                benchmark: None,
+            }],
+            notes: vec![],
+        };
+
+        let tex = render_findings_tex(&index, &[]);
+        assert!(tex.contains("EVAL_LOG_MARKER: hello"));
+        assert!(tex.contains("REPORT_LOG_MARKER: world"));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
