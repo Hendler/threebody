@@ -973,7 +973,7 @@ fn run_bench_em(
         let mut csv_file = fs::File::create(&traj_path)?;
         write_csv(&mut csv_file, &result.steps, &oracle_cfg)?;
         let header = threebody_core::output::csv::csv_header(&oracle_cfg);
-        let sidecar = build_sidecar(&oracle_cfg, &header, &result);
+        let sidecar = build_sidecar(&oracle_cfg, &header, &result, Some(steps), Some(dt));
         let mut sidecar_file = fs::File::create(run_dir.join("traj.json"))?;
         write_sidecar(&mut sidecar_file, &sidecar)?;
 
@@ -1045,7 +1045,13 @@ fn run_bench_em(
             lasso_candidates.clone()
         };
 
-        let sim_summary = build_sim_summary(&result, &oracle_cfg, rollout_integrator);
+        let sim_summary = build_sim_summary(
+            &result,
+            &oracle_cfg,
+            rollout_integrator,
+            Some(steps),
+            Some(dt),
+        );
 
         let mut best_equation_text = String::new();
         let mut best_metrics = CandidateMetrics {
@@ -1530,7 +1536,7 @@ fn run_simulation(
     write_csv(&mut csv_file, &result.steps, &cfg)?;
 
     let header = threebody_core::output::csv::csv_header(&cfg);
-    let sidecar = build_sidecar(&cfg, &header, &result);
+    let sidecar = build_sidecar(&cfg, &header, &result, Some(steps), Some(dt));
     let sidecar_path = output.with_extension("json");
     let mut sidecar_file = fs::File::create(sidecar_path)?;
     write_sidecar(&mut sidecar_file, &sidecar)?;
@@ -1702,11 +1708,14 @@ fn run_discovery(
     let steps = load_steps_from_csv(&input, bodies, &sim_cfg)?;
     let result = threebody_core::sim::SimResult {
         steps,
-        encounter: None,
-        encounter_action: None,
+        encounter: sidecar.encounter.map(|e| threebody_core::sim::EncounterEvent {
+            step: e.step,
+            min_pair_dist: e.min_pair_dist,
+        }),
+        encounter_action: sidecar.encounter_action,
         warnings: sidecar.warnings.clone(),
-        terminated_early: false,
-        termination_reason: None,
+        terminated_early: sidecar.terminated_early,
+        termination_reason: sidecar.termination_reason.clone(),
         stats: sidecar.sim_stats,
     };
 
@@ -1769,7 +1778,13 @@ fn run_discovery(
         &dataset_z,
     );
 
-    let simulation = build_sim_summary(&result, &sim_cfg, rollout_integrator);
+    let simulation = build_sim_summary(
+        &result,
+        &sim_cfg,
+        rollout_integrator,
+        sidecar.requested_steps,
+        sidecar.requested_dt,
+    );
     let dataset_summary = build_dataset_summary(
         &vector_data.feature_names,
         &library,
@@ -2546,6 +2561,8 @@ fn build_sim_summary(
     result: &threebody_core::sim::SimResult,
     cfg: &Config,
     rollout_integrator: RolloutIntegrator,
+    requested_steps: Option<usize>,
+    requested_dt: Option<f64>,
 ) -> SimulationSummary {
     fn mean_abs_accel(
         result: &threebody_core::sim::SimResult,
@@ -2620,6 +2637,13 @@ fn build_sim_summary(
 
     SimulationSummary {
         steps: result.steps.len(),
+        requested_steps,
+        requested_dt,
+        terminated_early: result.terminated_early,
+        termination_reason: result.termination_reason.clone(),
+        encounter_step: result.encounter.map(|e| e.step),
+        encounter_min_pair_dist: result.encounter.map(|e| e.min_pair_dist),
+        encounter_action: result.encounter_action.map(|a| format!("{a:?}")),
         energy_start,
         energy_end,
         energy_drift,
@@ -2924,7 +2948,10 @@ fn run_factory(
         let run_dir = out_dir.join(&run_id);
         fs::create_dir_all(&run_dir)?;
 
-        let cfg = build_config(config.clone(), &mode, None, em, no_em, no_gravity)?;
+        let mut cfg = build_config(config.clone(), &mode, None, em, no_em, no_gravity)?;
+        if matches!(cfg.integrator.kind, IntegratorKind::Rk45) && cfg.integrator.adaptive {
+            cfg.integrator.max_rejects = cfg.integrator.max_rejects.max(64);
+        }
         let regime = if cfg.enable_em { "em_quasistatic" } else { "gravity_only" };
         let ic_bounds = default_ic_bounds();
         let mut ic_notes = vec!["avoid close encounters".to_string(), "prefer bounded motion".to_string()];
@@ -2932,73 +2959,194 @@ fn run_factory(
             ic_notes.extend(incumbent_prompt_notes(rec));
         }
 
-        let mut ic_prompt = None;
-        let mut ic_response = None;
-        let max_ic_attempts = if require_llm { 3 } else { 1 };
-        let mut ic_request: IcRequest;
-        let mut ic_spec: InitialConditionSpec;
-        let system: System;
-        let mut last_err: Option<String> = None;
-        let mut ic_attempt: usize = 0;
-
-        'ic_loop: loop {
-            ic_attempt += 1;
-            let mut attempt_notes = ic_notes.clone();
-            if let Some(err) = last_err.as_ref() {
-                attempt_notes.push(format!("previous_ic_validation_error={}", single_line(err)));
-            }
-            ic_request = IcRequest {
-                bounds: ic_bounds.clone(),
-                regime: regime.to_string(),
-                notes: attempt_notes,
-                seed: Some(seed + iter as u64 + (ic_attempt as u64).saturating_sub(1)),
-            };
-
-            let candidate = if let Some(spec) = next_ic.take() {
-                spec
-            } else if let Some(client) = llm_client.as_ref() {
-                match client.propose_initial_conditions(&ic_request) {
-                    Ok(result) => {
-                        ic_prompt = Some(result.prompt);
-                        ic_response = Some(result.response);
-                        result.value
-                    }
-                    Err(err) => {
-                        if require_llm {
-                            return Err(anyhow::anyhow!("LLM IC proposal failed: {err}"));
-                        }
-                        eprintln!("LLM IC proposal failed: {}", err);
-                        initial_conditions_from_preset(&preset)?
-                    }
-                }
-            } else if require_llm {
-                anyhow::bail!("LLM required but no client is configured");
-            } else {
-                initial_conditions_from_preset(&preset)?
-            };
-            ic_spec = candidate;
-
-            match system_from_ic(&ic_spec, &ic_bounds) {
-                Ok(sys) => {
-                    system = sys;
-                    break 'ic_loop;
-                }
-                Err(err) => {
-                    if !require_llm {
-                        eprintln!("IC validation failed ({err}); falling back to preset.");
-                        ic_spec = initial_conditions_from_preset(&preset)?;
-                        system = preset_system(&preset)?;
-                        break 'ic_loop;
-                    }
-                    last_err = Some(err.to_string());
-                    if ic_attempt >= max_ic_attempts {
-                        anyhow::bail!("IC validation failed after {max_ic_attempts} attempts: {err}");
-                    }
-                    eprintln!("IC validation failed ({err}); retrying with LLM.");
-                    continue 'ic_loop;
-                }
-            }
+        #[derive(serde::Serialize)]
+        struct SimAttemptLog {
+            attempt: usize,
+            ic_request: IcRequest,
+            initial_conditions: InitialConditionSpec,
+            produced_steps: usize,
+            terminated_early: bool,
+            termination_reason: Option<String>,
+            encounter_step: Option<usize>,
+            encounter_min_pair_dist: Option<f64>,
+            encounter_action: Option<String>,
+            min_pair_dist: Option<f64>,
+            max_accel: Option<f64>,
         }
+
+        fn sim_min_pair_dist(result: &threebody_core::sim::SimResult) -> Option<f64> {
+            let mut min_pair: Option<f64> = None;
+            for step in &result.steps {
+                min_pair = Some(match min_pair {
+                    Some(v) => v.min(step.regime.min_pair_dist),
+                    None => step.regime.min_pair_dist,
+                });
+            }
+            min_pair
+        }
+
+        fn sim_max_accel(result: &threebody_core::sim::SimResult) -> Option<f64> {
+            let mut max_accel: Option<f64> = None;
+            for step in &result.steps {
+                max_accel = Some(match max_accel {
+                    Some(v) => v.max(step.regime.max_accel),
+                    None => step.regime.max_accel,
+                });
+            }
+            max_accel
+        }
+
+        fn sim_is_usable(result: &threebody_core::sim::SimResult, requested_steps: usize) -> bool {
+            !result.terminated_early && result.steps.len() == requested_steps + 1
+        }
+
+        fn pick_initial_conditions(
+            llm_client: Option<&Box<dyn LlmClient>>,
+            require_llm: bool,
+            preset: &str,
+            regime: &str,
+            ic_bounds: &IcBounds,
+            base_notes: &[String],
+            seed: u64,
+            next_ic: &mut Option<InitialConditionSpec>,
+        ) -> anyhow::Result<(IcRequest, InitialConditionSpec, System, Option<String>, Option<String>)> {
+            let max_ic_attempts = if require_llm { 3 } else { 1 };
+            let mut ic_prompt = None;
+            let mut ic_response = None;
+            let mut last_err: Option<String> = None;
+
+            for ic_attempt in 0..max_ic_attempts {
+                let mut attempt_notes = base_notes.to_vec();
+                if let Some(err) = last_err.as_ref() {
+                    attempt_notes.push(format!("previous_ic_validation_error={}", single_line(err)));
+                }
+                let ic_request = IcRequest {
+                    bounds: ic_bounds.clone(),
+                    regime: regime.to_string(),
+                    notes: attempt_notes,
+                    seed: Some(seed + ic_attempt as u64),
+                };
+
+                let candidate = if let Some(spec) = next_ic.take() {
+                    spec
+                } else if let Some(client) = llm_client {
+                    match client.propose_initial_conditions(&ic_request) {
+                        Ok(result) => {
+                            ic_prompt = Some(result.prompt);
+                            ic_response = Some(result.response);
+                            result.value
+                        }
+                        Err(err) => {
+                            if require_llm {
+                                return Err(anyhow::anyhow!("LLM IC proposal failed: {err}"));
+                            }
+                            eprintln!("LLM IC proposal failed: {}", err);
+                            initial_conditions_from_preset(preset)?
+                        }
+                    }
+                } else if require_llm {
+                    anyhow::bail!("LLM required but no client is configured");
+                } else {
+                    initial_conditions_from_preset(preset)?
+                };
+
+                match system_from_ic(&candidate, ic_bounds) {
+                    Ok(system) => return Ok((ic_request, candidate, system, ic_prompt, ic_response)),
+                    Err(err) => {
+                        if !require_llm {
+                            eprintln!("IC validation failed ({err}); falling back to preset.");
+                            let spec = initial_conditions_from_preset(preset)?;
+                            let system = preset_system(preset)?;
+                            let ic_request = IcRequest {
+                                bounds: ic_bounds.clone(),
+                                regime: regime.to_string(),
+                                notes: base_notes.to_vec(),
+                                seed: Some(seed),
+                            };
+                            return Ok((ic_request, spec, system, ic_prompt, ic_response));
+                        }
+                        last_err = Some(err.to_string());
+                        eprintln!("IC validation failed ({err}); retrying with LLM.");
+                        continue;
+                    }
+                }
+            }
+            let err = last_err.unwrap_or_else(|| "unknown ic validation error".to_string());
+            anyhow::bail!("IC validation failed after {max_ic_attempts} attempts: {err}");
+        }
+
+        let llm_client_ref = llm_client.as_ref();
+        let mut sim_attempt_logs: Vec<SimAttemptLog> = Vec::new();
+        let mut sim_failure_note: Option<String> = None;
+        let mut ic_prompt: Option<String> = None;
+        let mut ic_response: Option<String> = None;
+        let max_sim_attempts: usize = 3;
+
+        let mut final_ic_request: Option<IcRequest> = None;
+        let mut final_ic_spec: Option<InitialConditionSpec> = None;
+        let mut final_result: Option<threebody_core::sim::SimResult> = None;
+
+        for sim_attempt in 1..=max_sim_attempts {
+            let mut attempt_notes = ic_notes.clone();
+            if let Some(note) = sim_failure_note.as_ref() {
+                attempt_notes.push(note.clone());
+            }
+            let attempt_seed = seed + iter as u64 + (sim_attempt as u64 - 1) * 1000;
+            let (ic_request, ic_spec, system, attempt_prompt, attempt_response) = pick_initial_conditions(
+                llm_client_ref,
+                require_llm,
+                &preset,
+                regime,
+                &ic_bounds,
+                &attempt_notes,
+                attempt_seed,
+                &mut next_ic,
+            )?;
+            ic_prompt = attempt_prompt.or(ic_prompt);
+            ic_response = attempt_response.or(ic_response);
+
+            let options = SimOptions { steps, dt };
+            let result = simulate_with_cfg(system, &cfg, options);
+            let produced_steps = result.steps.len();
+            let usable = sim_is_usable(&result, steps);
+
+            sim_attempt_logs.push(SimAttemptLog {
+                attempt: sim_attempt,
+                ic_request: ic_request.clone(),
+                initial_conditions: ic_spec.clone(),
+                produced_steps,
+                terminated_early: result.terminated_early,
+                termination_reason: result.termination_reason.clone(),
+                encounter_step: result.encounter.map(|e| e.step),
+                encounter_min_pair_dist: result.encounter.map(|e| e.min_pair_dist),
+                encounter_action: result.encounter_action.map(|a| format!("{a:?}")),
+                min_pair_dist: sim_min_pair_dist(&result),
+                max_accel: sim_max_accel(&result),
+            });
+
+            if usable || sim_attempt == max_sim_attempts {
+                final_ic_request = Some(ic_request);
+                final_ic_spec = Some(ic_spec);
+                final_result = Some(result);
+                break;
+            }
+
+            sim_failure_note = Some(format!(
+                "previous_sim_failure: produced_steps={}, terminated_early={}, termination_reason={}",
+                produced_steps,
+                result.terminated_early,
+                result.termination_reason.clone().unwrap_or_else(|| "n/a".to_string())
+            ));
+        }
+
+        let ic_request = final_ic_request.ok_or_else(|| anyhow::anyhow!("missing ic_request"))?;
+        let ic_spec = final_ic_spec.ok_or_else(|| anyhow::anyhow!("missing ic_spec"))?;
+        let result = final_result.ok_or_else(|| anyhow::anyhow!("missing simulation result"))?;
+
+        fs::write(
+            run_dir.join("sim_attempts.json"),
+            serde_json::to_string_pretty(&sim_attempt_logs)?,
+        )?;
 
         let ic_request_path = run_dir.join("ic_request.json");
         fs::write(&ic_request_path, serde_json::to_string_pretty(&ic_request)?)?;
@@ -3007,14 +3155,11 @@ fn run_factory(
         let cfg_path = run_dir.join("config.json");
         fs::write(&cfg_path, serde_json::to_string_pretty(&cfg)?)?;
 
-        let options = SimOptions { steps, dt };
-        let result = simulate_with_cfg(system, &cfg, options);
-
         let traj_path = run_dir.join("traj.csv");
         let mut csv_file = fs::File::create(&traj_path)?;
         write_csv(&mut csv_file, &result.steps, &cfg)?;
         let header = threebody_core::output::csv::csv_header(&cfg);
-        let sidecar = build_sidecar(&cfg, &header, &result);
+        let sidecar = build_sidecar(&cfg, &header, &result, Some(steps), Some(dt));
         let sidecar_path = run_dir.join("traj.json");
         let mut sidecar_file = fs::File::create(&sidecar_path)?;
         write_sidecar(&mut sidecar_file, &sidecar)?;
@@ -3108,7 +3253,13 @@ fn run_factory(
             }
         }
 
-        let sim_summary = build_sim_summary(&result, &cfg, current_rollout);
+        let sim_summary = build_sim_summary(
+            &result,
+            &cfg,
+            current_rollout,
+            Some(steps),
+            Some(dt),
+        );
         let dataset_summary = build_dataset_summary(
             &vector_data.feature_names,
             &library,
@@ -3844,6 +3995,33 @@ fn best_record_from_eval_input_path(path: &std::path::Path) -> Option<BestRecord
     let input: FactoryEvaluationInput = serde_json::from_str(&raw).ok()?;
     let bucket = bucket_from_notes(&input.notes)?;
     let best = best_candidate_from_eval_input(&input)?;
+    let best_run_id = best.run_id.clone();
+
+    // Avoid apples-to-oranges comparisons: if the oracle simulation in the best run terminated
+    // early or did not reach the requested horizon, skip this attempt entirely. Otherwise a
+    // short/truncated rollout can look artificially "better" (lower error) and pollute the
+    // global best index.
+    if let Some(iter) = input.iterations.iter().find(|it| it.run_id == best_run_id) {
+        if let Some(sim) = iter.simulation.as_ref() {
+            if sim.terminated_early {
+                return None;
+            }
+            let expected_len = bucket.steps.checked_add(1)?;
+            if sim.steps != expected_len {
+                return None;
+            }
+            if let Some(req_steps) = sim.requested_steps {
+                if req_steps != bucket.steps {
+                    return None;
+                }
+            }
+            if let Some(req_dt) = sim.requested_dt {
+                if (req_dt - bucket.dt).abs() > 1e-12 {
+                    return None;
+                }
+            }
+        }
+    }
 
     let factory_dir = path.parent()?.to_path_buf();
     let run_dir = factory_dir
@@ -3908,6 +4086,8 @@ fn scan_best_results(results_root: &std::path::Path) -> anyhow::Result<BestResul
             "Selection rule: minimize (rollout_rmse, mse, complexity).".to_string(),
             "Buckets are grouped by (steps, dt).".to_string(),
             "Only */factory/evaluation_input.json files are considered.".to_string(),
+            "Runs are skipped if the oracle simulation terminated early or did not reach the requested horizon (steps+1)."
+                .to_string(),
         ],
     })
 }
@@ -3920,7 +4100,7 @@ fn format_metric_opt(v: Option<f64>) -> String {
     }
 }
 
-fn render_best_results_md(index: &BestResultsIndexV1) -> String {
+fn render_best_results_md(index: &BestResultsIndexV1, progress: &[BucketProgress]) -> String {
     let mut md = String::new();
     md.push_str("# Best Results (auto-updated)\n\n");
     md.push_str(&format!("Last updated: `{}`\n\n", index.updated_at_utc));
@@ -3929,6 +4109,7 @@ fn render_best_results_md(index: &BestResultsIndexV1) -> String {
     md.push_str("- This file is the single top-level place to see the best discovered equations so far.\n");
     md.push_str("- Comparator: minimize `rollout_rmse`, then `mse`, then `complexity`.\n");
     md.push_str("- Buckets: grouped by `(steps, dt)` to avoid apples-to-oranges comparisons.\n");
+    md.push_str("- Safety: runs are skipped if the oracle simulation terminated early or did not reach `steps+1` samples.\n");
     if index.buckets.is_empty() {
         md.push_str("\nNo runs found yet under `results/**/factory/evaluation_input.json`.\n");
         return md;
@@ -3986,6 +4167,38 @@ fn render_best_results_md(index: &BestResultsIndexV1) -> String {
         md.push_str("\n```\n\n");
         md.push_str(&format!("- Evidence: `{}/RESULTS.md`\n", rec.run_dir));
         md.push_str(&format!("- Raw: `{}`\n\n", rec.eval_input_path));
+    }
+
+    md.push_str("## Did we improve (over local history)?\n\n");
+    if progress.is_empty() {
+        md.push_str("- n/a (no comparable history found yet)\n\n");
+    } else {
+        md.push_str("- Per bucket, compares the first recorded attempt vs current best.\n");
+        md.push_str("- Note: if initial conditions differ between runs, this is suggestive, not definitive.\n\n");
+        for p in progress {
+            let first = p.first.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+            let best = p.best.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+            let improvement = if first.is_finite() && best.is_finite() && first > 0.0 {
+                let delta = first - best;
+                if delta.abs() <= 1e-12 {
+                    "no change".to_string()
+                } else {
+                    format!("{:+.6} ({:+.1}%)", delta, (delta / first) * 100.0)
+                }
+            } else {
+                "n/a".to_string()
+            };
+            md.push_str(&format!(
+                "- steps={}, dt={}: runs={}, first_rollout_rmse={}, best_rollout_rmse={}, improvement={}\n",
+                p.bucket.steps,
+                p.bucket.dt,
+                p.attempts,
+                format_metric_opt(p.first.metrics.rollout_rmse),
+                format_metric_opt(p.best.metrics.rollout_rmse),
+                improvement
+            ));
+        }
+        md.push('\n');
     }
 
     md.push_str("## Next Experiment (for humans and LLMs)\n\n");
@@ -4066,6 +4279,7 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
     tex.push_str("This report summarizes the best equation(s) discovered by local runs of the threebody system.\\\\\n");
     tex.push_str("Comparator: minimize rollout\\_rmse, then mse, then complexity (lower is better).\\\\\n");
     tex.push_str("Buckets are grouped by (steps, dt) to avoid apples-to-oranges comparisons.\\\\\n\n");
+    tex.push_str("Safety: runs are skipped if the oracle simulation terminated early or did not reach the requested horizon.\\\\\n\n");
 
     tex.push_str("\\section*{Plain-language context: state of the art}\n");
     tex.push_str("The modern (``state of the art'') way to discover equations from data usually looks like this:\\\\\n");
@@ -4223,8 +4437,9 @@ fn write_best_results(results_root: &std::path::Path, index: &BestResultsIndexV1
     fs::create_dir_all(results_root)?;
     let json_path = results_root.join("best_results.json");
     let md_path = results_root.join("best_results.md");
+    let progress = compute_bucket_progress(results_root, index).unwrap_or_default();
     fs::write(&json_path, serde_json::to_string_pretty(index)?)?;
-    fs::write(&md_path, render_best_results_md(index))?;
+    fs::write(&md_path, render_best_results_md(index, &progress))?;
     Ok(())
 }
 
@@ -4510,11 +4725,14 @@ fn load_oracle_run_from_dir(run_dir: &std::path::Path) -> anyhow::Result<OracleR
         cfg,
         result: threebody_core::sim::SimResult {
             steps,
-            encounter: None,
-            encounter_action: None,
+            encounter: sidecar.encounter.map(|e| threebody_core::sim::EncounterEvent {
+                step: e.step,
+                min_pair_dist: e.min_pair_dist,
+            }),
+            encounter_action: sidecar.encounter_action,
             warnings: sidecar.warnings,
-            terminated_early: false,
-            termination_reason: None,
+            terminated_early: sidecar.terminated_early,
+            termination_reason: sidecar.termination_reason,
             stats: sidecar.sim_stats,
         },
     })
@@ -4777,7 +4995,33 @@ fn render_executive_summary_md(
             if let Some(iter) = eval_input.iterations.iter().find(|it| it.run_id == best.run_id) {
                 if let Some(sim) = iter.simulation.as_ref() {
                     md.push_str("\n## Best-Run Physics Diagnostics\n");
-                    md.push_str(&format!("- steps={}\n", sim.steps));
+                    md.push_str(&format!("- produced_samples={}\n", sim.steps));
+                    if let Some(req) = sim.requested_steps {
+                        let expected = req.saturating_add(1);
+                        md.push_str(&format!("- requested_steps={} (expected_samples={})\n", req, expected));
+                    }
+                    if let Some(dt) = sim.requested_dt {
+                        md.push_str(&format!("- requested_dt={dt}\n"));
+                    }
+                    md.push_str(&format!("- terminated_early={}\n", sim.terminated_early));
+                    if let Some(reason) = sim.termination_reason.as_ref() {
+                        md.push_str(&format!("- termination_reason={}\n", reason));
+                    }
+                    if sim.encounter_step.is_some()
+                        || sim.encounter_min_pair_dist.is_some()
+                        || sim.encounter_action.is_some()
+                    {
+                        md.push_str("- encounter:\n");
+                        if let Some(step) = sim.encounter_step {
+                            md.push_str(&format!("  - step={step}\n"));
+                        }
+                        if let Some(d) = sim.encounter_min_pair_dist {
+                            md.push_str(&format!("  - min_pair_dist={d}\n"));
+                        }
+                        if let Some(action) = sim.encounter_action.as_ref() {
+                            md.push_str(&format!("  - action={action}\n"));
+                        }
+                    }
                     md.push_str(&format!("- min_pair_dist={}\n", format_opt_f64(sim.min_pair_dist)));
                     md.push_str(&format!("- energy_drift={}\n", format_opt_f64(sim.energy_drift)));
                     md.push_str(&format!(
@@ -5044,7 +5288,7 @@ mod tests {
         ];
         let system = System::new(bodies, State::new(pos, vel));
         let result = simulate_with_cfg(system, &cfg, SimOptions { steps: 2, dt: 0.01 });
-        let sim = build_sim_summary(&result, &cfg, RolloutIntegrator::Euler);
+        let sim = build_sim_summary(&result, &cfg, RolloutIntegrator::Euler, Some(5), Some(0.01));
 
         let grav = sim.mean_abs_accel_grav.expect("grav mean");
         let em = sim.mean_abs_accel_em.expect("em mean");
@@ -5394,6 +5638,69 @@ mod tests {
         }
     }
 
+    fn mk_eval_input_with_sim(
+        steps: usize,
+        dt: f64,
+        produced_steps: usize,
+        terminated_early: bool,
+        rollout_rmse: f64,
+        equation_text: &str,
+    ) -> FactoryEvaluationInput {
+        FactoryEvaluationInput {
+            version: FACTORY_EVALUATION_VERSION.to_string(),
+            notes: vec![format!("steps={steps}"), format!("dt={dt}")],
+            iterations: vec![FactoryEvaluationIteration {
+                iteration: 1,
+                run_id: "run_001".to_string(),
+                regime: "gravity_only".to_string(),
+                solver: DiscoverySolverSummary {
+                    name: "stls".to_string(),
+                    normalize: true,
+                    fitness_heuristic: "mse".to_string(),
+                    stls: None,
+                    lasso: None,
+                    ga: None,
+                },
+                simulation: Some(SimulationSummary {
+                    steps: produced_steps,
+                    requested_steps: Some(steps),
+                    requested_dt: Some(dt),
+                    terminated_early,
+                    termination_reason: None,
+                    encounter_step: None,
+                    encounter_min_pair_dist: None,
+                    encounter_action: None,
+                    energy_start: None,
+                    energy_end: None,
+                    energy_drift: None,
+                    min_pair_dist: None,
+                    max_speed: None,
+                    max_accel: None,
+                    mean_abs_accel_grav: None,
+                    mean_abs_accel_em: None,
+                    mean_abs_accel_ratio_em_over_grav: None,
+                    dt_min: None,
+                    dt_max: None,
+                    dt_avg: None,
+                    warnings: vec![],
+                    rollout_integrator: "euler".to_string(),
+                }),
+                top_candidates: vec![FactoryEvaluationCandidate {
+                    id: 0,
+                    equation_text: equation_text.to_string(),
+                    metrics: CandidateMetrics {
+                        mse: 1.0,
+                        complexity: 1,
+                        rollout_rmse: Some(rollout_rmse),
+                        divergence_time: None,
+                        stability_flags: vec![],
+                    },
+                }],
+                judge: None,
+            }],
+        }
+    }
+
     #[test]
     fn scan_best_results_ignores_non_factory_eval_inputs() {
         let root = unique_temp_path("best_results_root", "dir");
@@ -5457,6 +5764,68 @@ mod tests {
     }
 
     #[test]
+    fn scan_best_results_skips_terminated_or_short_horizon_oracles() {
+        let root = unique_temp_path("best_results_skip_bad_oracle", "dir");
+        if root.exists() {
+            let _ = fs::remove_dir_all(&root);
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let bad_term = root.join("bad_term").join("factory");
+        let bad_short = root.join("bad_short").join("factory");
+        let good = root.join("good").join("factory");
+        fs::create_dir_all(&bad_term).unwrap();
+        fs::create_dir_all(&bad_short).unwrap();
+        fs::create_dir_all(&good).unwrap();
+
+        // Best metrics but terminated early -> must be skipped.
+        fs::write(
+            bad_term.join("evaluation_input.json"),
+            serde_json::to_string_pretty(&mk_eval_input_with_sim(100, 0.01, 101, true, 0.01, "a=bad_term")).unwrap(),
+        )
+        .unwrap();
+
+        // Best metrics but short horizon (produced_steps != steps+1) -> must be skipped.
+        fs::write(
+            bad_short.join("evaluation_input.json"),
+            serde_json::to_string_pretty(&mk_eval_input_with_sim(100, 0.01, 50, false, 0.02, "a=bad_short")).unwrap(),
+        )
+        .unwrap();
+
+        // Worse metrics but valid oracle -> should be selected.
+        fs::write(
+            good.join("evaluation_input.json"),
+            serde_json::to_string_pretty(&mk_eval_input_with_sim(100, 0.01, 101, false, 0.2, "a=good")).unwrap(),
+        )
+        .unwrap();
+
+        let index = scan_best_results(&root).unwrap();
+        assert_eq!(index.buckets.len(), 1);
+        assert!(index.buckets[0].eval_input_path.contains("good"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn executive_summary_includes_termination_metadata_when_present() {
+        let mut eval_input = mk_eval_input_with_sim(100, 0.01, 50, true, 0.1, "ax=+1*grav_x ; ay=0 ; az=0");
+        if let Some(sim) = eval_input.iterations[0].simulation.as_mut() {
+            sim.termination_reason = Some("max_rejects_exceeded".to_string());
+            sim.encounter_step = Some(7);
+            sim.encounter_min_pair_dist = Some(0.05);
+            sim.encounter_action = Some("StopAndReport".to_string());
+        }
+        let best = best_candidate_from_eval_input(&eval_input);
+        let md = render_executive_summary_md(&eval_input, best.as_ref(), None, None, None);
+        assert!(md.contains("terminated_early=true"));
+        assert!(md.contains("termination_reason=max_rejects_exceeded"));
+        assert!(md.contains("requested_steps=100"));
+        assert!(md.contains("requested_dt=0.01"));
+        assert!(md.contains("encounter:"));
+        assert!(md.contains("step=7"));
+    }
+
+    #[test]
     fn render_best_results_md_includes_equation_and_metrics() {
         let index = BestResultsIndexV1 {
             version: "v1".to_string(),
@@ -5480,7 +5849,7 @@ mod tests {
             }],
             notes: vec![],
         };
-        let md = render_best_results_md(&index);
+        let md = render_best_results_md(&index, &[]);
         assert!(md.contains("Best Results"));
         assert!(md.contains("ax=+1*grav_x"));
         assert!(md.contains("rollout_rmse"));

@@ -84,6 +84,20 @@ pub struct FeatureDescription {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SimulationSummary {
     pub steps: usize,
+    #[serde(default)]
+    pub requested_steps: Option<usize>,
+    #[serde(default)]
+    pub requested_dt: Option<f64>,
+    #[serde(default)]
+    pub terminated_early: bool,
+    #[serde(default)]
+    pub termination_reason: Option<String>,
+    #[serde(default)]
+    pub encounter_step: Option<usize>,
+    #[serde(default)]
+    pub encounter_min_pair_dist: Option<f64>,
+    #[serde(default)]
+    pub encounter_action: Option<String>,
     pub energy_start: Option<f64>,
     pub energy_end: Option<f64>,
     pub energy_drift: Option<f64>,
@@ -441,8 +455,15 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     if let Some(sim) = &input.simulation {
         prompt.push_str("Simulation summary:\n");
         prompt.push_str(&format!(
-            "steps={}, energy_start={:?}, energy_end={:?}, energy_drift={:?}, min_pair_dist={:?}, max_speed={:?}, max_accel={:?}, mean_abs_accel_grav={:?}, mean_abs_accel_em={:?}, mean_abs_accel_ratio_em_over_grav={:?}, dt_min={:?}, dt_max={:?}, dt_avg={:?}\n",
+            "steps={}, requested_steps={:?}, requested_dt={:?}, terminated_early={}, termination_reason={:?}, encounter_step={:?}, encounter_min_pair_dist={:?}, encounter_action={:?}, energy_start={:?}, energy_end={:?}, energy_drift={:?}, min_pair_dist={:?}, max_speed={:?}, max_accel={:?}, mean_abs_accel_grav={:?}, mean_abs_accel_em={:?}, mean_abs_accel_ratio_em_over_grav={:?}, dt_min={:?}, dt_max={:?}, dt_avg={:?}\n",
             sim.steps,
+            sim.requested_steps,
+            sim.requested_dt,
+            sim.terminated_early,
+            sim.termination_reason,
+            sim.encounter_step,
+            sim.encounter_min_pair_dist,
+            sim.encounter_action,
             sim.energy_start,
             sim.energy_end,
             sim.energy_drift,
