@@ -13,6 +13,7 @@ pub mod integrators;
 pub mod sim;
 pub mod output;
 pub mod benchmarks;
+pub mod analysis;
 
 // Re-export common items via the prelude to keep imports DRY.
 pub use crate::prelude::*;

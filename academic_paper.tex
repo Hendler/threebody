@@ -205,7 +205,7 @@ Pointwise acceleration fit is not sufficient. We evaluate:
 \item Generalization to held-out initial conditions within the intended regime.
 \end{itemize}
 
-Editorial uncertainty: In chaotic regimes, long-horizon point prediction is not meaningful\cite{Lorenz1963}; evaluation should shift toward short-horizon deterministic accuracy, ensemble/statistical predictions, and qualitative invariants and manifold structure. We are not yet fully implementing those alternative evaluation regimes.
+Editorial uncertainty: In chaotic regimes, long-horizon point prediction is not meaningful\cite{Lorenz1963}; evaluation should shift toward short-horizon deterministic accuracy, ensemble/statistical predictions, and qualitative invariants and manifold structure. In the current implementation we partially address this with predictability tooling: (i) small ensembles of nearby initial conditions to measure conditioning and detect when the ensemble agrees on an emergent binary/outcome (\emph{``lock points''}), and (ii) event-driven extraction of close-encounter minima plus a lightweight sparse baseline that models energy and angular-momentum exchange across encounters. These tools aim to quantify \emph{when} predictions become well-conditioned, without claiming universal long-horizon microstate predictability.
 
 \subsection{LLM-assisted interpretation (optional)}
 We add an optional LLM judge layer to interpret candidate equations and propose next experiments. The LLM does \emph{not} override numeric ranking; it is a supplemental reviewer that produces a structured scorecard and narrative synthesis. Concretely, it decides (a) proposed initial conditions within bounds, (b) an interpretable ranking of candidates under a fixed rubric, and (c) next-step recommendations (rollout integrator, discovery solver/hyperparameters, and search directions), while the discovery engine performs coefficient estimation/search (STLS/LASSO or an optional GA baseline). The rubric is explicit and machine-readable, with component scores for (i) predictive fidelity, (ii) parsimony, (iii) physical plausibility, (iv) regime consistency, and (v) stability risk. Evidence passed to the judge includes equation forms plus numeric metrics (MSE, rollout RMSE, divergence time) and regime diagnostics.
@@ -220,13 +220,14 @@ The systems are controlled by CLI:
 \begin{itemize}
 \item \textbf{simulate}: produce truth trajectories and diagnostics.
 \item \textbf{discover}: fit sparse equations using a chosen library.
+\item \textbf{predictability}: ensemble runs, lock-point detection, close-encounter extraction, and a sparse encounter-map baseline (experimental).
 \item \textbf{factory}: an optional LLM-guided loop that selects initial conditions, runs simulation, performs discovery, and emits a judged report with suggested next runs.
 \item \textbf{quickstart}: a convenience wrapper that runs an end-to-end workflow and writes a novice-friendly summary plus evidence under a single directory.
 \item \textbf{bench-em}: deterministic EM identifiability suite (charge/velocity sweeps + diverse initial conditions) that writes a comparable report per case.
 \item \textbf{findings}: render an aggregated LaTeX report of best-discovered equations across local runs (from the best-results ledger).
 \item \textbf{predict} (planned): roll out discovered equations and compare to truth.
 \item \textbf{score} (planned): compute quantitative benchmarks.
-\item \textbf{render-gif} (implemented): render a simple GIF animation from a trajectory CSV (header-based parsing).
+\item \textbf{render-gif} (script): render a simple GIF animation from a trajectory CSV (header-based parsing).
 \end{itemize}
 
 \subsection{LLM-guided ``factory'' loop (optional)}

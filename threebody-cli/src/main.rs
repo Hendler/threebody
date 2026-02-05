@@ -30,6 +30,7 @@ use threebody_discover::{
 };
 
 mod eval;
+mod predictability;
 
 use eval::{format_vector_model, rollout_metrics, rollout_trace, VectorModel};
 
@@ -243,6 +244,11 @@ enum Commands {
         /// Do not attempt to build PDFs via pdflatex.
         #[arg(long)]
         no_pdf: bool,
+    },
+    /// Predictability-aware tools (ensemble runs, encounter extraction, and lock detection).
+    Predictability {
+        #[command(subcommand)]
+        command: predictability::PredictabilityCommand,
     },
     /// Run the LLM-assisted factory loop (ICs -> sim -> discovery -> judge).
     #[command(alias = "experiment")]
@@ -531,6 +537,9 @@ fn main() -> anyhow::Result<()> {
                 heldout,
                 !no_pdf,
             )?;
+        }
+        Commands::Predictability { command } => {
+            predictability::run(command)?;
         }
         Commands::Factory {
             out_dir,

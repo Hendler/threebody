@@ -27,6 +27,7 @@ The implementation plan is explicitly TDD-first and emphasizes reproducibility, 
 - Energy and momentum conservation are not guaranteed once magnetic terms are enabled; energy is treated as a mechanical proxy.
 - Close encounters are numerically stiff; softening is optional (and changes physics). For stability, the close-encounter policy can optionally ramp softening smoothly and/or substep fixed-step integrators near encounters (and records encounter metadata in the JSON sidecar).
 - Long-horizon prediction is not meaningful in chaotic regimes; evaluation should emphasize short-horizon accuracy and stability.
+- For chaotic scattering, we provide predictability tooling that measures *conditioning* (ensemble agreement / “lock points”) and extracts close-encounter events. This is not a claim of long-horizon microstate predictability.
 
 **Simulator (Oracle) Overview**
 State per body:
@@ -190,6 +191,20 @@ cargo run -p threebody-cli -- discover --solver stls --input "$out/traj.csv" --s
 
 # If your simulation output isn't named traj.csv/traj.json, pass explicit paths:
 # cargo run -p threebody-cli -- discover --input run.csv --sidecar run.json --out top_equations.json
+
+# Predictability: ensembles, “lock points”, and encounter maps (experimental)
+# 1) Run a small ensemble of nearby initial conditions (conditioning probe).
+cargo run -p threebody-cli -- predictability ensemble --ic "$out/ic.json" --out-dir "$out/ens" --n 16 --sigma-pos 1e-4 --sigma-vel 1e-4 --steps 400 --dt 0.01 --mode truth
+
+# 2) Detect when the ensemble agrees on the dominant binary pair (“lock point”).
+# Note: runs are aligned by *step index*; the output reports mean/min/max physical time across members per step.
+cargo run -p threebody-cli -- predictability detect --ensemble-dir "$out/ens" --out "$out/lock_points.jsonl" --summary-out "$out/predictability.json" --min-mode-frac 0.9 --window 20
+
+# 3) Extract close-encounter events from a single trajectory (local minima of min_pair_dist).
+cargo run -p threebody-cli -- predictability extract --input "$out/traj.csv" --out "$out/encounters.jsonl" --summary-out "$out/encounters_summary.json"
+
+# 4) Train a lightweight sparse encounter map baseline (predicts energy / angular-momentum exchange across encounters).
+cargo run -p threebody-cli -- predictability train-map --encounters "$out/encounters.jsonl" --out "$out/encounter_map.json"
 
 # Run the LLM-assisted factory loop (10 iterations) and generate an explainer at $out/factory/evaluation.md
 cargo run -p threebody-cli -- factory --out-dir "$out/factory" --max-iters 10 --auto --config "$out/config.json" --steps 200 --dt 0.01 --llm-mode mock
