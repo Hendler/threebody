@@ -25,7 +25,7 @@ The implementation plan is explicitly TDD-first and emphasizes reproducibility, 
 - Units are SI by default; `G`, `k_e`, and `mu_0` are configurable.
 - EM is quasi-static and nonrelativistic: no retardation, no radiation reaction, no self-fields.
 - Energy and momentum conservation are not guaranteed once magnetic terms are enabled; energy is treated as a mechanical proxy.
-- Close encounters are numerically stiff; softening is optional but changes physics.
+- Close encounters are numerically stiff; softening is optional (and changes physics). For stability, the close-encounter policy can optionally ramp softening smoothly and/or substep fixed-step integrators near encounters (and records encounter metadata in the JSON sidecar).
 - Long-horizon prediction is not meaningful in chaotic regimes; evaluation should emphasize short-horizon accuracy and stability.
 
 **Simulator (Oracle) Overview**
@@ -71,7 +71,10 @@ Outputs:
 
 **Discovery Engine (Predictor) Overview**
 - Learns sparse, interpretable models of acceleration from simulator output.
-- Uses structured feature libraries (relative positions, distances, cross products, etc.).
+- Uses structured feature libraries (relative positions, distances, cross products, etc.), with a small set of named options:
+  - `default`: grav/elec/mag bases (no physical constants).
+  - `extended`: adds a few extra scalings and simple distance gates.
+  - `em_fields`: learns Lorentz terms directly from simulator fields (features in acceleration units).
 - Fits sparse, interpretable equations on a fixed feature library using sparse regression (STLS or LASSO; STLS is the default). A simple GA baseline remains available.
 - Evaluates models by rollout accuracy (position RMSE), divergence time, stability, and generalization within a regime.
 
@@ -83,7 +86,7 @@ Outputs:
 **LLM Judge + Factory Loop (Optional)**
 - The LLM is a supplemental judge and experiment steerer. It scores candidates with a fixed rubric (fidelity, parsimony, physical plausibility, regime consistency, stability risk) and outputs JSON only.
 - The LLM can propose initial conditions within strict bounds to drive the `factory` loop.
-- Optionally, the LLM can propose a concrete candidate equation in the project’s feature language and/or request switching to the extended feature library; these proposals are treated as hypotheses and are scored by the same numeric evaluators.
+- Optionally, the LLM can propose a concrete candidate equation in the project’s feature language and/or request switching feature libraries (`default`, `extended`, `em_fields`); these proposals are treated as hypotheses and are scored by the same numeric evaluators.
 - The `factory` loop also runs a lightweight equation-GA: it carries forward the best equations across iterations and tries small, axis-consistent mutations (see `run_###/discovery.json` candidates with `source=equation_ga`).
 - Prompts and responses are logged for reproducibility; numeric metrics (MSE, rollout RMSE, divergence time) remain the primary ranking.
 - The LLM JSON parser is defensive: minor schema drift (wrong primitive types / wrapper objects) is repaired where possible; invalid steering recommendations are ignored (and logged) rather than crashing long runs.
@@ -179,6 +182,9 @@ cargo run -p threebody-cli -- simulate --config "$out/config.json" --ic "$out/ic
 # Run discovery (writes top 3 equations; default solver is STLS)
 cargo run -p threebody-cli -- discover --solver stls --input "$out/traj.csv" --sidecar "$out/traj.json" --out "$out/top_equations.json"
 
+# Optional: use the EM field-based Lorentz library (simpler coefficients in EM-heavy runs)
+# cargo run -p threebody-cli -- discover --solver stls --feature-library em_fields --input "$out/traj_em.csv" --sidecar "$out/traj_em.json" --out "$out/top_equations_em.json"
+
 # Try LASSO instead:
 # cargo run -p threebody-cli -- discover --solver lasso --input "$out/traj.csv" --sidecar "$out/traj.json" --out "$out/top_equations.json"
 
@@ -187,6 +193,9 @@ cargo run -p threebody-cli -- discover --solver stls --input "$out/traj.csv" --s
 
 # Run the LLM-assisted factory loop (10 iterations) and generate an explainer at $out/factory/evaluation.md
 cargo run -p threebody-cli -- factory --out-dir "$out/factory" --max-iters 10 --auto --config "$out/config.json" --steps 200 --dt 0.01 --llm-mode mock
+
+# Pin the feature library for the factory loop (default is auto):
+# cargo run -p threebody-cli -- factory --feature-library em_fields --out-dir "$out/factory" --max-iters 10 --auto --config "$out/config.json" --steps 200 --dt 0.01 --llm-mode mock
 
 # Open the high-school-friendly explainer
 cat "$out/factory/evaluation.md"
@@ -337,3 +346,25 @@ Chaos and predictability:
 
 **Where This Is Headed**
 The near-term goal is a reproducible, testable simulator whose outputs can be used to discover compact, regime-specific predictive laws. The long-term goal is an "atlas of models" that balances interpretability with predictive power across regimes.
+
+## Animation (GIF) in 20 steps
+1. Confirm Python is available: `python3 --version`.
+2. Confirm Rust is available: `cargo --version`.
+3. Pick an output directory: `out="results/anim_$(date +%Y%m%d_%H%M%S)"; mkdir -p "$out"`.
+4. Write a starter config: `cargo run -p threebody-cli -- example-config --out "$out/config.json"`.
+5. Write starter initial conditions: `cargo run -p threebody-cli -- example-ic --preset three-body --out "$out/ic.json"`.
+6. Run a simulation: `cargo run -p threebody-cli -- simulate --config "$out/config.json" --ic "$out/ic.json" --output "$out/traj.csv" --steps 600 --dt 0.01`.
+7. Confirm the CSV exists: `ls -lh "$out/traj.csv"`.
+8. (Optional) Create a virtualenv: `python3 -m venv .venv`.
+9. (Optional) Activate it: `source .venv/bin/activate`.
+10. Install Pillow: `python -m pip install pillow`.
+11. Sanity-check Pillow: `python -c "from PIL import Image; print('Pillow OK')"`.
+12. Render the GIF: `python3 scripts/render_gif.py --input "$out/traj.csv" --output "$out/threebody.gif"`.
+13. If you simulated many steps, subsample rows: add `--stride 2` (or larger).
+14. Add a visible motion trail: add `--trail 50`.
+15. Make it faster/slower: add `--fps 30` (or try 15).
+16. Increase resolution: add `--size 800`.
+17. Re-run the render command with your chosen knobs.
+18. Confirm the GIF exists: `ls -lh "$out/threebody.gif"`.
+19. Preview it (macOS): `open "$out/threebody.gif"` (Linux: `xdg-open "$out/threebody.gif"`).
+20. Shortcut: `just gif input="$out/traj.csv" output="$out/threebody.gif"`.

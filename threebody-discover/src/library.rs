@@ -23,6 +23,30 @@ impl FeatureLibrary {
         }
     }
 
+    /// A minimal EM library that learns Lorentz acceleration directly from physical fields.
+    ///
+    /// Features are in acceleration units (already include physical constants from the simulator):
+    /// - `lorentz_e_*` = (q_i/m_i) * E_i,*
+    /// - `lorentz_vxb_*` = (q_i/m_i) * (v_i × B_i),*
+    ///
+    /// Gravity is included via the existing `grav_*` basis (no G).
+    pub fn em_fields_lorentz() -> Self {
+        let mut features = vec![
+            "grav_x".to_string(),
+            "grav_y".to_string(),
+            "grav_z".to_string(),
+            "lorentz_e_x".to_string(),
+            "lorentz_e_y".to_string(),
+            "lorentz_e_z".to_string(),
+            "lorentz_vxb_x".to_string(),
+            "lorentz_vxb_y".to_string(),
+            "lorentz_vxb_z".to_string(),
+        ];
+        features.sort();
+        features.dedup();
+        Self { features }
+    }
+
     pub fn extended_physics() -> Self {
         let mut features = Self::default_physics().features;
 
@@ -63,6 +87,24 @@ impl FeatureLibrary {
         self.features
             .iter()
             .map(|name| {
+                if let Some(axis) = name.strip_prefix("lorentz_e_") {
+                    return FeatureDescription {
+                        name: name.clone(),
+                        description: format!(
+                            "Lorentz electric term {axis}-component: (q_i/m_i) E_i,{axis} (includes k_e and softening)"
+                        ),
+                        tags: vec!["em".to_string(), "fields".to_string(), "lorentz".to_string()],
+                    };
+                }
+                if let Some(axis) = name.strip_prefix("lorentz_vxb_") {
+                    return FeatureDescription {
+                        name: name.clone(),
+                        description: format!(
+                            "Lorentz magnetic term {axis}-component: (q_i/m_i) (v_i×B_i)_{axis} (includes μ0 and softening)"
+                        ),
+                        tags: vec!["em".to_string(), "fields".to_string(), "lorentz".to_string()],
+                    };
+                }
                 if let Some(axis) = name.strip_prefix("grav_r4_") {
                     return FeatureDescription {
                         name: name.clone(),
@@ -205,6 +247,24 @@ mod tests {
             "gate_far",
             "grav_close_x",
             "grav_far_x",
+        ] {
+            assert!(lib.features.iter().any(|name| name == f), "missing {f}");
+        }
+    }
+
+    #[test]
+    fn em_fields_library_includes_expected_features() {
+        let lib = FeatureLibrary::em_fields_lorentz();
+        for f in [
+            "grav_x",
+            "grav_y",
+            "grav_z",
+            "lorentz_e_x",
+            "lorentz_e_y",
+            "lorentz_e_z",
+            "lorentz_vxb_x",
+            "lorentz_vxb_y",
+            "lorentz_vxb_z",
         ] {
             assert!(lib.features.iter().any(|name| name == f), "missing {f}");
         }

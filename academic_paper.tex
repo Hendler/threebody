@@ -119,9 +119,9 @@ Near-collisions can cause:
 \item Large floating-point conditioning issues.
 \end{itemize}
 
-Current implementation supports optional softening $\epsilon$ in denominators to avoid singularities.
+Current implementation supports optional softening $\epsilon$ in denominators to avoid singularities. In addition, when a close-encounter policy triggers softening, we can (optionally) ramp $\epsilon$ smoothly as a function of the minimum pair distance (to avoid discontinuous force jumps), and we can deterministically substep fixed-step integrators near close approaches (to reduce stiffness without changing the global output cadence). Encounter events record the minimum pair distance, the action taken, and (when applicable) the softening change and substeps used as part of the sidecar metadata.
 
-Editorial uncertainty: Softening changes physics. A true ``truth-grade'' approach for close encounters would incorporate regularization (e.g., KS/chain regularization)\cite{KustaanheimoStiefel1965,MikkolaAarseth1993} and/or higher precision. This is a clear future-work item.
+Editorial uncertainty: These are pragmatic numerical stabilizers and still change the effective physics. A truly ``truth-grade'' approach for close encounters would incorporate regularization (e.g., KS/chain regularization)\cite{KustaanheimoStiefel1965,MikkolaAarseth1993} and/or higher precision. This remains a clear future-work item.
 
 \subsection{Output contract for downstream discovery}
 The simulator outputs a wide CSV including:
@@ -163,14 +163,20 @@ We build vector-valued basis functions (``terms'') from physically meaningful at
 
 We implement libraries of increasing expressivity:
 \begin{itemize}
-\item \textbf{structured\_basic} (current implementation): direction-preserving, component-wise bases that mirror the analytic force contributions \emph{without} physical constants:
+\item \textbf{default} (current implementation): direction-preserving, component-wise bases that mirror the analytic force contributions \emph{without} physical constants:
 \begin{itemize}
 \item Gravity basis: $g_i^\ast = \sum_{j \ne i} m_j (r_j - r_i) / \|r_j-r_i\|^3$.
 \item Electric basis: $e_i^\ast = (q_i/m_i)\sum_{j \ne i} q_j (r_i - r_j) / \|r_i-r_j\|^3$.
 \item Magnetic basis: $b_i^\ast = (q_i/m_i)\, v_i \times B_i^\ast$, where $B_i^\ast = (1/4\pi)\sum_{j \ne i} q_j (v_j \times (r_i-r_j))/\|r_i-r_j\|^3$.
 \end{itemize}
 Under our quasi-static model, this yields $a_i \approx G\,g_i^\ast + k_e\,e_i^\ast + \mu_0\,b_i^\ast$ (with softening applied consistently).
-\item \textbf{structured\_extended} (current implementation): adds a small number of carefully chosen atoms to expand expressivity while preserving interpretability, including (i) additional distance scalings (e.g., $1/r^4$ variants), and (ii) simple distance-based gating (``close'' vs.\ ``far'' features) to help isolate regime-specific structure without resorting to an unconstrained polynomial soup.
+\item \textbf{extended} (current implementation): adds a small number of carefully chosen atoms to expand expressivity while preserving interpretability, including (i) additional distance scalings (e.g., $1/r^4$ variants), and (ii) simple distance-based gating (``close'' vs.\ ``far'' features) to help isolate regime-specific structure without resorting to an unconstrained polynomial soup.
+\item \textbf{em\_fields} (current implementation): a minimal EM library that learns Lorentz acceleration directly from simulator fields. Features are in acceleration units (already include physical constants), so in EM-enabled runs we expect coefficients near $1$:
+\begin{itemize}
+\item Electric term: $\ell_{E,i} = (q_i/m_i) E_i$.
+\item Magnetic term: $\ell_{v\times B,i} = (q_i/m_i) (v_i \times B_i)$.
+\end{itemize}
+This supports a simple discovered form $a_i \approx G\,g_i^\ast + 1\cdot \ell_{E,i} + 1\cdot \ell_{v\times B,i}$ (with consistent softening).
 \end{itemize}
 
 Editorial note: The library design is where most ``new math'' leverage lives. If the library is too broad, discovery becomes unstable and non-interpretable; too narrow, it cannot capture dynamics. We currently err toward small, interpretable libraries.
@@ -204,7 +210,7 @@ Editorial uncertainty: In chaotic regimes, long-horizon point prediction is not 
 \subsection{LLM-assisted interpretation (optional)}
 We add an optional LLM judge layer to interpret candidate equations and propose next experiments. The LLM does \emph{not} override numeric ranking; it is a supplemental reviewer that produces a structured scorecard and narrative synthesis. Concretely, it decides (a) proposed initial conditions within bounds, (b) an interpretable ranking of candidates under a fixed rubric, and (c) next-step recommendations (rollout integrator, discovery solver/hyperparameters, and search directions), while the discovery engine performs coefficient estimation/search (STLS/LASSO or an optional GA baseline). The rubric is explicit and machine-readable, with component scores for (i) predictive fidelity, (ii) parsimony, (iii) physical plausibility, (iv) regime consistency, and (v) stability risk. Evidence passed to the judge includes equation forms plus numeric metrics (MSE, rollout RMSE, divergence time) and regime diagnostics.
 
-Optionally, the judge may also propose a concrete candidate equation written directly in the project’s feature language (a vector form for $a_{i,x}$, $a_{i,y}$, $a_{i,z}$ over the currently selected feature library) and/or recommend switching between a small default library and an extended library. These proposals are treated as hypotheses: they are parsed, validated, and scored by the same numeric evaluators before they are considered ``better''. We require JSON-only output to preserve determinism, and all prompts and responses are logged as reproducibility artifacts.
+Optionally, the judge may also propose a concrete candidate equation written directly in the project’s feature language (a vector form for $a_{i,x}$, $a_{i,y}$, $a_{i,z}$ over the currently selected feature library) and/or recommend switching between small feature libraries (\texttt{default}, \texttt{extended}, \texttt{em\_fields}). These proposals are treated as hypotheses: they are parsed, validated, and scored by the same numeric evaluators before they are considered ``better''. We require JSON-only output to preserve determinism, and all prompts and responses are logged as reproducibility artifacts.
 To stabilize iterative progress, we additionally maintain a global ``best so far'' ledger over local runs (e.g., \texttt{results/best\_results.md} and \texttt{results/best\_results.json}), grouped by comparable simulation buckets (steps, $dt$). The factory loop can include the incumbent best equation and its metrics in the LLM context as a concrete target to beat, while keeping numeric selection as the source of truth.
 The judge can additionally recommend (a) which rollout integrator to use for evaluation (Euler vs.\ leapfrog), (b) which fitness heuristic to use for candidate selection (MSE vs.\ MSE with a parsimony penalty), and (c) which discovery solver/hyperparameters to try next (STLS/LASSO/GA), enabling controlled ablations without compromising reproducibility.
 
@@ -220,12 +226,12 @@ The systems are controlled by CLI:
 \item \textbf{findings}: render an aggregated LaTeX report of best-discovered equations across local runs (from the best-results ledger).
 \item \textbf{predict} (planned): roll out discovered equations and compare to truth.
 \item \textbf{score} (planned): compute quantitative benchmarks.
-\item \textbf{render}: visualization (with robust header-based parsing).
+\item \textbf{render-gif} (implemented): render a simple GIF animation from a trajectory CSV (header-based parsing).
 \end{itemize}
 
 \subsection{LLM-guided ``factory'' loop (optional)}
 The factory loop operationalizes a scientific workflow: (1) propose initial conditions, (2) simulate, (3) discover equations, (4) judge results under a fixed rubric, and (5) decide whether to continue. The LLM assists only in steps (1) and (4), and all artifacts (config, initial conditions, prompts, responses, metrics) are saved per iteration to ensure reproducibility and auditability.
-At the end of a run, we additionally render reproducible evaluation artifacts (Markdown and LaTeX) that record the best discovered equations (exact text), the best-run initial conditions, and a best-vs-history comparison over prior local attempts. The global best-results ledger is also updated to capture the current incumbent per simulation bucket.
+At the end of a run, we additionally render reproducible evaluation artifacts (Markdown and LaTeX) that record the best discovered equations (exact text), the best-run initial conditions, and a best-vs-history comparison over prior local attempts. We also save machine-readable numeric evidence: per-iteration rollout error curves (\texttt{rollout\_trace.json}) and a fixed held-out benchmark report (\texttt{benchmark\_eval.json}). The global best-results ledger is also updated to capture the current incumbent per simulation bucket.
 
 \subsection{Robust I/O design}
 We explicitly fixed a key fragility: rigid CSV schemas break as output evolves. We therefore parse by header name and extract only needed columns for any given task. This enables rapid iteration.
@@ -238,7 +244,7 @@ A ``truth-grade'' oracle requires:
 \item Constants and force toggles recorded.
 \end{itemize}
 
-Current implementation outputs CSV and a JSON ``sidecar'' containing config, header hash, warnings, last-regime diagnostics, dt statistics (accepted/rejected/min/max/avg), and the initial state (masses/charges/positions/velocities) to support strict reproducibility.
+Current implementation outputs CSV and a JSON ``sidecar'' containing config, header hash, warnings, last-regime diagnostics, dt statistics (accepted/rejected/min/max/avg), close-encounter event metadata (when triggered), and the initial state (masses/charges/positions/velocities) to support strict reproducibility.
 
 \section{Results (What we expect, what we can claim, and what we cannot)}
 \subsection{Expected outcomes}
@@ -273,7 +279,7 @@ The quasi-static magnetic approximation may be adequate for some regimes but fai
 Leapfrog is attractive for gravity; under EM it may not preserve the right structure. We currently treat leapfrog as a fast option, not as a guaranteed long-term invariant-preserving method under full coupled dynamics. EM-appropriate schemes include the Boris pusher and structure-preserving charged-particle integrators.\cite{Boris1970,He2015,HigueraCary2017}
 
 \subsection*{Close encounters and stiffness}
-Softening is not a principled solution. We need a regularization strategy (Sundman transform, KS/chain regularization) and possibly adaptive precision.
+Softening (even when smoothed) is not a principled solution. We also support deterministic substepping near close encounters, but a truly truth-grade approach likely requires regularization (Sundman transform, KS/chain regularization) and possibly higher precision.
 
 \subsection*{Discovery stability and identifiability}
 Sparse regression can select misleading terms when features are correlated or data is not sufficiently rich. Better experimental design (diverse initial conditions, active learning) and more robust optimization (e.g., constrained solvers) are likely necessary.
@@ -284,9 +290,8 @@ We interpret ``novel'' as compact approximations that outperform naive baselines
 
 \section{Future Work}
 \begin{itemize}
-\item Add close-encounter regularization and/or multi-precision truth mode.
+\item Add principled close-encounter regularization (KS/chain, Sundman transforms) and/or multi-precision truth mode (beyond softening/smooth substepping).
 \item Implement predict and score commands with standardized benchmarks (divergence time, RMS error curves).
-\item Add an \textbf{em\_fields} library that learns directly from simulator fields $E, B$ to obtain even simpler discovered laws.
 \item Implement regime partitioning (``atlas of models''): train multiple sparse models with a lightweight regime classifier.
 \item Extend discovery to probabilistic forecasts for chaotic regimes.
 \item Extend the LLM judge rubric and experiment-planning prompts (ablation suggestions, regime partitioning), while keeping numeric scoring primary.

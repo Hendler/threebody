@@ -812,7 +812,7 @@ pub fn build_judge_prompt(input: &JudgeInput) -> String {
     prompt.push_str("Allowed next_rollout_integrator: \"euler\" or \"leapfrog\".\n");
     prompt.push_str("Allowed next_ga_heuristic: \"mse\" or \"mse_parsimony\".\n");
     prompt.push_str("Allowed next_discovery_solver: \"stls\", \"lasso\", or \"ga\".\n");
-    prompt.push_str("Allowed next_feature_library: \"default\" or \"extended\".\n");
+    prompt.push_str("Allowed next_feature_library: \"default\", \"extended\", or \"em_fields\".\n");
     prompt.push_str("All numeric hyperparameters MUST be numbers or null. Do NOT output strings like \"auto\".\n");
     prompt.push_str("If you provide next_manual_equation_text, it MUST:\n");
     prompt.push_str("- use ONLY the listed feature names,\n");

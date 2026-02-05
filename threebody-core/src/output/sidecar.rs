@@ -48,6 +48,12 @@ pub struct Sidecar {
 pub struct SidecarEncounterEvent {
     pub step: usize,
     pub min_pair_dist: f64,
+    #[serde(default)]
+    pub epsilon_before: Option<f64>,
+    #[serde(default)]
+    pub epsilon_after: Option<f64>,
+    #[serde(default)]
+    pub substeps_used: Option<usize>,
 }
 
 pub fn build_sidecar(
@@ -93,6 +99,9 @@ pub fn build_sidecar(
         encounter: result.encounter.map(|e| SidecarEncounterEvent {
             step: e.step,
             min_pair_dist: e.min_pair_dist,
+            epsilon_before: e.epsilon_before,
+            epsilon_after: e.epsilon_after,
+            substeps_used: e.substeps_used,
         }),
         encounter_action: result.encounter_action,
     }
@@ -145,6 +154,9 @@ mod tests {
             encounter: Some(EncounterEvent {
                 step: 0,
                 min_pair_dist: 0.05,
+                epsilon_before: Some(0.0),
+                epsilon_after: Some(0.0),
+                substeps_used: None,
             }),
             encounter_action: Some(crate::config::CloseEncounterAction::StopAndReport),
             warnings: vec!["warn".to_string()],

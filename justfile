@@ -24,6 +24,9 @@ discover:
   mkdir -p results/manual
   cargo run -p threebody-cli -- discover --solver stls --input results/manual/traj.csv --sidecar results/manual/traj.json --out results/manual/top_equations.json
 
+gif input="results/manual/traj.csv" output="results/manual/threebody.gif" size="640" fps="30" stride="1" trail="20":
+  python3 scripts/render_gif.py --input "{{input}}" --output "{{output}}" --size {{size}} --fps {{fps}} --stride {{stride}} --trail {{trail}}
+
 quickstart steps="200":
   #!/usr/bin/env bash
   set -euo pipefail

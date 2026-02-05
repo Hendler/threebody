@@ -29,6 +29,10 @@ use threebody_discover::{
     FACTORY_EVALUATION_VERSION,
 };
 
+mod eval;
+
+use eval::{format_vector_model, rollout_metrics, rollout_trace, VectorModel};
+
 #[derive(Parser)]
 #[command(name = "threebody-cli")]
 #[command(about = "Three-body simulator CLI", long_about = None)]
@@ -155,6 +159,9 @@ enum Commands {
         /// Discover from a single body only (0, 1, or 2). If omitted, uses all bodies.
         #[arg(long)]
         body: Option<usize>,
+        /// Feature library: default | extended | em_fields.
+        #[arg(long, default_value = "default")]
+        feature_library: String,
         /// Enable LLM ranking/interpretation.
         #[arg(long)]
         llm: bool,
@@ -291,6 +298,9 @@ enum Commands {
         /// Discovery solver: stls | lasso | ga.
         #[arg(long, default_value = "stls")]
         solver: String,
+        /// Feature library: auto | default | extended | em_fields.
+        #[arg(long, default_value = "auto")]
+        feature_library: String,
         /// Disable column normalization for STLS/LASSO.
         #[arg(long)]
         no_normalize: bool,
@@ -443,6 +453,7 @@ fn main() -> anyhow::Result<()> {
             input,
             sidecar,
             body,
+            feature_library,
             llm,
             model,
             openai_key_file,
@@ -489,6 +500,7 @@ fn main() -> anyhow::Result<()> {
                 fitness,
                 rollout_integrator,
                 solver_settings,
+                feature_library,
             )?;
         }
         Commands::Quickstart {
@@ -538,6 +550,7 @@ fn main() -> anyhow::Result<()> {
             fitness,
             rollout_integrator,
             solver,
+            feature_library,
             no_normalize,
             ridge_lambda,
             stls_max_iter,
@@ -586,6 +599,7 @@ fn main() -> anyhow::Result<()> {
                 fitness,
                 rollout_integrator,
                 solver_settings,
+                feature_library,
                 llm_mode,
                 model,
                 openai_key_file,
@@ -781,6 +795,7 @@ fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize, requ
         "mse".to_string(),
         "euler".to_string(),
         solver_settings,
+        "auto".to_string(),
         "auto".to_string(),
         llm_model,
         None,
@@ -1678,8 +1693,18 @@ fn run_discovery(
     fitness: String,
     rollout_integrator: String,
     solver_settings: DiscoverySolverSettings,
+    feature_library: String,
 ) -> anyhow::Result<()> {
-    let library = FeatureLibrary::default_physics();
+    let library_kind = parse_feature_library_kind(&feature_library).ok_or_else(|| {
+        anyhow::anyhow!(
+            "unknown --feature-library={feature_library} (expected default|extended|em_fields)"
+        )
+    })?;
+    let library = match library_kind {
+        FeatureLibraryKind::DefaultPhysics => FeatureLibrary::default_physics(),
+        FeatureLibraryKind::ExtendedPhysics => FeatureLibrary::extended_physics(),
+        FeatureLibraryKind::EmFieldsLorentz => FeatureLibrary::em_fields_lorentz(),
+    };
     let fitness = parse_fitness_heuristic(&fitness)?;
     let rollout_integrator = parse_rollout_integrator(&rollout_integrator)?;
     let cfg = DiscoveryConfig {
@@ -1729,6 +1754,9 @@ fn run_discovery(
         encounter: sidecar.encounter.map(|e| threebody_core::sim::EncounterEvent {
             step: e.step,
             min_pair_dist: e.min_pair_dist,
+            epsilon_before: e.epsilon_before,
+            epsilon_after: e.epsilon_after,
+            substeps_used: e.substeps_used,
         }),
         encounter_action: sidecar.encounter_action,
         warnings: sidecar.warnings.clone(),
@@ -2421,6 +2449,10 @@ fn compute_feature_vector(
         }
     }
 
+    // Physical-field Lorentz terms (in acceleration units; includes constants).
+    let lorentz_e = elec * cfg.constants.k_e;
+    let lorentz_vxb = mag * cfg.constants.mu_0;
+
     const R_GATE: f64 = 0.5;
     let gate_close = (min_pair_distance(&system.state.pos) < R_GATE) as u8 as f64;
     let gate_far = 1.0 - gate_close;
@@ -2447,12 +2479,18 @@ fn compute_feature_vector(
             "elec_r4_x" => elec_r4.x,
             "elec_r4_y" => elec_r4.y,
             "elec_r4_z" => elec_r4.z,
+            "lorentz_e_x" => lorentz_e.x,
+            "lorentz_e_y" => lorentz_e.y,
+            "lorentz_e_z" => lorentz_e.z,
             "mag_x" => mag.x,
             "mag_y" => mag.y,
             "mag_z" => mag.z,
             "mag_r4_x" => mag_r4.x,
             "mag_r4_y" => mag_r4.y,
             "mag_r4_z" => mag_r4.z,
+            "lorentz_vxb_x" => lorentz_vxb.x,
+            "lorentz_vxb_y" => lorentz_vxb.y,
+            "lorentz_vxb_z" => lorentz_vxb.z,
             "gate_close" => gate_close,
             "gate_far" => gate_far,
             "grav_close_x" => grav_close.x,
@@ -2478,163 +2516,6 @@ fn compute_feature_vector(
         out.push(v);
     }
     out
-}
-
-#[derive(Clone)]
-struct VectorModel {
-    eq_x: threebody_discover::Equation,
-    eq_y: threebody_discover::Equation,
-    eq_z: threebody_discover::Equation,
-}
-
-fn format_vector_model(model: &VectorModel) -> String {
-    format!(
-        "ax={} ; ay={} ; az={}",
-        model.eq_x.format(),
-        model.eq_y.format(),
-        model.eq_z.format()
-    )
-}
-
-fn rollout_metrics(
-    model: &VectorModel,
-    feature_names: &[String],
-    result: &threebody_core::sim::SimResult,
-    cfg: &Config,
-    rollout_integrator: RolloutIntegrator,
-) -> (f64, Option<f64>) {
-    let mut system = result.steps.first().map(|s| s.system).unwrap_or_else(|| {
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(1.0, 0.0)];
-        let pos = [Vec3::zero(); 3];
-        let vel = [Vec3::zero(); 3];
-        System::new(bodies, State::new(pos, vel))
-    });
-    let feature_dataset = Dataset::new(feature_names.to_vec(), vec![], vec![]);
-    let mut sum_sq = 0.0;
-    let mut count = 0usize;
-    let mut t = 0.0;
-    let threshold = (0.5 * min_pair_distance(&result.steps[0].system.state.pos)).max(0.1);
-    let mut divergence_time = None;
-    for i in 0..(result.steps.len().saturating_sub(1)) {
-        let dt = result.steps[i].dt;
-        system = rollout_step(&system, &feature_dataset, model, cfg, dt, rollout_integrator);
-        t += dt;
-        let err = rms_pos_error(&system, &result.steps[i + 1].system);
-        sum_sq += err * err;
-        count += 1;
-        if divergence_time.is_none() && err > threshold {
-            divergence_time = Some(t);
-        }
-    }
-    let rmse = if count > 0 { (sum_sq / count as f64).sqrt() } else { 0.0 };
-    (rmse, divergence_time)
-}
-
-fn rollout_trace(
-    model: &VectorModel,
-    feature_names: &[String],
-    result: &threebody_core::sim::SimResult,
-    cfg: &Config,
-    rollout_integrator: RolloutIntegrator,
-) -> Vec<RolloutTraceStep> {
-    let mut system = result.steps.first().map(|s| s.system).unwrap_or_else(|| {
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(1.0, 0.0)];
-        let pos = [Vec3::zero(); 3];
-        let vel = [Vec3::zero(); 3];
-        System::new(bodies, State::new(pos, vel))
-    });
-    let feature_dataset = Dataset::new(feature_names.to_vec(), vec![], vec![]);
-    let mut trace = Vec::new();
-    let mut t = 0.0;
-    for i in 0..(result.steps.len().saturating_sub(1)) {
-        let dt = result.steps[i].dt;
-        system = rollout_step(&system, &feature_dataset, model, cfg, dt, rollout_integrator);
-        t += dt;
-        let err = rms_pos_error(&system, &result.steps[i + 1].system);
-        trace.push(RolloutTraceStep {
-            t,
-            pos: system
-                .state
-                .pos
-                .iter()
-                .map(|p| [p.x, p.y, p.z])
-                .collect(),
-            rmse_pos: err,
-        });
-    }
-    trace
-}
-
-#[derive(serde::Serialize)]
-struct RolloutTraceStep {
-    t: f64,
-    pos: Vec<[f64; 3]>,
-    rmse_pos: f64,
-}
-
-fn predict_accel(
-    system: &System,
-    feature_dataset: &Dataset,
-    model: &VectorModel,
-    cfg: &Config,
-) -> [Vec3; 3] {
-    let mut acc = [Vec3::zero(); 3];
-    for body in 0..3 {
-        let features = compute_feature_vector(system, body, cfg, &feature_dataset.feature_names);
-        let ax = model.eq_x.predict(feature_dataset, &features);
-        let ay = model.eq_y.predict(feature_dataset, &features);
-        let az = model.eq_z.predict(feature_dataset, &features);
-        acc[body] = Vec3::new(ax, ay, az);
-    }
-    acc
-}
-
-fn rollout_step(
-    system: &System,
-    feature_dataset: &Dataset,
-    model: &VectorModel,
-    cfg: &Config,
-    dt: f64,
-    integrator: RolloutIntegrator,
-) -> System {
-    let acc = predict_accel(system, feature_dataset, model, cfg);
-    match integrator {
-        RolloutIntegrator::Euler => {
-            let mut new_pos = system.state.pos;
-            let mut new_vel = system.state.vel;
-            for b in 0..3 {
-                new_vel[b] = new_vel[b] + acc[b] * dt;
-                new_pos[b] = new_pos[b] + new_vel[b] * dt;
-            }
-            System::new(system.bodies, State::new(new_pos, new_vel))
-        }
-        RolloutIntegrator::Leapfrog => {
-            let mut v_half = system.state.vel;
-            for b in 0..3 {
-                v_half[b] = v_half[b] + acc[b] * (0.5 * dt);
-            }
-            let mut new_pos = system.state.pos;
-            for b in 0..3 {
-                new_pos[b] = new_pos[b] + v_half[b] * dt;
-            }
-            let interim = System::new(system.bodies, State::new(new_pos, v_half));
-            let acc_new = predict_accel(&interim, feature_dataset, model, cfg);
-            let mut new_vel = v_half;
-            for b in 0..3 {
-                new_vel[b] = new_vel[b] + acc_new[b] * (0.5 * dt);
-            }
-            System::new(system.bodies, State::new(interim.state.pos, new_vel))
-        }
-    }
-}
-
-fn rms_pos_error(pred: &System, truth: &System) -> f64 {
-    let mut sum = 0.0;
-    for b in 0..3 {
-        let diff = pred.state.pos[b] - truth.state.pos[b];
-        sum += diff.norm_sq();
-    }
-    (sum / 3.0).sqrt()
 }
 
 fn build_vector_candidates(
@@ -2857,12 +2738,14 @@ enum RolloutIntegrator {
 enum FeatureLibraryKind {
     DefaultPhysics,
     ExtendedPhysics,
+    EmFieldsLorentz,
 }
 
 fn feature_library_kind_label(kind: FeatureLibraryKind) -> &'static str {
     match kind {
         FeatureLibraryKind::DefaultPhysics => "default",
         FeatureLibraryKind::ExtendedPhysics => "extended",
+        FeatureLibraryKind::EmFieldsLorentz => "em_fields",
     }
 }
 
@@ -2870,6 +2753,9 @@ fn parse_feature_library_kind(raw: &str) -> Option<FeatureLibraryKind> {
     match raw.trim().to_lowercase().as_str() {
         "default" | "default_physics" | "default-physics" => Some(FeatureLibraryKind::DefaultPhysics),
         "extended" | "extended_physics" | "extended-physics" => Some(FeatureLibraryKind::ExtendedPhysics),
+        "em_fields" | "em-fields" | "em_fields_lorentz" | "em-fields-lorentz" | "fields" | "lorentz" => {
+            Some(FeatureLibraryKind::EmFieldsLorentz)
+        }
         _ => None,
     }
 }
@@ -3111,6 +2997,7 @@ fn run_factory(
     fitness: String,
     rollout_integrator: String,
     solver_settings: DiscoverySolverSettings,
+    feature_library: String,
     llm_mode: String,
     model: String,
     openai_key_file: Option<PathBuf>,
@@ -3127,13 +3014,27 @@ fn run_factory(
     let mut evaluation_iterations: Vec<FactoryEvaluationIteration> = Vec::new();
     let incumbent_bucket = BucketKey { steps, dt };
     let incumbent = load_incumbent_for_bucket(std::path::Path::new("results"), &incumbent_bucket);
-    let mut current_library = FeatureLibraryKind::DefaultPhysics;
-    if let Some(rec) = incumbent.as_ref() {
-        let incumbent_features = feature_names_for_equation_text(&rec.equation_text);
-        if incumbent_features.len() > FeatureLibrary::default_physics().features.len() {
-            current_library = FeatureLibraryKind::ExtendedPhysics;
+    let feature_library_trimmed = feature_library.trim();
+    let feature_library_lower = feature_library_trimmed.to_lowercase();
+    let feature_library_pinned = feature_library_lower != "auto";
+    let mut current_library = if feature_library_pinned {
+        parse_feature_library_kind(&feature_library_lower).ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown --feature-library={feature_library_trimmed} (expected auto|default|extended|em_fields)"
+            )
+        })?
+    } else {
+        let mut kind = FeatureLibraryKind::DefaultPhysics;
+        if let Some(rec) = incumbent.as_ref() {
+            let incumbent_features = feature_names_for_equation_text(&rec.equation_text);
+            if incumbent_features.iter().any(|f| f.starts_with("lorentz_")) {
+                kind = FeatureLibraryKind::EmFieldsLorentz;
+            } else if incumbent_features.len() > FeatureLibrary::default_physics().features.len() {
+                kind = FeatureLibraryKind::ExtendedPhysics;
+            }
         }
-    }
+        kind
+    };
     let mut equation_ga_parent: Option<String> = incumbent.as_ref().map(|r| r.equation_text.clone());
     let mut previous_iteration_elites: Vec<(String, CandidateMetrics)> = Vec::new();
 
@@ -3404,6 +3305,7 @@ fn run_factory(
         let library = match current_library {
             FeatureLibraryKind::DefaultPhysics => FeatureLibrary::default_physics(),
             FeatureLibraryKind::ExtendedPhysics => FeatureLibrary::extended_physics(),
+            FeatureLibraryKind::EmFieldsLorentz => FeatureLibrary::em_fields_lorentz(),
         };
         let vector_data = build_vector_dataset(&result, &cfg, &library.features, None);
         let [dataset_x, dataset_y, dataset_z] = component_datasets(&vector_data);
@@ -3928,13 +3830,15 @@ fn run_factory(
         }
         if let Some(j) = judge {
             apply_discovery_recommendations(&mut current_solver, &j.recommendations);
-            if let Some(kind) = j
-                .recommendations
-                .next_feature_library
-                .as_deref()
-                .and_then(parse_feature_library_kind)
-            {
-                current_library = kind;
+            if !feature_library_pinned {
+                if let Some(kind) = j
+                    .recommendations
+                    .next_feature_library
+                    .as_deref()
+                    .and_then(parse_feature_library_kind)
+                {
+                    current_library = kind;
+                }
             }
             if let Some(next) = j.recommendations.next_initial_conditions {
                 next_ic = Some(next);
@@ -3966,6 +3870,7 @@ fn run_factory(
     eval_notes.push(format!("preset={}", preset));
     eval_notes.push(format!("seed={}", seed));
     eval_notes.push(format!("auto={}", auto));
+    eval_notes.push(format!("feature_library={}", feature_library_trimmed));
     eval_notes.push(format!("llm_mode={}", llm_mode_label(llm_mode)));
     if matches!(llm_mode, LlmMode::OpenAI | LlmMode::Auto) {
         eval_notes.push(format!("llm_model={}", model));
@@ -5857,6 +5762,9 @@ fn load_oracle_run_from_dir(run_dir: &std::path::Path) -> anyhow::Result<OracleR
             encounter: sidecar.encounter.map(|e| threebody_core::sim::EncounterEvent {
                 step: e.step,
                 min_pair_dist: e.min_pair_dist,
+                epsilon_before: e.epsilon_before,
+                epsilon_after: e.epsilon_after,
+                substeps_used: e.substeps_used,
             }),
             encounter_action: sidecar.encounter_action,
             warnings: sidecar.warnings,
@@ -7422,6 +7330,89 @@ mod tests {
         assert!((f0[idx("mag_x")] - 0.0).abs() < 1e-12);
         assert!((f0[idx("mag_y")] - expected_mag_y).abs() < 1e-12);
         assert!((f0[idx("mag_z")] - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn lorentz_feature_components_match_core_fields() {
+        let mut cfg = Config::default();
+        cfg.enable_gravity = false;
+        cfg.enable_em = true;
+        cfg.softening = 0.01;
+        cfg.constants.k_e = 2.5;
+        cfg.constants.mu_0 = 0.7;
+
+        let bodies = [
+            Body::new(2.0, 1.5),
+            Body::new(3.0, -0.7),
+            Body::new(1.0, 0.0),
+        ];
+        let pos = [
+            Vec3::new(-0.8, 0.1, 0.0),
+            Vec3::new(0.9, -0.2, 0.0),
+            Vec3::new(0.1, 1.2, 0.0),
+        ];
+        let vel = [
+            Vec3::new(0.05, 0.2, 0.0),
+            Vec3::new(-0.1, 0.15, 0.0),
+            Vec3::new(0.0, 0.0, 0.0),
+        ];
+        let system = System::new(bodies, State::new(pos, vel));
+
+        let force_cfg = threebody_core::forces::ForceConfig {
+            g: cfg.constants.g,
+            k_e: cfg.constants.k_e,
+            mu_0: cfg.constants.mu_0,
+            epsilon: cfg.softening,
+            enable_gravity: cfg.enable_gravity,
+            enable_em: cfg.enable_em,
+        };
+        let fields = threebody_core::forces::compute_fields(&system, &force_cfg);
+        let accel = threebody_core::forces::compute_accel(&system, &force_cfg);
+
+        let feature_names = FeatureLibrary::em_fields_lorentz().features;
+        let idx = |name: &str| feature_names.iter().position(|n| n == name).unwrap();
+
+        for i in 0..3 {
+            let feats = compute_feature_vector(&system, i, &cfg, &feature_names);
+            let got_e = Vec3::new(
+                feats[idx("lorentz_e_x")],
+                feats[idx("lorentz_e_y")],
+                feats[idx("lorentz_e_z")],
+            );
+            let got_vxb = Vec3::new(
+                feats[idx("lorentz_vxb_x")],
+                feats[idx("lorentz_vxb_y")],
+                feats[idx("lorentz_vxb_z")],
+            );
+
+            let qi = system.bodies[i].charge;
+            let mi = system.bodies[i].mass;
+            let expected_e = if qi == 0.0 || mi == 0.0 {
+                Vec3::zero()
+            } else {
+                fields.e[i] * (qi / mi)
+            };
+            let expected_vxb = if qi == 0.0 || mi == 0.0 {
+                Vec3::zero()
+            } else {
+                system.state.vel[i].cross(fields.b[i]) * (qi / mi)
+            };
+
+            assert!(
+                got_e.approx_eq(expected_e, 1e-10, 1e-10),
+                "body {i}: got_e={got_e:?} expected_e={expected_e:?}"
+            );
+            assert!(
+                got_vxb.approx_eq(expected_vxb, 1e-10, 1e-10),
+                "body {i}: got_vxb={got_vxb:?} expected_vxb={expected_vxb:?}"
+            );
+            assert!(
+                (got_e + got_vxb).approx_eq(accel[i], 1e-10, 1e-10),
+                "body {i}: got_total={:?} expected_total={:?}",
+                got_e + got_vxb,
+                accel[i]
+            );
+        }
     }
 
     #[test]

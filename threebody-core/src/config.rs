@@ -88,6 +88,25 @@ pub struct CloseEncounterConfig {
     pub action: CloseEncounterAction,
     pub softening: f64,
     pub switch_integrator: Option<IntegratorKind>,
+    /// If true, apply a smooth ramp toward `softening` as `min_pair_dist` falls below `r_min`
+    /// (instead of an abrupt jump). The ramp is monotone: softening never decreases during a run.
+    #[serde(default)]
+    pub softening_smooth: bool,
+    /// Maximum number of internal substeps to take when close-encounter conditions are met.
+    /// Set to 1 to disable substepping (default).
+    #[serde(default = "default_close_encounter_substeps_max")]
+    pub substeps_max: usize,
+    /// Distance threshold for substepping. If <= 0, falls back to `r_min`.
+    #[serde(default)]
+    pub substep_r_min: f64,
+    /// CFL-like threshold for substepping: if `dt_ratio > substep_dt_ratio_max`, increase substeps.
+    /// Set to 0 to disable this trigger.
+    #[serde(default)]
+    pub substep_dt_ratio_max: f64,
+}
+
+fn default_close_encounter_substeps_max() -> usize {
+    1
 }
 
 impl Default for CloseEncounterConfig {
@@ -97,6 +116,10 @@ impl Default for CloseEncounterConfig {
             action: CloseEncounterAction::StopAndReport,
             softening: 0.0,
             switch_integrator: None,
+            softening_smooth: false,
+            substeps_max: default_close_encounter_substeps_max(),
+            substep_r_min: 0.0,
+            substep_dt_ratio_max: 0.0,
         }
     }
 }
@@ -165,6 +188,15 @@ impl Config {
         }
         if self.close_encounter.softening < 0.0 {
             return Err("close_encounter.softening must be >= 0".to_string());
+        }
+        if self.close_encounter.substeps_max == 0 {
+            return Err("close_encounter.substeps_max must be >= 1".to_string());
+        }
+        if self.close_encounter.substep_r_min < 0.0 {
+            return Err("close_encounter.substep_r_min must be >= 0".to_string());
+        }
+        if self.close_encounter.substep_dt_ratio_max < 0.0 {
+            return Err("close_encounter.substep_dt_ratio_max must be >= 0".to_string());
         }
         Ok(())
     }
