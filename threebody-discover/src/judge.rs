@@ -141,16 +141,22 @@ pub struct IcRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BodyInit {
+    #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub mass: f64,
+    #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub charge: f64,
+    #[serde(deserialize_with = "deserialize_vec3_f64_or_nan")]
     pub pos: [f64; 3],
+    #[serde(deserialize_with = "deserialize_vec3_f64_or_nan")]
     pub vel: [f64; 3],
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InitialConditionSpec {
     pub bodies: Vec<BodyInit>,
+    #[serde(default = "default_true", deserialize_with = "deserialize_bool_or_default")]
     pub barycentric: bool,
+    #[serde(default, deserialize_with = "deserialize_string_or_json_default")]
     pub notes: String,
 }
 
@@ -191,6 +197,282 @@ impl Default for ScoreComponents {
     }
 }
 
+fn deserialize_string_or_json_default<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(v) = v else {
+        return Ok(String::new());
+    };
+    match v {
+        serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Null => Ok(String::new()),
+        other => Ok(other.to_string()),
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn deserialize_bool_or_default<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(v) = v else {
+        return Ok(default_true());
+    };
+    match v {
+        serde_json::Value::Bool(b) => Ok(b),
+        serde_json::Value::String(s) => {
+            let lowered = s.trim().to_ascii_lowercase();
+            Ok(matches!(lowered.as_str(), "true" | "yes" | "1"))
+        }
+        _ => Ok(default_true()),
+    }
+}
+
+fn value_to_f64_or_nan(v: &serde_json::Value) -> f64 {
+    match v {
+        serde_json::Value::Number(n) => n.as_f64().unwrap_or(f64::NAN),
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return f64::NAN;
+            }
+            let lowered = trimmed.to_ascii_lowercase();
+            if matches!(lowered.as_str(), "auto" | "nan" | "none" | "null") {
+                return f64::NAN;
+            }
+            lowered.parse::<f64>().unwrap_or(f64::NAN)
+        }
+        _ => f64::NAN,
+    }
+}
+
+fn deserialize_f64_or_nan<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = serde_json::Value::deserialize(deserializer)?;
+    Ok(value_to_f64_or_nan(&v))
+}
+
+fn deserialize_vec3_f64_or_nan<'de, D>(deserializer: D) -> Result<[f64; 3], D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = serde_json::Value::deserialize(deserializer)?;
+    match v {
+        serde_json::Value::Array(arr) => {
+            let mut out = [f64::NAN; 3];
+            for (i, slot) in out.iter_mut().enumerate() {
+                if let Some(val) = arr.get(i) {
+                    *slot = value_to_f64_or_nan(val);
+                }
+            }
+            Ok(out)
+        }
+        serde_json::Value::String(s) => {
+            // Best-effort: accept "x,y,z" (commas/spaces).
+            let parts: Vec<&str> = s
+                .split(|c| c == ',' || c == ' ' || c == '\t' || c == '\n' || c == '\r')
+                .filter(|p| !p.trim().is_empty())
+                .collect();
+            let mut out = [f64::NAN; 3];
+            for i in 0..3 {
+                if let Some(p) = parts.get(i) {
+                    out[i] = p.trim().parse::<f64>().unwrap_or(f64::NAN);
+                }
+            }
+            Ok(out)
+        }
+        _ => Ok([f64::NAN; 3]),
+    }
+}
+
+fn deserialize_opt_string_or_json<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(v) = v else {
+        return Ok(None);
+    };
+    match v {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        serde_json::Value::Object(map) => {
+            fn pick(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+                let v = map.get(key)?;
+                let s = v.as_str()?;
+                let trimmed = s.trim();
+                (!trimmed.is_empty()).then_some(trimmed.to_string())
+            }
+            // Common wrapper shapes from LLMs: {"name": "leapfrog"}, {"solver": "stls"}, etc.
+            for key in ["value", "name", "solver", "integrator", "library", "text"] {
+                if let Some(s) = pick(&map, key) {
+                    return Ok(Some(s));
+                }
+            }
+            Ok(Some(serde_json::Value::Object(map).to_string()))
+        }
+        other => Ok(Some(other.to_string())),
+    }
+}
+
+fn deserialize_vec_string_or_json_default<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(v) = v else {
+        return Ok(Vec::new());
+    };
+    match v {
+        serde_json::Value::Null => Ok(Vec::new()),
+        serde_json::Value::Array(arr) => Ok(arr
+            .into_iter()
+            .filter_map(|item| match item {
+                serde_json::Value::Null => None,
+                serde_json::Value::String(s) => {
+                    let t = s.trim().to_string();
+                    (!t.is_empty()).then_some(t)
+                }
+                other => Some(other.to_string()),
+            })
+            .collect()),
+        serde_json::Value::String(s) => {
+            let t = s.trim().to_string();
+            Ok((!t.is_empty()).then_some(t).into_iter().collect())
+        }
+        other => Ok(vec![other.to_string()]),
+    }
+}
+
+fn deserialize_opt_equation_text_or_object<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(v) = v else {
+        return Ok(None);
+    };
+    match v {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(trimmed.to_string()))
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if let Some(text) = map.get("equation_text").and_then(|v| v.as_str()) {
+                let trimmed = text.trim();
+                return Ok((!trimmed.is_empty()).then_some(trimmed.to_string()));
+            }
+            if let Some(text) = map.get("text").and_then(|v| v.as_str()) {
+                let trimmed = text.trim();
+                return Ok((!trimmed.is_empty()).then_some(trimmed.to_string()));
+            }
+            let get_axis_rhs = |key: &str| -> Option<String> {
+                let v = map.get(key)?;
+                let raw = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Null => return None,
+                    other => other.to_string(),
+                };
+                let t = raw.trim();
+                if t.is_empty() {
+                    return None;
+                }
+                if let Some((_lhs, rhs)) = t.split_once('=') {
+                    return Some(rhs.trim().to_string());
+                }
+                Some(t.to_string())
+            };
+            let ax = get_axis_rhs("ax").unwrap_or_else(|| "0".to_string());
+            let ay = get_axis_rhs("ay").unwrap_or_else(|| "0".to_string());
+            let az = get_axis_rhs("az").unwrap_or_else(|| "0".to_string());
+            Ok(Some(format!("ax={ax} ; ay={ay} ; az={az}")))
+        }
+        other => Ok(Some(other.to_string())),
+    }
+}
+
+fn deserialize_opt_ic_or_none<'de, D>(deserializer: D) -> Result<Option<InitialConditionSpec>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    use serde::de;
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(v) = v else {
+        return Ok(None);
+    };
+    match v {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Object(_) => serde_json::from_value(v).map(Some).map_err(de::Error::custom),
+        _ => Ok(None),
+    }
+}
+
+fn deserialize_opt_bool_or_none<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = Option::<serde_json::Value>::deserialize(deserializer)?;
+    let Some(v) = v else {
+        return Ok(None);
+    };
+    match v {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::Bool(b) => Ok(Some(b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                return Ok(Some(i != 0));
+            }
+            if let Some(f) = n.as_f64() {
+                return Ok(Some(f != 0.0));
+            }
+            Ok(None)
+        }
+        serde_json::Value::String(s) => {
+            let lowered = s.trim().to_ascii_lowercase();
+            if lowered.is_empty() || matches!(lowered.as_str(), "auto" | "none" | "null") {
+                return Ok(None);
+            }
+            if matches!(lowered.as_str(), "true" | "yes" | "1") {
+                return Ok(Some(true));
+            }
+            if matches!(lowered.as_str(), "false" | "no" | "0") {
+                return Ok(Some(false));
+            }
+            Ok(None)
+        }
+        _ => Ok(None),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct JudgeScore {
     pub id: usize,
@@ -198,22 +480,27 @@ pub struct JudgeScore {
     pub total: f64,
     #[serde(default)]
     pub components: ScoreComponents,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_json_default")]
     pub rationale: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_string_or_json_default")]
     pub flags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct JudgeRecommendations {
+    #[serde(default, deserialize_with = "deserialize_opt_ic_or_none")]
     pub next_initial_conditions: Option<InitialConditionSpec>,
+    #[serde(default, deserialize_with = "deserialize_opt_string_or_json")]
     pub next_rollout_integrator: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_opt_string_or_json")]
     pub next_ga_heuristic: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_opt_string_or_json")]
     pub next_discovery_solver: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_opt_bool_or_none")]
     pub next_normalize: Option<bool>,
     /// Optional: let the judge switch feature libraries between iterations.
     /// Allowed values: "default" | "extended".
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_string_or_json")]
     pub next_feature_library: Option<String>,
     #[serde(default, deserialize_with = "deserialize_opt_f64_or_auto")]
     pub next_stls_threshold: Option<f64>,
@@ -223,11 +510,11 @@ pub struct JudgeRecommendations {
     pub next_lasso_alpha: Option<f64>,
     /// Optional: a fully-specified vector equation to evaluate next iteration (must use known features).
     /// Format: `ax=+1.0*grav_x ... ; ay=... ; az=...`
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_opt_equation_text_or_object")]
     pub next_manual_equation_text: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_string_or_json_default")]
     pub next_search_directions: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_json_default")]
     pub notes: String,
 }
 
@@ -305,7 +592,7 @@ pub struct JudgeResponse {
     #[serde(default)]
     pub scores: Vec<JudgeScore>,
     pub recommendations: JudgeRecommendations,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_string_or_json_default")]
     pub summary: String,
 }
 
@@ -894,6 +1181,83 @@ mod tests {
         assert_eq!(s.components.physical_plausibility, 0.0);
         assert_eq!(s.components.regime_consistency, 0.0);
         assert_eq!(s.components.stability_risk, 0.0);
+    }
+
+    #[test]
+    fn judge_response_deserializes_string_fields_from_objects() {
+        let json = r#"
+{
+  "version": "v1",
+  "ranking": [0],
+  "scores": [
+    {
+      "id": 0,
+      "total": 1.0,
+      "components": {
+        "fidelity": 1.0,
+        "parsimony": 1.0,
+        "physical_plausibility": 1.0,
+        "regime_consistency": 1.0,
+        "stability_risk": 1.0
+      },
+      "rationale": {"text": "ok"},
+      "flags": {"note": "not an array"}
+    }
+  ],
+  "recommendations": {
+    "next_initial_conditions": null,
+    "next_rollout_integrator": {"name": "leapfrog"},
+    "next_ga_heuristic": {"value": "mse"},
+    "next_discovery_solver": {"solver": "stls"},
+    "next_normalize": "true",
+    "next_feature_library": {"library": "default"},
+    "next_manual_equation_text": {"ax": "+1.000000*grav_x", "ay": "+1.000000*grav_y", "az": "0"},
+    "next_search_directions": {"hint": "try grav_z"},
+    "notes": {"extra": "ok"}
+  },
+  "summary": {"note": "ok"}
+}
+"#;
+        let resp: JudgeResponse = serde_json::from_str(json).expect("should deserialize");
+        assert!(resp.scores[0].rationale.contains("ok"));
+        assert!(resp.scores[0].flags.len() >= 1);
+        assert_eq!(resp.recommendations.next_rollout_integrator.as_deref(), Some("leapfrog"));
+        assert_eq!(resp.recommendations.next_ga_heuristic.as_deref(), Some("mse"));
+        assert_eq!(resp.recommendations.next_discovery_solver.as_deref(), Some("stls"));
+        assert_eq!(resp.recommendations.next_feature_library.as_deref(), Some("default"));
+        assert_eq!(resp.recommendations.next_normalize, Some(true));
+        assert!(resp
+            .recommendations
+            .next_manual_equation_text
+            .as_ref()
+            .unwrap()
+            .contains("ax="));
+        assert!(!resp.recommendations.next_search_directions.is_empty());
+        assert!(!resp.recommendations.notes.is_empty());
+        assert!(!resp.summary.is_empty());
+    }
+
+    #[test]
+    fn judge_response_ignores_next_initial_conditions_wrong_type() {
+        let json = r#"
+{
+  "version": "v1",
+  "ranking": [],
+  "scores": [],
+  "recommendations": {
+    "next_initial_conditions": "please use preset",
+    "next_rollout_integrator": "euler",
+    "next_ga_heuristic": "mse",
+    "next_discovery_solver": "stls",
+    "next_normalize": "auto"
+  },
+  "summary": ""
+}
+"#;
+        let resp: JudgeResponse = serde_json::from_str(json).expect("should deserialize");
+        assert!(resp.recommendations.next_initial_conditions.is_none());
+        assert_eq!(resp.recommendations.next_rollout_integrator.as_deref(), Some("euler"));
+        assert_eq!(resp.recommendations.next_normalize, None);
     }
 
     #[test]

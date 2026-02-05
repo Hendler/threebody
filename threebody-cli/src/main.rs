@@ -607,16 +607,33 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn run_llm_check(model: String, openai_key_file: Option<PathBuf>) -> anyhow::Result<()> {
+    use std::path::Path;
+
     let client = OpenAIClient::from_env_or_file(&model, openai_key_file.as_deref())
         .map_err(|e| anyhow::anyhow!("failed to initialize OpenAI client: {e}"))?;
     let api_style = std::env::var("THREEBODY_OPENAI_API_STYLE")
         .or_else(|_| std::env::var("OPENAI_API_STYLE"))
         .unwrap_or_else(|_| "auto".to_string());
 
+    let api_key_source = if let Some(p) = openai_key_file.as_deref() {
+        format!("file:{}", p.display())
+    } else if Path::new(".openai_key").exists() {
+        "file:.openai_key".to_string()
+    } else if std::env::var("OPENAI_API_KEY").is_ok() {
+        "env:OPENAI_API_KEY".to_string()
+    } else {
+        "missing".to_string()
+    };
+    let base_url_env = std::env::var("OPENAI_BASE_URL")
+        .or_else(|_| std::env::var("THREEBODY_OPENAI_BASE_URL"))
+        .unwrap_or_else(|_| "(default)".to_string());
+
     println!("LLM check:");
     println!("- base_url={}", client.base_url);
     println!("- model={}", client.model);
     println!("- api_style={}", api_style);
+    println!("- api_key_source={}", api_key_source);
+    println!("- base_url_env={}", base_url_env);
 
     let bounds = default_ic_bounds();
     let preflight = IcRequest {
@@ -2103,12 +2120,72 @@ fn default_ic_bounds() -> IcBounds {
 }
 
 fn sanitize_judge_recommendations(rec: &mut threebody_discover::JudgeRecommendations, bounds: &IcBounds) {
-    let Some(spec) = rec.next_initial_conditions.as_ref() else {
-        return;
-    };
-    if let Err(err) = system_from_ic(spec, bounds) {
-        eprintln!("Ignoring invalid LLM next_initial_conditions recommendation ({err}).");
-        rec.next_initial_conditions = None;
+    // 1) Drop invalid ICs (keeps `--require-llm` runs robust; the preset fallback still works).
+    if let Some(spec) = rec.next_initial_conditions.as_ref() {
+        if let Err(err) = system_from_ic(spec, bounds) {
+            eprintln!("Ignoring invalid LLM next_initial_conditions recommendation ({err}).");
+            rec.next_initial_conditions = None;
+        }
+    }
+
+    // 2) Normalize "enum-like" strings: if it's not one of our accepted values, ignore it.
+    fn normalize_choice(opt: &mut Option<String>, allowed: &[&str], field: &str) {
+        let Some(v) = opt.as_deref() else {
+            return;
+        };
+        let v_trim = v.trim();
+        if v_trim.is_empty() {
+            *opt = None;
+            return;
+        }
+        if !allowed.iter().any(|a| *a == v_trim) {
+            eprintln!("Ignoring invalid LLM {field} recommendation ({v_trim}).");
+            *opt = None;
+        } else if v_trim != v {
+            *opt = Some(v_trim.to_string());
+        }
+    }
+
+    normalize_choice(
+        &mut rec.next_rollout_integrator,
+        &["euler", "leapfrog"],
+        "next_rollout_integrator",
+    );
+    normalize_choice(
+        &mut rec.next_ga_heuristic,
+        &["mse", "mse_parsimony"],
+        "next_ga_heuristic",
+    );
+    normalize_choice(
+        &mut rec.next_discovery_solver,
+        &["stls", "lasso", "ga"],
+        "next_discovery_solver",
+    );
+    normalize_choice(
+        &mut rec.next_feature_library,
+        &["default", "extended"],
+        "next_feature_library",
+    );
+
+    // 3) Numeric hyperparams: ignore invalid / negative values.
+    for (name, v) in [
+        ("next_stls_threshold", &mut rec.next_stls_threshold),
+        ("next_lasso_alpha", &mut rec.next_lasso_alpha),
+    ] {
+        if let Some(x) = v.as_ref() {
+            if !x.is_finite() || *x <= 0.0 {
+                eprintln!("Ignoring invalid LLM {name} recommendation ({x}).");
+                *v = None;
+            }
+        }
+    }
+    for (name, v) in [("next_ridge_lambda", &mut rec.next_ridge_lambda)] {
+        if let Some(x) = v.as_ref() {
+            if !x.is_finite() || *x < 0.0 {
+                eprintln!("Ignoring invalid LLM {name} recommendation ({x}).");
+                *v = None;
+            }
+        }
     }
 }
 
@@ -3570,14 +3647,12 @@ fn run_factory(
                     judge_response = Some(result.response);
                     let mut resp = result.value;
                     sanitize_judge_recommendations(&mut resp.recommendations, &ic_bounds);
-                    if resp.validate(&judge_input).is_ok() {
-                        Some(resp)
-                    } else {
-                        if require_llm {
-                            anyhow::bail!("LLM judge response failed validation");
+                    match resp.validate(&judge_input) {
+                        Ok(()) => Some(resp),
+                        Err(msg) => {
+                            eprintln!("LLM judge response failed validation: {msg}");
+                            None
                         }
-                        eprintln!("LLM judge response failed validation");
-                        None
                     }
                 }
                 Err(err) => {
@@ -4902,6 +4977,32 @@ fn render_best_results_md(index: &BestResultsIndexV1, progress: &[BucketProgress
         md.push_str("```text\n");
         md.push_str(&rec.equation_text);
         md.push_str("\n```\n\n");
+
+        if let Some(p) = progress.iter().find(|p| p.bucket.matches(&rec.bucket)) {
+            let mut alts: Vec<&BestRecord> = p
+                .top_unique
+                .iter()
+                .filter(|r| r.equation_text.trim() != rec.equation_text.trim())
+                .collect();
+            alts.truncate(3);
+            if !alts.is_empty() {
+                md.push_str("- Other equations seen in this bucket (best per unique equation; different ICs):\n");
+                for alt in alts {
+                    let eq = truncate_to_chars(&single_line(&alt.equation_text), 240);
+                    md.push_str(&format!(
+                        "  - score={}, rollout_rmse={}, mse={:.6e}, complexity={}: `{}` (evidence: `{}/RESULTS.md`)\n",
+                        format_metric_opt(record_effective_rollout_rmse(alt)),
+                        format_metric_opt(alt.metrics.rollout_rmse),
+                        alt.metrics.mse,
+                        alt.metrics.complexity,
+                        eq,
+                        alt.run_dir
+                    ));
+                }
+                md.push('\n');
+            }
+        }
+
         md.push_str(&format!("- Evidence: `{}/RESULTS.md`\n", rec.run_dir));
         md.push_str(&format!("- Raw: `{}`\n\n", rec.eval_input_path));
     }
@@ -4956,6 +5057,7 @@ struct BucketProgress {
     attempts: usize,
     first: BestRecord,
     best: BestRecord,
+    top_unique: Vec<BestRecord>,
 }
 
 fn compute_bucket_progress(
@@ -4983,11 +5085,39 @@ fn compute_bucket_progress(
         }
         bucket_records.sort_by(|a, b| a.eval_input_path.cmp(&b.eval_input_path));
         let first = bucket_records[0].clone();
+
+        // Also compute a small "equation hall of fame" for this bucket: best attempt per unique equation.
+        // This makes it easy for humans (and downstream tools) to see what different math was actually tried.
+        let mut unique: std::collections::HashMap<String, BestRecord> = std::collections::HashMap::new();
+        for mut rec in bucket_records.clone() {
+            let feature_names = feature_names_for_equation_text(&rec.equation_text);
+            let norm = normalize_equation_text_for_features(&rec.equation_text, &feature_names)
+                .unwrap_or_else(|| single_line(&rec.equation_text));
+            rec.equation_text = norm.clone();
+            let key_new = best_record_sort_key(&rec);
+            let replace = match unique.get(&norm) {
+                Some(existing) => key_new < best_record_sort_key(existing),
+                None => true,
+            };
+            if replace {
+                unique.insert(norm, rec);
+            }
+        }
+        let mut top_unique: Vec<BestRecord> = unique.into_values().collect();
+        top_unique.sort_by(|a, b| {
+            best_record_sort_key(a)
+                .partial_cmp(&best_record_sort_key(b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.eval_input_path.cmp(&b.eval_input_path))
+        });
+        top_unique.truncate(5);
+
         out.push(BucketProgress {
             bucket: best.bucket.clone(),
             attempts: bucket_records.len(),
             first,
             best: best.clone(),
+            top_unique,
         });
     }
     out.sort_by(|a, b| {
@@ -5110,6 +5240,31 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
 
         tex.push_str("\\paragraph{Math formula (expanded)}\n");
         tex.push_str(&render_expanded_math_tex(&rec.equation_text));
+
+        if let Some(p) = progress.iter().find(|p| p.bucket.matches(&rec.bucket)) {
+            let mut alts: Vec<&BestRecord> = p
+                .top_unique
+                .iter()
+                .filter(|r| r.equation_text.trim() != rec.equation_text.trim())
+                .collect();
+            alts.truncate(2);
+            if !alts.is_empty() {
+                tex.push_str("\\paragraph{Other equations seen (same bucket; different ICs)}\n");
+                tex.push_str("\\begin{itemize}\n");
+                for alt in alts {
+                    let eq = truncate_to_chars(&single_line(&alt.equation_text), 220);
+                    tex.push_str(&format!(
+                        "  \\item score={}, rollout\\_rmse={}, mse={:.6e}, complexity={}: \\texttt{{{}}}.\\\\\n",
+                        format_opt_f64(record_effective_rollout_rmse(alt)),
+                        format_opt_f64(alt.metrics.rollout_rmse),
+                        alt.metrics.mse,
+                        alt.metrics.complexity,
+                        escape_latex(&eq),
+                    ));
+                }
+                tex.push_str("\\end{itemize}\n\n");
+            }
+        }
 
         tex.push_str("\\paragraph{Evidence}\\\\\n");
         tex.push_str(&format!(
@@ -6496,6 +6651,38 @@ mod tests {
         };
         sanitize_judge_recommendations(&mut rec, &bounds);
         assert!(rec.next_initial_conditions.is_none());
+    }
+
+    #[test]
+    fn sanitize_judge_recommendations_drops_invalid_enum_and_numeric_recommendations() {
+        let bounds = default_ic_bounds();
+        let mut rec = threebody_discover::JudgeRecommendations {
+            next_initial_conditions: None,
+            next_rollout_integrator: Some("rk4".to_string()),
+            next_ga_heuristic: Some("fitness".to_string()),
+            next_discovery_solver: Some("svd".to_string()),
+            next_normalize: Some(true),
+            next_feature_library: Some("mega".to_string()),
+            next_stls_threshold: Some(-1.0),
+            next_ridge_lambda: Some(-1e-3),
+            next_lasso_alpha: Some(0.0),
+            next_manual_equation_text: Some("ax=0 ; ay=0 ; az=0".to_string()),
+            next_search_directions: vec!["ok".to_string()],
+            notes: String::new(),
+        };
+
+        sanitize_judge_recommendations(&mut rec, &bounds);
+        assert!(rec.next_rollout_integrator.is_none());
+        assert!(rec.next_ga_heuristic.is_none());
+        assert!(rec.next_discovery_solver.is_none());
+        assert!(rec.next_feature_library.is_none());
+        assert!(rec.next_stls_threshold.is_none());
+        assert!(rec.next_ridge_lambda.is_none());
+        assert!(rec.next_lasso_alpha.is_none());
+        // Keep unrelated fields.
+        assert_eq!(rec.next_normalize, Some(true));
+        assert!(rec.next_manual_equation_text.is_some());
+        assert_eq!(rec.next_search_directions, vec!["ok".to_string()]);
     }
 
     #[test]

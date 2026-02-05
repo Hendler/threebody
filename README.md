@@ -86,6 +86,7 @@ Outputs:
 - Optionally, the LLM can propose a concrete candidate equation in the project’s feature language and/or request switching to the extended feature library; these proposals are treated as hypotheses and are scored by the same numeric evaluators.
 - The `factory` loop also runs a lightweight equation-GA: it carries forward the best equations across iterations and tries small, axis-consistent mutations (see `run_###/discovery.json` candidates with `source=equation_ga`).
 - Prompts and responses are logged for reproducibility; numeric metrics (MSE, rollout RMSE, divergence time) remain the primary ranking.
+- The LLM JSON parser is defensive: minor schema drift (wrong primitive types / wrapper objects) is repaired where possible; invalid steering recommendations are ignored (and logged) rather than crashing long runs.
 - The rollout evaluator supports `euler` and `leapfrog`; the LLM can recommend which to use next, along with the discovery configuration (solver: `stls`/`lasso`/`ga` and key hyperparameters).
 - `--llm-mode auto` uses OpenAI when a key is available, and otherwise falls back to a local mock judge/explainer. If the OpenAI call fails once (offline / network blocked / auth), it switches to mock for the remainder of the run.
 - If `.openai_key` exists in the working directory, it is used for OpenAI mode and overrides `OPENAI_API_KEY`.
