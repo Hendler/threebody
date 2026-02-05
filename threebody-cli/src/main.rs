@@ -3047,10 +3047,16 @@ fn run_factory(
     let mut current_fitness = parse_fitness_heuristic(&fitness)?;
     let mut current_rollout = parse_rollout_integrator(&rollout_integrator)?;
     let mut current_solver = solver_settings;
-    let mut current_library = FeatureLibraryKind::DefaultPhysics;
     let mut evaluation_iterations: Vec<FactoryEvaluationIteration> = Vec::new();
     let incumbent_bucket = BucketKey { steps, dt };
     let incumbent = load_incumbent_for_bucket(std::path::Path::new("results"), &incumbent_bucket);
+    let mut current_library = FeatureLibraryKind::DefaultPhysics;
+    if let Some(rec) = incumbent.as_ref() {
+        let incumbent_features = feature_names_for_equation_text(&rec.equation_text);
+        if incumbent_features.len() > FeatureLibrary::default_physics().features.len() {
+            current_library = FeatureLibraryKind::ExtendedPhysics;
+        }
+    }
     let mut equation_ga_parent: Option<String> = incumbent.as_ref().map(|r| r.equation_text.clone());
     let mut previous_iteration_elites: Vec<(String, CandidateMetrics)> = Vec::new();
 
@@ -3389,6 +3395,102 @@ fn run_factory(
                 ],
             );
         }
+
+        // Equation-GA (lightweight): treat equations themselves as a population across iterations.
+        // We carry forward the current best (and recent elites) and try a few small, axis-consistent
+        // mutations. Everything is still scored numerically; the LLM is just another proposal source.
+        {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for c in &vector_candidates {
+                if let Some(norm) =
+                    normalize_equation_text_for_features(&c.equation_text, &vector_data.feature_names)
+                {
+                    seen.insert(norm);
+                }
+            }
+
+            let mut parents: Vec<(String, String)> = Vec::new();
+            if let Some(eq) = equation_ga_parent.as_deref() {
+                parents.push(("equation_ga_parent".to_string(), eq.to_string()));
+            }
+            for (i, (eq, _m)) in previous_iteration_elites.iter().take(2).enumerate() {
+                parents.push((format!("equation_ga_elite_{}", i + 1), eq.clone()));
+            }
+            if parents.is_empty() {
+                if let Some(best_seed) = vector_candidates.iter().min_by(|a, b| {
+                    metrics_sort_key(&a.metrics)
+                        .partial_cmp(&metrics_sort_key(&b.metrics))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                }) {
+                    parents.push((
+                        "equation_ga_seed_from_current".to_string(),
+                        best_seed.equation_text.clone(),
+                    ));
+                }
+            }
+
+            let mut parent_used = 0usize;
+            for (parent_kind, parent_eq) in parents {
+                if parent_used >= 2 {
+                    break;
+                }
+                let Some(parent_norm) =
+                    normalize_equation_text_for_features(&parent_eq, &vector_data.feature_names)
+                else {
+                    continue;
+                };
+
+                if !seen.contains(&parent_norm) {
+                    append_manual_vector_candidate_from_equation_text(
+                        &mut vector_candidates,
+                        &parent_norm,
+                        &dataset_x,
+                        &dataset_y,
+                        &dataset_z,
+                        &vector_data.feature_names,
+                        &result,
+                        &cfg,
+                        regime,
+                        current_rollout,
+                        vec![
+                            "source=equation_ga".to_string(),
+                            format!("kind={parent_kind}"),
+                        ],
+                    );
+                    seen.insert(parent_norm.clone());
+                }
+
+                let mutant_seed = seed + iter as u64 + (parent_used as u64) * 10_000;
+                for mutant in propose_equation_mutants(
+                    &parent_norm,
+                    &vector_data.feature_names,
+                    regime,
+                    mutant_seed,
+                ) {
+                    if !seen.insert(mutant.clone()) {
+                        continue;
+                    }
+                    append_manual_vector_candidate_from_equation_text(
+                        &mut vector_candidates,
+                        &mutant,
+                        &dataset_x,
+                        &dataset_y,
+                        &dataset_z,
+                        &vector_data.feature_names,
+                        &result,
+                        &cfg,
+                        regime,
+                        current_rollout,
+                        vec![
+                            "source=equation_ga".to_string(),
+                            "kind=equation_ga_mutant".to_string(),
+                            format!("parent={}", truncate_to_chars(&single_line(&parent_norm), 120)),
+                        ],
+                    );
+                }
+                parent_used += 1;
+            }
+        }
         let grid_topk = grid_search(
             &vector_candidates
                 .iter()
@@ -3396,26 +3498,7 @@ fn run_factory(
                 .collect::<Vec<_>>(),
             &dataset_x,
         );
-
         let mut trace_written = false;
-        if let Some(best) = vector_candidates.iter().min_by(|a, b| {
-            metrics_sort_key(&a.metrics)
-                .partial_cmp(&metrics_sort_key(&b.metrics))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }) {
-            if let Some(best_model) = vector_model_from_equation_text(&best.equation_text) {
-                let trace = rollout_trace(
-                    &best_model,
-                    &vector_data.feature_names,
-                    &result,
-                    &cfg,
-                    current_rollout,
-                );
-                let trace_path = run_dir.join("rollout_trace.json");
-                fs::write(&trace_path, serde_json::to_string_pretty(&trace)?)?;
-                trace_written = true;
-            }
-        }
 
         let sim_summary = build_sim_summary(
             &result,
@@ -3544,6 +3627,26 @@ fn run_factory(
                         "kind=judge_next_manual_equation_text_same_iter".to_string(),
                     ],
                 );
+            }
+        }
+
+        // Write a rollout trace for the best (numerically) candidate after all candidate injection.
+        if let Some(best) = vector_candidates.iter().min_by(|a, b| {
+            metrics_sort_key(&a.metrics)
+                .partial_cmp(&metrics_sort_key(&b.metrics))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            if let Some(best_model) = vector_model_from_equation_text(&best.equation_text) {
+                let trace = rollout_trace(
+                    &best_model,
+                    &vector_data.feature_names,
+                    &result,
+                    &cfg,
+                    current_rollout,
+                );
+                let trace_path = run_dir.join("rollout_trace.json");
+                fs::write(&trace_path, serde_json::to_string_pretty(&trace)?)?;
+                trace_written = true;
             }
         }
 
@@ -3681,6 +3784,37 @@ fn run_factory(
                 .partial_cmp(&metrics_sort_key(&b.metrics))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+
+        // Update equation-GA state for the next iteration: keep a small elite set and a parent.
+        // We deduplicate by a normalized equation string so repeated identical models don't crowd out diversity.
+        {
+            let mut elite_map: std::collections::HashMap<String, CandidateMetrics> = std::collections::HashMap::new();
+            for c in &vector_candidates {
+                let Some(norm) =
+                    normalize_equation_text_for_features(&c.equation_text, &vector_data.feature_names)
+                else {
+                    continue;
+                };
+                let m = c.metrics.clone();
+                let key_new = metrics_sort_key(&m);
+                let replace = match elite_map.get(&norm) {
+                    Some(existing) => key_new < metrics_sort_key(existing),
+                    None => true,
+                };
+                if replace {
+                    elite_map.insert(norm, m);
+                }
+            }
+            let mut elites: Vec<(String, CandidateMetrics)> = elite_map.into_iter().collect();
+            elites.sort_by(|a, b| {
+                metrics_sort_key(&a.1)
+                    .partial_cmp(&metrics_sort_key(&b.1))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            equation_ga_parent = elites.first().map(|(eq, _)| eq.clone());
+            previous_iteration_elites = elites.into_iter().take(3).collect();
+        }
+
         let top_candidates: Vec<FactoryEvaluationCandidate> = candidates_sorted
             .into_iter()
             .take(3)
@@ -5744,6 +5878,78 @@ fn render_evaluation_tex(
         tex.push_str("N/A.\n\n");
     }
 
+    tex.push_str("\\section*{Candidate Equations Tried (Top 3 per Iteration)}\n");
+    tex.push_str(
+        "For each iteration we show the three best-scoring candidates under the numeric comparator (rollout\\_rmse, then mse, then complexity).\\\\\n\n",
+    );
+    for iter in &eval_input.iterations {
+        tex.push_str(&format!(
+            "\\subsection*{{Iteration {} (\\texttt{{{}}})}}\n",
+            iter.iteration,
+            escape_latex(&iter.run_id)
+        ));
+        if iter.top_candidates.is_empty() {
+            tex.push_str("No candidates recorded.\\\\\n\n");
+            continue;
+        }
+        for cand in &iter.top_candidates {
+            let m = &cand.metrics;
+            tex.push_str(&format!(
+                "\\noindent\\textbf{{Candidate id={}}}: rollout\\_rmse={}, divergence\\_time={}, mse={:.6e}, complexity={}, flags=\\texttt{{{}}}.\\\\\n",
+                cand.id,
+                format_opt_f64(m.rollout_rmse),
+                format_opt_f64(m.divergence_time),
+                m.mse,
+                m.complexity,
+                escape_latex(&m.stability_flags.join(", "))
+            ));
+            tex.push_str("\\begin{verbatim}\n");
+            tex.push_str(&cand.equation_text);
+            tex.push_str("\n\\end{verbatim}\n\n");
+        }
+
+        if let Some(j) = iter.judge.as_ref() {
+            let mut steering: Vec<String> = Vec::new();
+            if let Some(v) = j.recommendations.next_feature_library.as_ref() {
+                steering.push(format!("next_feature_library={v}"));
+            }
+            if let Some(v) = j.recommendations.next_rollout_integrator.as_ref() {
+                steering.push(format!("next_rollout_integrator={v}"));
+            }
+            if let Some(v) = j.recommendations.next_discovery_solver.as_ref() {
+                steering.push(format!("next_discovery_solver={v}"));
+            }
+            if let Some(v) = j.recommendations.next_normalize {
+                steering.push(format!("next_normalize={v}"));
+            }
+            if let Some(v) = j.recommendations.next_stls_threshold {
+                steering.push(format!("next_stls_threshold={v}"));
+            }
+            if let Some(v) = j.recommendations.next_ridge_lambda {
+                steering.push(format!("next_ridge_lambda={v:.3e}"));
+            }
+            if let Some(v) = j.recommendations.next_lasso_alpha {
+                steering.push(format!("next_lasso_alpha={v:.6}"));
+            }
+            if !steering.is_empty() {
+                tex.push_str(&format!(
+                    "\\noindent\\textbf{{LLM steering}}: \\texttt{{{}}}.\\\\\n\n",
+                    escape_latex(&steering.join(", "))
+                ));
+            }
+
+            if let Some(eq) = j.recommendations.next_manual_equation_text.as_ref() {
+                let trimmed = eq.trim();
+                if !trimmed.is_empty() {
+                    tex.push_str("\\noindent\\textbf{LLM proposed next equation (hypothesis):}\\\\\n");
+                    tex.push_str("\\begin{verbatim}\n");
+                    tex.push_str(trimmed);
+                    tex.push_str("\n\\end{verbatim}\n\n");
+                }
+            }
+        }
+    }
+
     tex.push_str("\\section*{Initial Conditions (Best Run)}\n");
     if let Some(ic) = best_ic {
         tex.push_str(&format!(
@@ -6476,12 +6682,55 @@ mod tests {
         for needle in [
             "\\section*{Executive Summary}",
             "\\section*{Best Equation (Exact)}",
+            "\\section*{Candidate Equations Tried (Top 3 per Iteration)}",
             "\\section*{Initial Conditions (Best Run)}",
             "\\section*{Comparison to Prior Attempts}",
         ] {
             assert!(tex.contains(needle), "missing {needle}");
         }
         assert!(tex.contains("ax=+1*grav_x"));
+    }
+
+    #[test]
+    fn normalize_equation_text_for_features_filters_unknown_terms() {
+        let features = FeatureLibrary::default_physics().features;
+        let raw = "ax=+1.000000*grav_x +2.000000*foo_x ; ay=+1.000000*grav_y ; az=0";
+        let norm = normalize_equation_text_for_features(raw, &features).expect("normalize");
+        assert!(norm.contains("grav_x"));
+        assert!(norm.contains("grav_y"));
+        assert!(!norm.contains("foo_x"));
+    }
+
+    #[test]
+    fn propose_equation_mutants_is_deterministic_and_axis_consistent() {
+        let features = FeatureLibrary::default_physics().features;
+        let parent = "ax=+1.000000*grav_x ; ay=+1.000000*grav_y ; az=0";
+        let a = propose_equation_mutants(parent, &features, "gravity_only", 123);
+        let b = propose_equation_mutants(parent, &features, "gravity_only", 123);
+        assert_eq!(a, b);
+        for eq in &a {
+            let [tx, ty, tz] = parse_vector_equation_terms(eq);
+            for (_c, f) in &tx {
+                assert!(f == "gate_close" || f == "gate_far" || f.ends_with("_x"));
+            }
+            for (_c, f) in &ty {
+                assert!(f == "gate_close" || f == "gate_far" || f.ends_with("_y"));
+            }
+            for (_c, f) in &tz {
+                assert!(f == "gate_close" || f == "gate_far" || f.ends_with("_z"));
+            }
+        }
+    }
+
+    #[test]
+    fn propose_equation_mutants_includes_grav_z_completion_in_gravity_only() {
+        let features = FeatureLibrary::default_physics().features;
+        let parent = "ax=+1.000000*grav_x ; ay=+1.000000*grav_y ; az=0";
+        let muts = propose_equation_mutants(parent, &features, "gravity_only", 7);
+        assert!(
+            muts.iter().any(|s| s.contains("az=") && s.contains("grav_z")),
+            "expected a mutant that includes grav_z in az"
+        );
     }
 
     fn mk_eval_input_with_notes(

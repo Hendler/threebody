@@ -364,6 +364,78 @@ fn factory_runs_once_with_mock_llm() {
 }
 
 #[test]
+fn factory_injects_equation_ga_candidates_and_uses_elite_equations_for_ic_notes() {
+    let exe = env!("CARGO_BIN_EXE_threebody-cli");
+    let tmp_dir = env::temp_dir().join(format!(
+        "threebody_factory_eq_ga_{}",
+        std::process::id()
+    ));
+    if tmp_dir.exists() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    let output = Command::new(exe)
+        .args([
+            "factory",
+            "--out-dir",
+            tmp_dir.to_str().unwrap(),
+            "--max-iters",
+            "2",
+            "--auto",
+            "--steps",
+            "5",
+            "--dt",
+            "0.01",
+            "--llm-mode",
+            "mock",
+        ])
+        .output()
+        .expect("run factory 2 iters");
+    assert!(
+        output.status.success(),
+        "factory failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let sim_attempts = fs::read_to_string(tmp_dir.join("run_002").join("sim_attempts.json"))
+        .expect("sim_attempts.json");
+    let attempts_v: serde_json::Value = serde_json::from_str(&sim_attempts).unwrap();
+    let notes = attempts_v
+        .get(0)
+        .and_then(|v| v.get("ic_request"))
+        .and_then(|v| v.get("notes"))
+        .and_then(|v| v.as_array())
+        .expect("ic_request.notes");
+    assert!(
+        notes.iter().any(|n| {
+            n.as_str()
+                .unwrap_or_default()
+                .contains("PREV_ITER_ELITE_EQUATIONS")
+        }),
+        "expected elite-equation notes in IC request"
+    );
+
+    let discovery = fs::read_to_string(tmp_dir.join("run_002").join("discovery.json")).expect("discovery.json");
+    let discovery_v: serde_json::Value = serde_json::from_str(&discovery).unwrap();
+    let vector_candidates = discovery_v
+        .get("vector_candidates")
+        .and_then(|v| v.as_array())
+        .expect("vector_candidates array");
+    let has_mutant = vector_candidates.iter().any(|c| {
+        c.get("notes").and_then(|v| v.as_array()).map_or(false, |arr| {
+            arr.iter().any(|n| {
+                n.as_str()
+                    .unwrap_or_default()
+                    .contains("kind=equation_ga_mutant")
+            })
+        })
+    });
+    assert!(has_mutant, "expected at least one equation_ga_mutant candidate");
+
+    let _ = fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
 fn conflicting_em_flags_fail() {
     let exe = env!("CARGO_BIN_EXE_threebody-cli");
     let tmp_dir = env::temp_dir().join(format!("threebody_em_conflict_{}", std::process::id()));
