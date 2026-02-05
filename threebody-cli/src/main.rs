@@ -3051,6 +3051,8 @@ fn run_factory(
     let mut evaluation_iterations: Vec<FactoryEvaluationIteration> = Vec::new();
     let incumbent_bucket = BucketKey { steps, dt };
     let incumbent = load_incumbent_for_bucket(std::path::Path::new("results"), &incumbent_bucket);
+    let mut equation_ga_parent: Option<String> = incumbent.as_ref().map(|r| r.equation_text.clone());
+    let mut previous_iteration_elites: Vec<(String, CandidateMetrics)> = Vec::new();
 
     if require_llm {
         let Some(client) = llm_client.as_ref() else {
@@ -3081,6 +3083,24 @@ fn run_factory(
         let mut ic_notes = vec!["avoid close encounters".to_string(), "prefer bounded motion".to_string()];
         if let Some(rec) = incumbent.as_ref() {
             ic_notes.extend(incumbent_prompt_notes(rec));
+        }
+        if !previous_iteration_elites.is_empty() {
+            ic_notes.push("PREV_ITER_ELITE_EQUATIONS (use these to pick ICs that distinguish models):".to_string());
+            for (i, (eq, m)) in previous_iteration_elites.iter().take(3).enumerate() {
+                let eq = truncate_to_chars(&single_line(eq), 300);
+                ic_notes.push(format!(
+                    "ELITE_{}: eq={} | rollout_rmse={} | mse={:.6e} | complexity={}",
+                    i + 1,
+                    eq,
+                    format_opt_f64(m.rollout_rmse),
+                    m.mse,
+                    m.complexity
+                ));
+            }
+            ic_notes.push(
+                "IC_GOAL: propose initial conditions where these elite equations diverge in rollout so we can rank them."
+                    .to_string(),
+            );
         }
 
         #[derive(serde::Serialize)]
@@ -3378,24 +3398,12 @@ fn run_factory(
         );
 
         let mut trace_written = false;
-        if !vector_candidates.is_empty() {
-            let mut best_idx = 0usize;
-            let mut best_mse = vector_candidates[0].metrics.mse;
-            for (i, cand) in vector_candidates.iter().enumerate().skip(1) {
-                if cand.metrics.mse < best_mse {
-                    best_mse = cand.metrics.mse;
-                    best_idx = i;
-                }
-            }
-            if best_idx < topk_x.entries.len()
-                && best_idx < topk_y.entries.len()
-                && best_idx < topk_z.entries.len()
-            {
-                let best_model = VectorModel {
-                    eq_x: topk_x.entries[best_idx].equation.clone(),
-                    eq_y: topk_y.entries[best_idx].equation.clone(),
-                    eq_z: topk_z.entries[best_idx].equation.clone(),
-                };
+        if let Some(best) = vector_candidates.iter().min_by(|a, b| {
+            metrics_sort_key(&a.metrics)
+                .partial_cmp(&metrics_sort_key(&b.metrics))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            if let Some(best_model) = vector_model_from_equation_text(&best.equation_text) {
                 let trace = rollout_trace(
                     &best_model,
                     &vector_data.feature_names,
@@ -3626,9 +3634,8 @@ fn run_factory(
             format_opt_f64(sim_summary.mean_abs_accel_ratio_em_over_grav)
         ));
         if let Some(best_vec) = vector_candidates.iter().min_by(|a, b| {
-            a.metrics
-                .mse
-                .partial_cmp(&b.metrics.mse)
+            metrics_sort_key(&a.metrics)
+                .partial_cmp(&metrics_sort_key(&b.metrics))
                 .unwrap_or(std::cmp::Ordering::Equal)
         }) {
             md.push_str(&format!(
@@ -3670,9 +3677,8 @@ fn run_factory(
         };
         let mut candidates_sorted = vector_candidates.clone();
         candidates_sorted.sort_by(|a, b| {
-            a.metrics
-                .mse
-                .partial_cmp(&b.metrics.mse)
+            metrics_sort_key(&a.metrics)
+                .partial_cmp(&metrics_sort_key(&b.metrics))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let top_candidates: Vec<FactoryEvaluationCandidate> = candidates_sorted
@@ -5181,6 +5187,217 @@ fn feature_names_for_equation_text(equation_text: &str) -> Vec<String> {
     } else {
         default.features
     }
+}
+
+fn normalize_equation_text_for_features(equation_text: &str, feature_names: &[String]) -> Option<String> {
+    let mut model = vector_model_from_equation_text(equation_text)?;
+    let allowed: std::collections::HashSet<&str> = feature_names.iter().map(|s| s.as_str()).collect();
+    for eq in [&mut model.eq_x, &mut model.eq_y, &mut model.eq_z] {
+        eq.terms
+            .retain(|t| t.coeff.is_finite() && allowed.contains(t.feature.as_str()));
+        eq.terms.sort_by(|a, b| a.feature.cmp(&b.feature));
+    }
+    Some(format_vector_model(&model))
+}
+
+fn feature_pool_for_axis(feature_names: &[String], axis: char, regime: &str) -> Vec<String> {
+    fn axis_ok(name: &str, axis: char) -> bool {
+        name == "gate_close" || name == "gate_far" || name.ends_with(&format!("_{axis}"))
+    }
+    fn regime_ok(name: &str, regime: &str) -> bool {
+        if regime == "gravity_only" {
+            name.starts_with("grav") || name.starts_with("gate")
+        } else {
+            true
+        }
+    }
+
+    feature_names
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|name| axis_ok(name, axis) && regime_ok(name, regime))
+        .map(|s| s.to_string())
+        .collect()
+}
+
+fn format_terms_for_equation_text(mut terms: Vec<(f64, String)>) -> String {
+    terms.retain(|(c, f)| c.is_finite() && !f.trim().is_empty());
+    if terms.is_empty() {
+        return "0".to_string();
+    }
+    terms.sort_by(|a, b| a.1.cmp(&b.1));
+    terms
+        .into_iter()
+        .map(|(c, f)| format!("{:+.6}*{f}", c))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn format_vector_equation_text(terms: [Vec<(f64, String)>; 3]) -> String {
+    let [tx, ty, tz] = terms;
+    format!(
+        "ax={} ; ay={} ; az={}",
+        format_terms_for_equation_text(tx),
+        format_terms_for_equation_text(ty),
+        format_terms_for_equation_text(tz)
+    )
+}
+
+fn propose_equation_mutants(
+    parent_equation_text: &str,
+    feature_names: &[String],
+    regime: &str,
+    seed: u64,
+) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+
+    fn to_map(terms: Vec<(f64, String)>) -> HashMap<String, f64> {
+        let mut map: HashMap<String, f64> = HashMap::new();
+        for (coeff, feature) in terms {
+            if !coeff.is_finite() || feature.trim().is_empty() {
+                continue;
+            }
+            *map.entry(feature).or_insert(0.0) += coeff;
+        }
+        map.retain(|_, v| v.is_finite() && v.abs() > 1e-12);
+        map
+    }
+
+    fn map_to_terms(map: HashMap<String, f64>) -> Vec<(f64, String)> {
+        let mut out: Vec<(f64, String)> = map
+            .into_iter()
+            .filter(|(_f, c)| c.is_finite() && c.abs() > 1e-12)
+            .map(|(f, c)| (c, f))
+            .collect();
+        out.sort_by(|a, b| a.1.cmp(&b.1));
+        out
+    }
+
+    fn choose_index(rng: &mut threebody_discover::ga::Lcg, len: usize) -> Option<usize> {
+        if len == 0 {
+            None
+        } else {
+            Some(rng.gen_range_usize(0, len - 1))
+        }
+    }
+
+    fn mutate_axis(
+        map: &mut HashMap<String, f64>,
+        pool: &[String],
+        rng: &mut threebody_discover::ga::Lcg,
+        max_terms: usize,
+    ) {
+        let r = rng.gen_range_f64(0.0, 1.0);
+        if r < 0.45 {
+            // Coefficient jitter.
+            let keys: Vec<String> = map.keys().cloned().collect();
+            if let Some(idx) = choose_index(rng, keys.len()) {
+                let k = &keys[idx];
+                let factor = 1.0 + rng.gen_range_f64(-0.15, 0.15);
+                if let Some(v) = map.get_mut(k) {
+                    *v *= factor;
+                    if !v.is_finite() || v.abs() <= 1e-8 {
+                        map.remove(k);
+                    }
+                }
+            }
+        } else if r < 0.80 {
+            // Add a term.
+            if !pool.is_empty() {
+                for _ in 0..8 {
+                    let idx = rng.gen_range_usize(0, pool.len() - 1);
+                    let feat = &pool[idx];
+                    if map.contains_key(feat) {
+                        continue;
+                    }
+                    let coeff = rng.gen_range_f64(-1.5, 1.5);
+                    if coeff.is_finite() && coeff.abs() > 1e-8 {
+                        map.insert(feat.clone(), coeff);
+                    }
+                    break;
+                }
+            }
+        } else {
+            // Remove a term.
+            let keys: Vec<String> = map.keys().cloned().collect();
+            if let Some(idx) = choose_index(rng, keys.len()) {
+                map.remove(&keys[idx]);
+            }
+        }
+
+        // Keep models small.
+        while map.len() > max_terms {
+            let keys: Vec<String> = map.keys().cloned().collect();
+            if let Some(idx) = choose_index(rng, keys.len()) {
+                map.remove(&keys[idx]);
+            } else {
+                break;
+            }
+        }
+    }
+
+    let pool_x = feature_pool_for_axis(feature_names, 'x', regime);
+    let pool_y = feature_pool_for_axis(feature_names, 'y', regime);
+    let pool_z = feature_pool_for_axis(feature_names, 'z', regime);
+
+    let base_terms = parse_vector_equation_terms(parent_equation_text);
+    let base = [
+        to_map(base_terms[0].clone()),
+        to_map(base_terms[1].clone()),
+        to_map(base_terms[2].clone()),
+    ];
+
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    // Deterministic gravity-axis completion variant.
+    if regime == "gravity_only" && feature_names.iter().any(|f| f == "grav_z") {
+        let mut tx = base_terms[0].clone();
+        let mut ty = base_terms[1].clone();
+        let mut tz = base_terms[2].clone();
+        let has_grav_z = tz.iter().any(|(_c, f)| f == "grav_z");
+        if !has_grav_z {
+            tz.push((1.0, "grav_z".to_string()));
+        }
+        // Keep x/y grav terms if present; otherwise add the canonical ones.
+        if !tx.iter().any(|(_c, f)| f == "grav_x") && feature_names.iter().any(|f| f == "grav_x") {
+            tx.push((1.0, "grav_x".to_string()));
+        }
+        if !ty.iter().any(|(_c, f)| f == "grav_y") && feature_names.iter().any(|f| f == "grav_y") {
+            ty.push((1.0, "grav_y".to_string()));
+        }
+        let eq = format_vector_equation_text([tx, ty, tz]);
+        if let Some(norm) = normalize_equation_text_for_features(&eq, feature_names) {
+            seen.insert(norm.clone());
+            out.push(norm);
+        }
+    }
+
+    // Random small mutations around the parent.
+    let mut rng = threebody_discover::ga::Lcg::new(seed);
+    let max_terms = 4usize;
+    let target = 3usize;
+    let mut attempts = 0usize;
+    while out.len() < target && attempts < 30 {
+        attempts += 1;
+        let mut mx = base[0].clone();
+        let mut my = base[1].clone();
+        let mut mz = base[2].clone();
+        mutate_axis(&mut mx, &pool_x, &mut rng, max_terms);
+        mutate_axis(&mut my, &pool_y, &mut rng, max_terms);
+        mutate_axis(&mut mz, &pool_z, &mut rng, max_terms);
+
+        let eq = format_vector_equation_text([map_to_terms(mx), map_to_terms(my), map_to_terms(mz)]);
+        let Some(norm) = normalize_equation_text_for_features(&eq, feature_names) else {
+            continue;
+        };
+        if !seen.insert(norm.clone()) {
+            continue;
+        }
+        out.push(norm);
+    }
+
+    out
 }
 
 fn parse_vector_equation_terms(equation_text: &str) -> [Vec<(f64, String)>; 3] {
