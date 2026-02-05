@@ -1,7 +1,7 @@
 use std::process::Command;
 use std::{env, fs};
 
-fn start_openai_chat_stub() -> (std::net::SocketAddr, std::thread::JoinHandle<()>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+fn start_openai_chat_stub() -> Option<(std::net::SocketAddr, std::thread::JoinHandle<()>, std::sync::Arc<std::sync::atomic::AtomicBool>)> {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -141,7 +141,11 @@ fn start_openai_chat_stub() -> (std::net::SocketAddr, std::thread::JoinHandle<()
         }
     }
 
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind stub server");
+    let listener = match TcpListener::bind("127.0.0.1:0") {
+        Ok(v) => v,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return None,
+        Err(err) => panic!("bind stub server: {err}"),
+    };
     listener
         .set_nonblocking(true)
         .expect("set nonblocking");
@@ -166,7 +170,7 @@ fn start_openai_chat_stub() -> (std::net::SocketAddr, std::thread::JoinHandle<()
         }
     });
 
-    (addr, handle, running)
+    Some((addr, handle, running))
 }
 
 #[test]
@@ -568,7 +572,10 @@ fn quickstart_command_runs_with_require_llm_against_stub() {
     use std::net::TcpStream;
     use std::sync::atomic::Ordering;
 
-    let (addr, handle, running) = start_openai_chat_stub();
+    let Some((addr, handle, running)) = start_openai_chat_stub() else {
+        eprintln!("skipping require-llm stub test (loopback sockets not permitted in this environment)");
+        return;
+    };
 
     let exe = env!("CARGO_BIN_EXE_threebody-cli");
     let tmp_dir = env::temp_dir().join(format!(

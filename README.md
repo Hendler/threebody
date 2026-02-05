@@ -123,8 +123,12 @@ just quickstart10 1000
 What it does:
 - Runs the full quickstart workflow 10 times (each quickstart has 10 factory iterations).
 - Updates `results/best_results.md` after every run.
+- Writes a held-out benchmark report at `results/<run>/factory/benchmark_eval.json` and includes it in `results/<run>/RESULTS.md` under “Held-out Benchmark”. This is a fixed IC suite intended for apples-to-apples comparisons across runs in the same `(steps, dt)` bucket.
 - Requires a reachable LLM endpoint (OpenAI by default). Set `.openai_key` or `OPENAI_API_KEY`. To use a local OpenAI-compatible endpoint, set `OPENAI_BASE_URL` (e.g. `http://localhost:11434/v1`). If your endpoint only supports Chat Completions, set `OPENAI_API_STYLE=chat`. If your endpoint needs a different model name, set `THREEBODY_LLM_MODEL`.
 - Writes an aggregated findings report to `results/findings.tex` (and `results/findings.pdf` when `pdflatex` is available). Each run also copies a timestamped PDF snapshot (e.g. `results/findings_<unix_seconds>.pdf`).
+
+Notes on 3D learning:
+- The factory loop forces a small deterministic `z` perturbation in initial conditions when the proposed ICs are planar. This prevents repeatedly rediscovering `az=0` from purely planar trajectories and makes `grav_z` identifiable in gravity-only runs.
 
 How to confirm it really used an LLM (and didn’t silently fall back):
 - `just quickstart` / `just quickstart10` run `llm-check` first and will fail fast if the LLM isn’t reachable.

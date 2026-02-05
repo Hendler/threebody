@@ -1262,6 +1262,7 @@ fn run_bench_em(
         prior_best.as_ref(),
         best_ic.as_ref(),
         incumbent_on_best_run.as_ref(),
+        None,
     );
     fs::write(factory_dir.join("evaluation.md"), &exec_md)?;
     fs::write(out_dir.join("RESULTS.md"), &exec_md)?;
@@ -2149,6 +2150,52 @@ fn system_from_ic(spec: &InitialConditionSpec, bounds: &IcBounds) -> anyhow::Res
         anyhow::bail!("initial conditions too close: min_pair_dist={}", min_dist);
     }
     Ok(system)
+}
+
+fn ic_is_nearly_planar(spec: &InitialConditionSpec) -> bool {
+    const EPS: f64 = 1e-9;
+    spec.bodies
+        .iter()
+        .all(|b| b.pos[2].abs() <= EPS && b.vel[2].abs() <= EPS)
+}
+
+fn force_nonplanar_ic(mut spec: InitialConditionSpec, bounds: &IcBounds, seed: u64) -> InitialConditionSpec {
+    if spec.bodies.len() != 3 {
+        return spec;
+    }
+    if !ic_is_nearly_planar(&spec) {
+        return spec;
+    }
+
+    let clamp = |v: f64, min: f64, max: f64| {
+        if !v.is_finite() {
+            min
+        } else {
+            v.min(max).max(min)
+        }
+    };
+
+    // Deterministic, small z-perturbation to ensure 3D dynamics so `az` is identifiable.
+    // Barycentric conversion later removes COM position/velocity, so we only need a nonzero z component.
+    let sign = if seed % 2 == 0 { 1.0 } else { -1.0 };
+    let dz = 0.25 * sign;
+    let dvz = 0.10 * if seed % 3 == 0 { 1.0 } else { -1.0 };
+
+    spec.bodies[0].pos[2] = clamp(spec.bodies[0].pos[2] + dz, bounds.pos_min, bounds.pos_max);
+    spec.bodies[1].pos[2] = clamp(spec.bodies[1].pos[2] - 0.5 * dz, bounds.pos_min, bounds.pos_max);
+    spec.bodies[2].pos[2] = clamp(spec.bodies[2].pos[2] - 0.5 * dz, bounds.pos_min, bounds.pos_max);
+
+    spec.bodies[0].vel[2] = clamp(spec.bodies[0].vel[2] + dvz, bounds.vel_min, bounds.vel_max);
+    spec.bodies[1].vel[2] = clamp(spec.bodies[1].vel[2] - 0.5 * dvz, bounds.vel_min, bounds.vel_max);
+    spec.bodies[2].vel[2] = clamp(spec.bodies[2].vel[2] - 0.5 * dvz, bounds.vel_min, bounds.vel_max);
+
+    if spec.notes.trim().is_empty() {
+        spec.notes = "forced_nonplanar_z=true".to_string();
+    } else {
+        spec.notes = format!("{} | forced_nonplanar_z=true", spec.notes.trim());
+    }
+    spec.barycentric = true;
+    spec
 }
 
 fn min_pair_distance(pos: &[Vec3; 3]) -> f64 {
@@ -3050,13 +3097,23 @@ fn run_factory(
                     initial_conditions_from_preset(preset)?
                 };
 
+                let candidate = force_nonplanar_ic(candidate, ic_bounds, seed + ic_attempt as u64);
                 match system_from_ic(&candidate, ic_bounds) {
                     Ok(system) => return Ok((ic_request, candidate, system, ic_prompt, ic_response)),
                     Err(err) => {
                         if !require_llm {
                             eprintln!("IC validation failed ({err}); falling back to preset.");
-                            let spec = initial_conditions_from_preset(preset)?;
-                            let system = preset_system(preset)?;
+                            let spec = force_nonplanar_ic(initial_conditions_from_preset(preset)?, ic_bounds, seed);
+                            let system = system_from_ic(&spec, ic_bounds).unwrap_or_else(|_| {
+                                // Presets are assumed safe; if barycentric/min-dist checks fail for any reason,
+                                // keep going with the raw preset system.
+                                preset_system(preset).unwrap_or_else(|_| {
+                                    let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(1.0, 0.0)];
+                                    let pos = [Vec3::zero(); 3];
+                                    let vel = [Vec3::zero(); 3];
+                                    System::new(bodies, State::new(pos, vel))
+                                })
+                            });
                             let ic_request = IcRequest {
                                 bounds: ic_bounds.clone(),
                                 regime: regime.to_string(),
@@ -3603,6 +3660,13 @@ fn run_factory(
         }))
     })()?;
 
+    let benchmark_eval: Option<BenchmarkEvalV1> = current_best
+        .as_ref()
+        .and_then(|best| compute_benchmark_eval_v1(out_dir.as_path(), best, incumbent_bucket).ok());
+    if let Some(b) = benchmark_eval.as_ref() {
+        let _ = fs::write(out_dir.join("benchmark_eval.json"), serde_json::to_string_pretty(b)?);
+    }
+
     #[derive(serde::Serialize)]
     struct HistoryAttempt {
         factory_dir: String,
@@ -3720,6 +3784,7 @@ fn run_factory(
         prior_best.as_ref(),
         best_ic.as_ref(),
         incumbent_on_best_run.as_ref(),
+        benchmark_eval.as_ref(),
     );
 
     let mut raw_md = String::new();
@@ -3765,6 +3830,295 @@ fn run_factory(
     Ok(())
 }
 
+fn benchmark_rollout_integrator_for_regime(regime: &str) -> RolloutIntegrator {
+    match regime {
+        "gravity_only" => RolloutIntegrator::Leapfrog,
+        _ => RolloutIntegrator::Euler,
+    }
+}
+
+fn benchmark_suite_v1(regime: &str, bounds: &IcBounds) -> Vec<(String, InitialConditionSpec)> {
+    let mut cases: Vec<(String, InitialConditionSpec)> = Vec::new();
+    match regime {
+        "gravity_only" => {
+            cases.push((
+                "equilateral_tilt".to_string(),
+                InitialConditionSpec {
+                    bodies: vec![
+                        threebody_discover::BodyInit {
+                            mass: 1.0,
+                            charge: 0.0,
+                            pos: [0.577_350_269_189_625_8, 0.0, 0.2],
+                            vel: [0.0, 1.0, 0.05],
+                        },
+                        threebody_discover::BodyInit {
+                            mass: 1.0,
+                            charge: 0.0,
+                            pos: [-0.288_675_134_594_812_9, 0.5, -0.1],
+                            vel: [-0.866_025_403_784_438_6, -0.5, -0.025],
+                        },
+                        threebody_discover::BodyInit {
+                            mass: 1.0,
+                            charge: 0.0,
+                            pos: [-0.288_675_134_594_812_9, -0.5, -0.1],
+                            vel: [0.866_025_403_784_438_6, -0.5, -0.025],
+                        },
+                    ],
+                    barycentric: true,
+                    notes: "benchmark_suite_v1 gravity_only equilateral_tilt".to_string(),
+                },
+            ));
+            cases.push((
+                "two_body_perturber_3d".to_string(),
+                InitialConditionSpec {
+                    bodies: vec![
+                        threebody_discover::BodyInit {
+                            mass: 1.0,
+                            charge: 0.0,
+                            pos: [-0.5, 0.0, 0.1],
+                            vel: [0.0, 0.7, 0.05],
+                        },
+                        threebody_discover::BodyInit {
+                            mass: 1.0,
+                            charge: 0.0,
+                            pos: [0.5, 0.0, -0.1],
+                            vel: [0.0, -0.7, -0.05],
+                        },
+                        threebody_discover::BodyInit {
+                            mass: 0.1,
+                            charge: 0.0,
+                            pos: [0.0, 0.3, 0.0],
+                            vel: [0.0, 0.0, 0.0],
+                        },
+                    ],
+                    barycentric: true,
+                    notes: "benchmark_suite_v1 gravity_only two_body_perturber_3d".to_string(),
+                },
+            ));
+            cases.push((
+                "skew_triangle_3d".to_string(),
+                InitialConditionSpec {
+                    bodies: vec![
+                        threebody_discover::BodyInit {
+                            mass: 1.5,
+                            charge: 0.0,
+                            pos: [-0.7, 0.0, 0.15],
+                            vel: [0.0, -0.3, 0.02],
+                        },
+                        threebody_discover::BodyInit {
+                            mass: 1.0,
+                            charge: 0.0,
+                            pos: [0.7, 0.0, -0.05],
+                            vel: [0.0, 0.45, -0.01],
+                        },
+                        threebody_discover::BodyInit {
+                            mass: 0.8,
+                            charge: 0.0,
+                            pos: [0.0, 1.0, -0.1],
+                            vel: [0.0, -0.1875, 0.0],
+                        },
+                    ],
+                    barycentric: true,
+                    notes: "benchmark_suite_v1 gravity_only skew_triangle_3d".to_string(),
+                },
+            ));
+        }
+        "em_quasistatic" => {
+            // A small, deterministic suite intended to make EM effects non-trivial while staying within bounds.
+            cases.push((
+                "em_like_charges_fast".to_string(),
+                InitialConditionSpec {
+                    bodies: vec![
+                        threebody_discover::BodyInit {
+                            mass: 1.0,
+                            charge: 1.0,
+                            pos: [-0.8, 0.0, 0.2],
+                            vel: [0.0, 1.0, 0.1],
+                        },
+                        threebody_discover::BodyInit {
+                            mass: 1.0,
+                            charge: 1.0,
+                            pos: [0.8, 0.0, -0.2],
+                            vel: [0.0, -1.0, -0.1],
+                        },
+                        threebody_discover::BodyInit {
+                            mass: 0.8,
+                            charge: 1.0,
+                            pos: [0.0, 1.0, 0.0],
+                            vel: [0.0, 0.0, 0.0],
+                        },
+                    ],
+                    barycentric: true,
+                    notes: "benchmark_suite_v1 em_quasistatic em_like_charges_fast".to_string(),
+                },
+            ));
+            cases.push((
+                "em_alternating_signs".to_string(),
+                InitialConditionSpec {
+                    bodies: vec![
+                        threebody_discover::BodyInit {
+                            mass: 1.0,
+                            charge: 1.0,
+                            pos: [-0.6, 0.0, 0.15],
+                            vel: [0.0, 0.9, 0.05],
+                        },
+                        threebody_discover::BodyInit {
+                            mass: 1.0,
+                            charge: -1.0,
+                            pos: [0.6, 0.0, -0.15],
+                            vel: [0.0, -0.9, -0.05],
+                        },
+                        threebody_discover::BodyInit {
+                            mass: 1.2,
+                            charge: 1.0,
+                            pos: [0.0, 1.0, 0.0],
+                            vel: [0.0, 0.0, 0.0],
+                        },
+                    ],
+                    barycentric: true,
+                    notes: "benchmark_suite_v1 em_quasistatic em_alternating_signs".to_string(),
+                },
+            ));
+            cases.push((
+                "em_high_ang_momentum_3d".to_string(),
+                InitialConditionSpec {
+                    bodies: vec![
+                        threebody_discover::BodyInit {
+                            mass: 1.0,
+                            charge: 0.6,
+                            pos: [-0.9, 0.0, 0.25],
+                            vel: [0.0, 1.2, 0.0],
+                        },
+                        threebody_discover::BodyInit {
+                            mass: 1.0,
+                            charge: -0.6,
+                            pos: [0.9, 0.0, -0.25],
+                            vel: [0.0, -1.2, 0.0],
+                        },
+                        threebody_discover::BodyInit {
+                            mass: 0.5,
+                            charge: 0.3,
+                            pos: [0.0, 0.9, 0.0],
+                            vel: [0.0, 0.0, 0.0],
+                        },
+                    ],
+                    barycentric: true,
+                    notes: "benchmark_suite_v1 em_quasistatic em_high_ang_momentum_3d".to_string(),
+                },
+            ));
+        }
+        _ => {}
+    }
+
+    // Final safety pass: ensure 3D and clamp within bounds.
+    for (i, (_name, spec)) in cases.iter_mut().enumerate() {
+        *spec = force_nonplanar_ic(spec.clone(), bounds, 1 + i as u64);
+    }
+    cases
+}
+
+fn compute_benchmark_eval_v1(
+    factory_dir: &std::path::Path,
+    best: &BestFactoryCandidate,
+    bucket: BucketKey,
+) -> anyhow::Result<BenchmarkEvalV1> {
+    let bounds = default_ic_bounds();
+    let suite_id = "benchmark_suite_v1".to_string();
+    let rollout_integrator = benchmark_rollout_integrator_for_regime(&best.regime);
+    let rollout_integrator_label = rollout_integrator_label(rollout_integrator).to_string();
+
+    let run_dir = factory_dir.join(&best.run_id);
+    let cfg_json = fs::read_to_string(run_dir.join("config.json"))?;
+    let mut cfg: Config = serde_json::from_str(&cfg_json)?;
+    if matches!(cfg.integrator.kind, IntegratorKind::Rk45) && cfg.integrator.adaptive {
+        cfg.integrator.max_rejects = cfg.integrator.max_rejects.max(64);
+    }
+    cfg.validate().map_err(anyhow::Error::msg)?;
+
+    let model = vector_model_from_equation_text(&best.candidate.equation_text)
+        .ok_or_else(|| anyhow::anyhow!("failed to parse best equation into a model"))?;
+    let feature_names = FeatureLibrary::default_physics().features;
+
+    let suite = benchmark_suite_v1(&best.regime, &bounds);
+    let mut cases: Vec<BenchmarkCaseEval> = Vec::new();
+    let mut rmses: Vec<f64> = Vec::new();
+    let mut divergence_min = f64::INFINITY;
+    let mut notes: Vec<String> = Vec::new();
+
+    for (case_name, ic_spec) in suite.into_iter() {
+        let system = system_from_ic(&ic_spec, &bounds)?;
+        let result = simulate_with_cfg(system, &cfg, SimOptions { steps: bucket.steps, dt: bucket.dt });
+        let sim_summary = build_sim_summary(
+            &result,
+            &cfg,
+            rollout_integrator,
+            Some(bucket.steps),
+            Some(bucket.dt),
+        );
+
+        let usable = !result.terminated_early && result.steps.len() == bucket.steps + 1;
+        let (rollout_rmse, divergence_time) = if usable {
+            let (rmse, div) = rollout_metrics(&model, &feature_names, &result, &cfg, rollout_integrator);
+            if rmse.is_finite() {
+                rmses.push(rmse);
+            }
+            divergence_min = divergence_min.min(div.unwrap_or(f64::INFINITY));
+            (Some(rmse), div)
+        } else {
+            notes.push(format!(
+                "benchmark_case_unusable name={} terminated_early={} steps={}",
+                case_name,
+                result.terminated_early,
+                result.steps.len()
+            ));
+            (None, None)
+        };
+
+        cases.push(BenchmarkCaseEval {
+            name: case_name,
+            initial_conditions: ic_spec,
+            simulation: sim_summary,
+            rollout_rmse,
+            divergence_time,
+        });
+    }
+
+    let expected_cases = cases.len();
+    let all_cases_ok = rmses.len() == expected_cases && expected_cases > 0;
+    let rmse_mean = all_cases_ok.then(|| rmses.iter().sum::<f64>() / rmses.len() as f64);
+    let rmse_max = all_cases_ok.then(|| rmses.iter().copied().fold(0.0, f64::max));
+    let divergence_time_min = all_cases_ok
+        .then(|| divergence_min)
+        .and_then(|v| v.is_finite().then_some(v))
+        .or_else(|| all_cases_ok.then_some(f64::INFINITY).and_then(|_| None));
+
+    let aggregate = BenchmarkAggregate {
+        suite_id: suite_id.clone(),
+        rollout_integrator: rollout_integrator_label.clone(),
+        cases: expected_cases,
+        rmse_mean,
+        rmse_max,
+        divergence_time_min,
+    };
+
+    Ok(BenchmarkEvalV1 {
+        version: "v1".to_string(),
+        suite_id,
+        bucket,
+        regime: best.regime.clone(),
+        rollout_integrator: rollout_integrator_label,
+        candidate: BenchmarkCandidateRef {
+            run_id: best.run_id.clone(),
+            candidate_id: best.candidate.id,
+            equation_text: best.candidate.equation_text.clone(),
+            complexity: best.candidate.metrics.complexity,
+        },
+        cases,
+        aggregate,
+        notes,
+    })
+}
+
 #[derive(Clone, Debug)]
 struct BestFactoryCandidate {
     run_id: String,
@@ -3777,6 +4131,26 @@ fn metrics_sort_key(metrics: &CandidateMetrics) -> (f64, f64, usize) {
     let rollout_rmse = if rollout_rmse.is_finite() { rollout_rmse } else { f64::INFINITY };
     let mse = if metrics.mse.is_finite() { metrics.mse } else { f64::INFINITY };
     (rollout_rmse, mse, metrics.complexity)
+}
+
+fn best_record_sort_key(record: &BestRecord) -> (f64, f64, usize) {
+    let rollout_rmse = record
+        .benchmark
+        .as_ref()
+        .and_then(|b| b.rmse_mean)
+        .or(record.metrics.rollout_rmse)
+        .unwrap_or(f64::INFINITY);
+    let rollout_rmse = if rollout_rmse.is_finite() { rollout_rmse } else { f64::INFINITY };
+    let mse = if record.metrics.mse.is_finite() { record.metrics.mse } else { f64::INFINITY };
+    (rollout_rmse, mse, record.metrics.complexity)
+}
+
+fn record_effective_rollout_rmse(record: &BestRecord) -> Option<f64> {
+    record
+        .benchmark
+        .as_ref()
+        .and_then(|b| b.rmse_mean)
+        .or(record.metrics.rollout_rmse)
 }
 
 fn best_candidate_from_eval_input(input: &FactoryEvaluationInput) -> Option<BestFactoryCandidate> {
@@ -3920,6 +4294,46 @@ impl BucketKey {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+struct BenchmarkAggregate {
+    suite_id: String,
+    rollout_integrator: String,
+    cases: usize,
+    rmse_mean: Option<f64>,
+    rmse_max: Option<f64>,
+    divergence_time_min: Option<f64>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+struct BenchmarkCandidateRef {
+    run_id: String,
+    candidate_id: usize,
+    equation_text: String,
+    complexity: usize,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+struct BenchmarkCaseEval {
+    name: String,
+    initial_conditions: InitialConditionSpec,
+    simulation: SimulationSummary,
+    rollout_rmse: Option<f64>,
+    divergence_time: Option<f64>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+struct BenchmarkEvalV1 {
+    version: String,
+    suite_id: String,
+    bucket: BucketKey,
+    regime: String,
+    rollout_integrator: String,
+    candidate: BenchmarkCandidateRef,
+    cases: Vec<BenchmarkCaseEval>,
+    aggregate: BenchmarkAggregate,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 struct BestRecord {
     bucket: BucketKey,
     run_dir: String,
@@ -3930,6 +4344,8 @@ struct BestRecord {
     equation_text: String,
     metrics: CandidateMetrics,
     ic: Option<InitialConditionSpec>,
+    #[serde(default)]
+    benchmark: Option<BenchmarkAggregate>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -4033,6 +4449,17 @@ fn best_record_from_eval_input_path(path: &std::path::Path) -> Option<BestRecord
         .ok()
         .and_then(|raw| serde_json::from_str(&raw).ok());
 
+    let benchmark: Option<BenchmarkAggregate> = fs::read_to_string(factory_dir.join("benchmark_eval.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<BenchmarkEvalV1>(&raw).ok())
+        .and_then(|bm| {
+            if bm.bucket.matches(&bucket) && bm.regime == best.regime {
+                Some(bm.aggregate)
+            } else {
+                None
+            }
+        });
+
     Some(BestRecord {
         bucket,
         run_dir: run_dir.to_string_lossy().to_string(),
@@ -4043,6 +4470,7 @@ fn best_record_from_eval_input_path(path: &std::path::Path) -> Option<BestRecord
         equation_text: best.candidate.equation_text,
         metrics: best.candidate.metrics,
         ic,
+        benchmark,
     })
 }
 
@@ -4056,12 +4484,12 @@ fn scan_best_results(results_root: &std::path::Path) -> anyhow::Result<BestResul
             Some(v) => v,
             None => continue,
         };
-        let key = metrics_sort_key(&record.metrics);
+        let key = best_record_sort_key(&record);
         let existing_idx = buckets
             .iter()
             .position(|e| e.bucket.matches(&record.bucket));
         if let Some(idx) = existing_idx {
-            let existing_key = metrics_sort_key(&buckets[idx].metrics);
+            let existing_key = best_record_sort_key(&buckets[idx]);
             if key < existing_key || (key == existing_key && record.eval_input_path < buckets[idx].eval_input_path) {
                 buckets[idx] = record;
             }
@@ -4083,7 +4511,8 @@ fn scan_best_results(results_root: &std::path::Path) -> anyhow::Result<BestResul
         updated_at_utc: updated_at_unix_utc(),
         buckets,
         notes: vec![
-            "Selection rule: minimize (rollout_rmse, mse, complexity).".to_string(),
+            "Selection rule: minimize (benchmark_rmse_mean when present, else rollout_rmse, then mse, complexity)."
+                .to_string(),
             "Buckets are grouped by (steps, dt).".to_string(),
             "Only */factory/evaluation_input.json files are considered.".to_string(),
             "Runs are skipped if the oracle simulation terminated early or did not reach the requested horizon (steps+1)."
@@ -4107,7 +4536,7 @@ fn render_best_results_md(index: &BestResultsIndexV1, progress: &[BucketProgress
 
     md.push_str("## Executive Summary\n\n");
     md.push_str("- This file is the single top-level place to see the best discovered equations so far.\n");
-    md.push_str("- Comparator: minimize `rollout_rmse`, then `mse`, then `complexity`.\n");
+    md.push_str("- Comparator: minimize `benchmark_rmse_mean` (when present), else `rollout_rmse`, then `mse`, then `complexity`.\n");
     md.push_str("- Buckets: grouped by `(steps, dt)` to avoid apples-to-oranges comparisons.\n");
     md.push_str("- Safety: runs are skipped if the oracle simulation terminated early or did not reach `steps+1` samples.\n");
     if index.buckets.is_empty() {
@@ -4134,8 +4563,17 @@ fn render_best_results_md(index: &BestResultsIndexV1, progress: &[BucketProgress
             "- Bucket: steps={}, dt={}\n",
             best.bucket.steps, best.bucket.dt
         ));
+        if let Some(bm) = best.benchmark.as_ref() {
+            md.push_str(&format!(
+                "- Benchmark: rmse_mean={}, rmse_max={}, rollout_integrator={}, suite_id={}\n",
+                format_metric_opt(bm.rmse_mean),
+                format_metric_opt(bm.rmse_max),
+                bm.rollout_integrator,
+                bm.suite_id
+            ));
+        }
         md.push_str(&format!(
-            "- Metrics: rollout_rmse={}, mse={:.6e}, complexity={}, divergence_time={}\n",
+            "- Run metrics: rollout_rmse={}, mse={:.6e}, complexity={}, divergence_time={}\n",
             format_metric_opt(best.metrics.rollout_rmse),
             best.metrics.mse,
             best.metrics.complexity,
@@ -4154,8 +4592,17 @@ fn render_best_results_md(index: &BestResultsIndexV1, progress: &[BucketProgress
     md.push_str("\n## Current Incumbents\n\n");
     for rec in &index.buckets {
         md.push_str(&format!("### steps={}, dt={}\n\n", rec.bucket.steps, rec.bucket.dt));
+        if let Some(bm) = rec.benchmark.as_ref() {
+            md.push_str(&format!(
+                "- Benchmark: rmse_mean={}, rmse_max={}, rollout_integrator={}, suite_id={}\n",
+                format_metric_opt(bm.rmse_mean),
+                format_metric_opt(bm.rmse_max),
+                bm.rollout_integrator,
+                bm.suite_id
+            ));
+        }
         md.push_str(&format!(
-            "- Best metrics: rollout_rmse={}, mse={:.6e}, complexity={}, divergence_time={}\n",
+            "- Run metrics: rollout_rmse={}, mse={:.6e}, complexity={}, divergence_time={}\n",
             format_metric_opt(rec.metrics.rollout_rmse),
             rec.metrics.mse,
             rec.metrics.complexity,
@@ -4176,8 +4623,8 @@ fn render_best_results_md(index: &BestResultsIndexV1, progress: &[BucketProgress
         md.push_str("- Per bucket, compares the first recorded attempt vs current best.\n");
         md.push_str("- Note: if initial conditions differ between runs, this is suggestive, not definitive.\n\n");
         for p in progress {
-            let first = p.first.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
-            let best = p.best.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+            let first = record_effective_rollout_rmse(&p.first).unwrap_or(f64::INFINITY);
+            let best = record_effective_rollout_rmse(&p.best).unwrap_or(f64::INFINITY);
             let improvement = if first.is_finite() && best.is_finite() && first > 0.0 {
                 let delta = first - best;
                 if delta.abs() <= 1e-12 {
@@ -4189,12 +4636,12 @@ fn render_best_results_md(index: &BestResultsIndexV1, progress: &[BucketProgress
                 "n/a".to_string()
             };
             md.push_str(&format!(
-                "- steps={}, dt={}: runs={}, first_rollout_rmse={}, best_rollout_rmse={}, improvement={}\n",
+                "- steps={}, dt={}: runs={}, first_score={}, best_score={}, improvement={}\n",
                 p.bucket.steps,
                 p.bucket.dt,
                 p.attempts,
-                format_metric_opt(p.first.metrics.rollout_rmse),
-                format_metric_opt(p.best.metrics.rollout_rmse),
+                format_metric_opt(record_effective_rollout_rmse(&p.first)),
+                format_metric_opt(record_effective_rollout_rmse(&p.best)),
                 improvement
             ));
         }
@@ -4277,7 +4724,9 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
 
     tex.push_str("\\section*{Executive Summary}\n");
     tex.push_str("This report summarizes the best equation(s) discovered by local runs of the threebody system.\\\\\n");
-    tex.push_str("Comparator: minimize rollout\\_rmse, then mse, then complexity (lower is better).\\\\\n");
+    tex.push_str(
+        "Comparator: minimize benchmark\\_rmse\\_mean (when available), else rollout\\_rmse, then mse, then complexity (lower is better).\\\\\n",
+    );
     tex.push_str("Buckets are grouped by (steps, dt) to avoid apples-to-oranges comparisons.\\\\\n\n");
     tex.push_str("Safety: runs are skipped if the oracle simulation terminated early or did not reach the requested horizon.\\\\\n\n");
 
@@ -4292,13 +4741,14 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
 
     tex.push_str("\\section*{Did we improve (over local history)?}\n");
     tex.push_str("For each bucket (steps, dt), we compare the first recorded attempt to the best found so far.\\\\\n");
+    tex.push_str("When a held-out benchmark is available, the table uses benchmark\\_rmse\\_mean; otherwise it uses rollout\\_rmse.\\\\\n");
     tex.push_str("\\begin{longtable}{lrrrr}\n");
     tex.push_str("\\toprule\n");
-    tex.push_str("Bucket & Runs & First rollout\\_rmse & Best rollout\\_rmse & Improvement\\\\\n");
+    tex.push_str("Bucket & Runs & First score & Best score & Improvement\\\\\n");
     tex.push_str("\\midrule\n");
     for p in progress {
-        let first = p.first.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
-        let best = p.best.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+        let first = record_effective_rollout_rmse(&p.first).unwrap_or(f64::INFINITY);
+        let best = record_effective_rollout_rmse(&p.best).unwrap_or(f64::INFINITY);
         let improvement = if first.is_finite() && best.is_finite() && first > 0.0 {
             let delta = first - best;
             if delta.abs() <= 1e-12 {
@@ -4314,8 +4764,8 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
             p.bucket.steps,
             p.bucket.dt,
             p.attempts,
-            format_opt_f64(p.first.metrics.rollout_rmse),
-            format_opt_f64(p.best.metrics.rollout_rmse),
+            format_opt_f64(record_effective_rollout_rmse(&p.first)),
+            format_opt_f64(record_effective_rollout_rmse(&p.best)),
             improvement
         ));
     }
@@ -4504,8 +4954,13 @@ fn load_incumbent_for_bucket(results_root: &std::path::Path, bucket: &BucketKey)
 
 fn incumbent_prompt_notes(record: &BestRecord) -> Vec<String> {
     let eq = truncate_to_chars(&single_line(&record.equation_text), 500);
+    let benchmark = record.benchmark.as_ref().and_then(|b| b.rmse_mean);
     vec![
         format!("INCUMBENT_BEST_EQUATION: {eq}"),
+        format!(
+            "INCUMBENT_BENCHMARK_RMSE_MEAN: {}",
+            format_metric_opt(benchmark)
+        ),
         format!(
             "INCUMBENT_BEST_METRICS: rollout_rmse={}, mse={:.6e}, complexity={}",
             format_metric_opt(record.metrics.rollout_rmse),
@@ -4970,6 +5425,7 @@ fn render_executive_summary_md(
     prior_best: Option<&PriorAttemptBest>,
     best_ic: Option<&InitialConditionSpec>,
     incumbent_on_best_run: Option<&IncumbentEvalOnBestRun>,
+    benchmark: Option<&BenchmarkEvalV1>,
 ) -> String {
     let mut md = String::new();
     md.push_str("# Executive Summary\n\n");
@@ -5136,6 +5592,39 @@ fn render_executive_summary_md(
         }
     }
 
+    md.push_str("\n## Held-out Benchmark (Fixed IC Suite)\n");
+    if let Some(bm) = benchmark {
+        md.push_str("- This is an apples-to-apples check across runs in the same bucket.\n");
+        md.push_str(&format!(
+            "- suite_id={}, cases={}, rollout_integrator={}\n",
+            bm.aggregate.suite_id, bm.aggregate.cases, bm.aggregate.rollout_integrator
+        ));
+        md.push_str(&format!(
+            "- rmse_mean={}, rmse_max={}, divergence_time_min={}\n",
+            format_opt_f64(bm.aggregate.rmse_mean),
+            format_opt_f64(bm.aggregate.rmse_max),
+            format_opt_f64(bm.aggregate.divergence_time_min)
+        ));
+        md.push_str("- per-case:\n");
+        for c in &bm.cases {
+            md.push_str(&format!(
+                "  - {}: rollout_rmse={}, divergence_time={}\n",
+                c.name,
+                format_opt_f64(c.rollout_rmse),
+                format_opt_f64(c.divergence_time)
+            ));
+        }
+        if !bm.notes.is_empty() {
+            md.push_str("- notes:\n");
+            for n in &bm.notes {
+                md.push_str(&format!("  - {}\n", n));
+            }
+        }
+        md.push_str("- full details: `benchmark_eval.json`\n");
+    } else {
+        md.push_str("- n/a (benchmark not computed for this run)\n");
+    }
+
     md.push_str("\n## Evidence: Per-Iteration Best Candidates\n");
     md.push_str("Selection rule: pick the lowest `rollout_rmse`, break ties by lower `mse`, then lower `complexity`.\n\n");
     md.push_str("| run | rollout_integrator | rollout_rmse | mse | complexity | equation |\n");
@@ -5221,6 +5710,16 @@ mod tests {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!("threebody_cli_test_{name}_{}_{}.{}", std::process::id(), n, ext))
+    }
+
+    #[test]
+    fn force_nonplanar_ic_adds_z_when_planar() {
+        let bounds = default_ic_bounds();
+        let planar = initial_conditions_from_preset("two-body").unwrap();
+        assert!(ic_is_nearly_planar(&planar));
+        let forced = force_nonplanar_ic(planar, &bounds, 123);
+        assert!(!ic_is_nearly_planar(&forced));
+        assert!(forced.notes.contains("forced_nonplanar_z=true"));
     }
 
     #[test]
@@ -5807,6 +6306,96 @@ mod tests {
     }
 
     #[test]
+    fn scan_best_results_prefers_lower_benchmark_when_available() {
+        let root = unique_temp_path("best_results_benchmark_choose", "dir");
+        if root.exists() {
+            let _ = fs::remove_dir_all(&root);
+        }
+        fs::create_dir_all(&root).unwrap();
+
+        let run1_factory = root.join("run1").join("factory");
+        let run2_factory = root.join("run2").join("factory");
+        fs::create_dir_all(&run1_factory).unwrap();
+        fs::create_dir_all(&run2_factory).unwrap();
+
+        // run1: looks better on within-run rollout_rmse, but worse on benchmark.
+        fs::write(
+            run1_factory.join("evaluation_input.json"),
+            serde_json::to_string_pretty(&mk_eval_input_with_sim(100, 0.01, 101, false, 0.01, "a=run1")).unwrap(),
+        )
+        .unwrap();
+        let bm1 = BenchmarkEvalV1 {
+            version: "v1".to_string(),
+            suite_id: "benchmark_suite_v1".to_string(),
+            bucket: BucketKey { steps: 100, dt: 0.01 },
+            regime: "gravity_only".to_string(),
+            rollout_integrator: "leapfrog".to_string(),
+            candidate: BenchmarkCandidateRef {
+                run_id: "run_001".to_string(),
+                candidate_id: 0,
+                equation_text: "a=run1".to_string(),
+                complexity: 1,
+            },
+            cases: vec![],
+            aggregate: BenchmarkAggregate {
+                suite_id: "benchmark_suite_v1".to_string(),
+                rollout_integrator: "leapfrog".to_string(),
+                cases: 3,
+                rmse_mean: Some(0.9),
+                rmse_max: Some(1.0),
+                divergence_time_min: None,
+            },
+            notes: vec![],
+        };
+        fs::write(
+            run1_factory.join("benchmark_eval.json"),
+            serde_json::to_string_pretty(&bm1).unwrap(),
+        )
+        .unwrap();
+
+        // run2: worse within-run metric, but better benchmark -> should win.
+        fs::write(
+            run2_factory.join("evaluation_input.json"),
+            serde_json::to_string_pretty(&mk_eval_input_with_sim(100, 0.01, 101, false, 0.2, "a=run2")).unwrap(),
+        )
+        .unwrap();
+        let bm2 = BenchmarkEvalV1 {
+            version: "v1".to_string(),
+            suite_id: "benchmark_suite_v1".to_string(),
+            bucket: BucketKey { steps: 100, dt: 0.01 },
+            regime: "gravity_only".to_string(),
+            rollout_integrator: "leapfrog".to_string(),
+            candidate: BenchmarkCandidateRef {
+                run_id: "run_001".to_string(),
+                candidate_id: 0,
+                equation_text: "a=run2".to_string(),
+                complexity: 1,
+            },
+            cases: vec![],
+            aggregate: BenchmarkAggregate {
+                suite_id: "benchmark_suite_v1".to_string(),
+                rollout_integrator: "leapfrog".to_string(),
+                cases: 3,
+                rmse_mean: Some(0.1),
+                rmse_max: Some(0.2),
+                divergence_time_min: None,
+            },
+            notes: vec![],
+        };
+        fs::write(
+            run2_factory.join("benchmark_eval.json"),
+            serde_json::to_string_pretty(&bm2).unwrap(),
+        )
+        .unwrap();
+
+        let index = scan_best_results(&root).unwrap();
+        assert_eq!(index.buckets.len(), 1);
+        assert!(index.buckets[0].eval_input_path.contains("run2"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn executive_summary_includes_termination_metadata_when_present() {
         let mut eval_input = mk_eval_input_with_sim(100, 0.01, 50, true, 0.1, "ax=+1*grav_x ; ay=0 ; az=0");
         if let Some(sim) = eval_input.iterations[0].simulation.as_mut() {
@@ -5816,7 +6405,7 @@ mod tests {
             sim.encounter_action = Some("StopAndReport".to_string());
         }
         let best = best_candidate_from_eval_input(&eval_input);
-        let md = render_executive_summary_md(&eval_input, best.as_ref(), None, None, None);
+        let md = render_executive_summary_md(&eval_input, best.as_ref(), None, None, None, None);
         assert!(md.contains("terminated_early=true"));
         assert!(md.contains("termination_reason=max_rejects_exceeded"));
         assert!(md.contains("requested_steps=100"));
@@ -5846,6 +6435,7 @@ mod tests {
                     stability_flags: vec![],
                 },
                 ic: None,
+                benchmark: None,
             }],
             notes: vec![],
         };
@@ -5876,6 +6466,7 @@ mod tests {
                     stability_flags: vec![],
                 },
                 ic: None,
+                benchmark: None,
             }],
             notes: vec![],
         };
