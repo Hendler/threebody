@@ -12,55 +12,85 @@ impl Body {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct State {
-    pub pos: [Vec3; 3],
-    pub vel: [Vec3; 3],
+    pub pos: Vec<Vec3>,
+    pub vel: Vec<Vec3>,
 }
 
 impl State {
-    pub const fn new(pos: [Vec3; 3], vel: [Vec3; 3]) -> Self {
-        Self { pos, vel }
+    pub fn try_new(pos: Vec<Vec3>, vel: Vec<Vec3>) -> Result<Self, String> {
+        if pos.len() != vel.len() {
+            return Err(format!(
+                "state pos/vel length mismatch: pos={} vel={}",
+                pos.len(),
+                vel.len()
+            ));
+        }
+        Ok(Self { pos, vel })
+    }
+
+    pub fn new(pos: Vec<Vec3>, vel: Vec<Vec3>) -> Self {
+        Self::try_new(pos, vel).expect("invalid state: pos/vel length mismatch")
+    }
+
+    pub fn len(&self) -> usize {
+        self.pos.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pos.is_empty()
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct System {
-    pub bodies: [Body; 3],
+    pub bodies: Vec<Body>,
     pub state: State,
 }
 
 impl System {
-    pub const fn new(bodies: [Body; 3], state: State) -> Self {
-        Self { bodies, state }
+    pub fn try_new(bodies: Vec<Body>, state: State) -> Result<Self, String> {
+        if bodies.len() != state.len() {
+            return Err(format!(
+                "system bodies/state length mismatch: bodies={} state={}",
+                bodies.len(),
+                state.len()
+            ));
+        }
+        Ok(Self { bodies, state })
     }
-}
 
-pub const PAIR_INDICES: [(usize, usize); 3] = [(0, 1), (0, 2), (1, 2)];
+    pub fn new(bodies: Vec<Body>, state: State) -> Self {
+        Self::try_new(bodies, state).expect("invalid system: bodies/state length mismatch")
+    }
 
-pub const fn pair_indices() -> [(usize, usize); 3] {
-    PAIR_INDICES
+    pub fn n(&self) -> usize {
+        self.bodies.len()
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{pair_indices, Body, State, System, PAIR_INDICES};
+    use super::{Body, State, System};
     use crate::math::vec3::Vec3;
 
     #[test]
     fn construction_and_clone() {
-        let bodies = [Body::new(1.0, 0.0), Body::new(2.0, 1.0), Body::new(3.0, -1.0)];
-        let state = State::new([Vec3::zero(); 3], [Vec3::zero(); 3]);
+        let bodies = vec![
+            Body::new(1.0, 0.0),
+            Body::new(2.0, 1.0),
+            Body::new(3.0, -1.0),
+        ];
+        let state = State::new(vec![Vec3::zero(); 3], vec![Vec3::zero(); 3]);
         let system = System::new(bodies, state);
-        let system_copy = system;
+        let system_copy = system.clone();
         assert_eq!(system, system_copy);
     }
 
     #[test]
-    fn pair_indices_are_sorted() {
-        assert_eq!(pair_indices(), PAIR_INDICES);
-        for (i, j) in pair_indices().iter().copied() {
-            assert!(i < j);
-        }
+    fn try_new_rejects_mismatched_lengths() {
+        let err = State::try_new(vec![Vec3::zero(); 2], vec![Vec3::zero(); 3]).unwrap_err();
+        assert!(err.contains("length mismatch"));
     }
 }
