@@ -16,6 +16,8 @@ We present a two-system framework for studying and predicting three-body dynamic
 
 This revision adds three math families outside the prior force-library core (\texttt{jacobi\_legendre}, \texttt{shape\_invariants}, \texttt{symmetry\_invariants}), plus an MDL-aware deterministic selector mode (\texttt{numeric\_mdl}) layered on top of existing MCTS archive reuse and strict holdout gates. In matched deterministic gravity-only runs on February 8, 2026 (\texttt{research\_v2\_atlas}, 3 iterations, 150 steps, $dt=0.01$), the best equation and benchmark metrics were unchanged versus baseline: median relative improvement $0.0$ (12-seed suite, 95\% bootstrap CI $[0,0]$), benchmark relative improvement $\approx 1.3\times10^{-16}$, and \texttt{strict\_holdout\_passed=false}. A targeted global-model run with the new families produced a simpler equation (complexity 5) but a small negative benchmark delta ($-7.5\times10^{-5}$, CI fully negative). Therefore, current evidence supports tooling progress and stronger falsification, not a new physical law.
 
+We additionally implemented a deterministic delay-embedding track (\texttt{predictability takens}) with strict chronological holdouts, local linear and local linear-fractional (rational) maps, and a sensitivity-consistency score based on one-step tangent prediction. On the current \texttt{traj.csv} benchmark (February 8, 2026), this track is strongly \emph{channel-dependent}: for derived extrema channels (\texttt{min\_pair\_dist}, \texttt{max\_accel}), persistence remained superior (relative improvement $\approx -22.33$), while for raw state channels (\texttt{a1\_x}, \texttt{v1\_x}) local maps beat persistence by $\approx 99.7\%$ holdout MSE reduction. Rational maps did not outperform local linear maps on these trajectory channels.
+
 We emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. We argue that novelty arises not from claiming a universal closed-form solution, but from automatically discovering compact regime-specific laws with explicit validity domains, strict holdout testing, and reproducible failure reporting against the oracle.
 Code repository: \texttt{https://github.com/Hendler/threebody}.
 \end{abstract}
@@ -283,6 +285,31 @@ c_b g + c_c g^{\mathrm{close}} + c_f g^{\mathrm{far}}
 \equiv (c_b+c_f)g + (c_c-c_f)g^{\mathrm{close}}.
 \end{equation*}
 
+\subsection{Delay-embedding local-map track with sensitivity scoring (new in this revision)}
+To complement force-library sparse discovery, we added a deterministic scalar-channel predictor based on delay-coordinate embedding\cite{Takens1981}. For a chosen scalar observable $x_t$ (e.g., \texttt{a1\_x}, \texttt{min\_pair\_dist}), we build:
+\begin{equation*}
+z_t=[x_t,\;x_{t-\tau},\;\dots,\;x_{t-(m-1)\tau}],\qquad y_t=x_{t+1}.
+\end{equation*}
+We then fit local models on $k$ nearest neighbors in embedding space:
+\begin{itemize}
+\item \textbf{Local linear}: $y\approx \beta^\top \phi(z)$ with $\phi(z)=[1,z]$.
+\item \textbf{Local linear-fractional (rational)}:
+\begin{equation*}
+y\approx \frac{\beta^\top \phi(z)}{1+\delta^\top \phi(z)}.
+\end{equation*}
+\end{itemize}
+Both are fitted deterministically by ridge-regularized normal equations in each neighborhood.
+
+Selection uses strict chronological train/validation/holdout splits (with explicit no-future leakage checks for chronological mode). Primary metric is holdout MSE against the persistence baseline $\hat{y}=x_t$. We also score local sensitivity consistency: for nearby holdout pairs $(z_i,y_i)$ and $(z_j,y_j)$ we compare one-step observed perturbation $\Delta y_{\mathrm{obs}}=y_j-y_i$ with tangent prediction $\Delta y_{\mathrm{pred}}\approx \nabla \hat{f}(z_i)\cdot(z_j-z_i)$, and summarize relative error:
+\begin{equation*}
+\varepsilon_{\mathrm{sens}}=\mathrm{median}\left(\frac{|\Delta y_{\mathrm{pred}}-\Delta y_{\mathrm{obs}}|}{\max(|\Delta y_{\mathrm{obs}}|,\epsilon)}\right).
+\end{equation*}
+Validation ranking is
+\begin{equation*}
+\mathrm{rank\_score}=\mathrm{MSE}_{\mathrm{val}}\left(1+\lambda_{\mathrm{sens}}\varepsilon_{\mathrm{sens,val}}\right),
+\end{equation*}
+with user-set $\lambda_{\mathrm{sens}}\ge 0$.
+
 \subsection{What counts as ``predicts well''}
 Pointwise acceleration fit is not sufficient. We evaluate:
 \begin{itemize}
@@ -306,7 +333,7 @@ The systems are controlled by CLI:
 \begin{itemize}
 \item \textbf{simulate}: produce truth trajectories and diagnostics.
 \item \textbf{discover}: fit sparse equations using a chosen library.
-\item \textbf{predictability}: ensemble runs, lock-point detection, close-encounter extraction, and a sparse encounter-map baseline (experimental).
+\item \textbf{predictability}: ensemble runs, lock-point detection, close-encounter extraction, a sparse encounter-map baseline (experimental), and delay-embedding local-map reports (\texttt{takens}) with strict holdout/sensitivity summaries.
 \item \textbf{factory}: an optional LLM-guided loop that selects initial conditions, runs simulation, performs discovery, and emits a judged report with suggested next runs.
 \item \textbf{quickstart}: a convenience wrapper that runs an end-to-end workflow and writes a novice-friendly summary plus evidence under a single directory.
 \item \textbf{bench-em}: deterministic EM identifiability suite (charge/velocity sweeps + diverse initial conditions) that writes a comparable report per case.
@@ -374,6 +401,32 @@ We then ran a targeted global-model check (\texttt{research\_v1}, 1 iteration) w
 
 For physicists: this is a clear negative result under a stricter novelty attempt; richer geometry features and MDL ranking did not improve holdout predictive accuracy in this bucket.
 For novice readers: we added smarter math features and a better ``simplicity-vs-fit'' chooser, but predictions did not get better on new tests.
+
+\subsection{Takens local-map + sensitivity ablation (February 8, 2026)}
+We ran the new delay-embedding predictor (\texttt{predictability takens}, chronological split, train/val/holdout = 0.70/0.15/0.15, grid $\tau\in\{1,2,3\}$, $m\in\{3,4,5\}$, $k\in\{6,8,12\}$, $\lambda\in\{10^{-8},10^{-6},10^{-4}\}$, \texttt{model=both}, $\lambda_{\mathrm{sens}}=0.1$) on four channels of \texttt{traj.csv}.
+
+\begin{center}
+\begin{tabular}{lrrr}
+\hline
+channel & best model & holdout relative improvement vs persistence & holdout sensitivity median \\
+\hline
+\texttt{min\_pair\_dist} & linear & $-22.3386$ & $\approx 1.00$ \\
+\texttt{max\_accel} & linear & $-22.3303$ & $\approx 1.00$ \\
+\texttt{a1\_x} & linear & $+0.99745$ & $1.55\times10^{-2}$ \\
+\texttt{v1\_x} & linear & $+0.99778$ & $2.06\times10^{-2}$ \\
+\hline
+\end{tabular}
+\end{center}
+
+Interpretation:
+\begin{itemize}
+\item For derived extrema channels (\texttt{min\_pair\_dist}, \texttt{max\_accel}), persistence is far stronger than the local-map candidates in this run.
+\item For raw state channels (\texttt{a1\_x}, \texttt{v1\_x}), the local deterministic map is substantially better than persistence on one-step holdout prediction.
+\item Rational local maps did not beat local linear maps on these trajectory channels; in additional rational-only checks, holdout MSE was slightly worse than linear for \texttt{a1\_x} and \texttt{v1\_x}.
+\end{itemize}
+
+For physicists: the result supports a mixed view of deterministic local formulas. Delay-embedding local models can provide strong short-horizon prediction for some observables, but they do not yet give a uniformly better reduced law across derived chaotic diagnostics.
+For novice readers: this new method can predict some signals much better than a naive ``next value equals current value'' guess, but it still fails badly on other signals, so we are not at a universal formula.
 
 \subsection{Current empirical evidence for archive-guided search}
 We ran a controlled local sweep (8 factory iterations, STLS, \texttt{three-body} preset, \texttt{steps}=200, $dt=0.01$, mock LLM), varying $c\in\{0.4,0.7,1.0\}$ and $K\in\{6,8,12\}$ at fixed seed.
@@ -524,6 +577,9 @@ R. Tibshirani, ``Regression shrinkage and selection via the lasso,'' \emph{Journ
 \bibitem{Lorenz1963}
 E. N. Lorenz, ``Deterministic nonperiodic flow,'' \emph{Journal of the Atmospheric Sciences}, vol. 20, no. 2, pp. 130--141, 1963. doi:10.1175/1520-0469(1963)020<0130:DNF>2.0.CO;2.
 
+\bibitem{Takens1981}
+F. Takens, ``Detecting strange attractors in turbulence,'' in \emph{Dynamical Systems and Turbulence, Warwick 1980}, D. A. Rand and L.-S. Young, Eds. Berlin, Heidelberg: Springer, 1981, pp. 366--381. doi:10.1007/BFb0091924.
+
 \bibitem{Dormand1980}
 J. R. Dormand and P. J. Prince, ``A family of embedded Runge--Kutta formulae,'' \emph{Journal of Computational and Applied Mathematics}, vol. 6, no. 1, pp. 19--26, 1980. doi:10.1016/0771-050X(80)90013-3.
 
@@ -569,6 +625,7 @@ S. Mikkola and S. J. Aarseth, ``An implementation of N-body chain regularization
 \item Factory policy/gating metadata is explicit (\texttt{policy\_effective.json}); optional publication artifacts include \texttt{evaluation\_aggregate.json}, \texttt{claim\_assessment.json}, \texttt{strict\_holdout\_report.json}, \texttt{sensitivity\_eval.json}, and \texttt{paper\_summary.md}.
 \item Advanced controls now include multi-smooth atlas variants, one-shot smooth gate-geometry tuning (\texttt{gate\_geometry.json}), strict redundancy/collinearity pruning with algebraic partition canonicalization, sensitivity-aware ranking, selectable feature-family hypotheses, and deterministic equation-template injection for non-Newtonian candidates.
 \item New deterministic feature-family atoms include \texttt{jacobi\_legendre}, \texttt{shape\_invariants}, and \texttt{symmetry\_invariants}; selection can be switched to an MDL-prioritized comparator via \texttt{--selector-policy numeric\_mdl}.
+\item The \texttt{predictability takens} command now supports local linear and local rational maps (\texttt{--model}), strict split modes, and sensitivity-weighted selection (\texttt{--sensitivity-weight}), producing JSON reports with holdout and tangent-consistency metrics.
 \item The \texttt{research\_v2\_atlas} policy defaults to an atlas model family and benchmark-first claim gating (\texttt{highbar\_v2\_benchmark\_first}).
 \item Bootstrap CI computation for the claim gate now uses index-safe resampling and is covered by a regression test to prevent out-of-bounds failures on 12-case suites.
 \end{itemize}
