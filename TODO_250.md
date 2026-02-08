@@ -79,38 +79,38 @@ Legend:
 - [ ] 060. Close stream with checklist audit: reproducible command, seed, and artifact path for "Residual target mode and two-body subtraction".
 
 ## Stream 7: Legendre/Jacobi perturbation feature family
-- [ ] 061. Define acceptance criteria and measurable success metric for "Legendre/Jacobi perturbation feature family".
-- [ ] 062. Add a failing unit test that encodes the core mathematical contract for "Legendre/Jacobi perturbation feature family".
-- [ ] 063. Add a failing property/invariance test for "Legendre/Jacobi perturbation feature family" to prevent brittle overfit behavior.
-- [ ] 064. Implement the smallest code path to make the core unit test pass for "Legendre/Jacobi perturbation feature family".
-- [ ] 065. Refactor shared code into a reusable helper/module to keep "Legendre/Jacobi perturbation feature family" DRY.
-- [ ] 066. Add an integration test on deterministic fixtures that exercises "Legendre/Jacobi perturbation feature family" end-to-end.
-- [ ] 067. Add regression test(s) protecting prior behavior while extending "Legendre/Jacobi perturbation feature family".
-- [ ] 068. Run benchmark/holdout comparison and store artifact JSON/MD for "Legendre/Jacobi perturbation feature family".
+- [x] 061. Define acceptance criteria and measurable success metric for "Legendre/Jacobi perturbation feature family".
+- [x] 062. Add a failing unit test that encodes the core mathematical contract for "Legendre/Jacobi perturbation feature family".
+- [x] 063. Add a failing property/invariance test for "Legendre/Jacobi perturbation feature family" to prevent brittle overfit behavior.
+- [x] 064. Implement the smallest code path to make the core unit test pass for "Legendre/Jacobi perturbation feature family".
+- [x] 065. Refactor shared code into a reusable helper/module to keep "Legendre/Jacobi perturbation feature family" DRY.
+- [x] 066. Add an integration test on deterministic fixtures that exercises "Legendre/Jacobi perturbation feature family" end-to-end.
+- [x] 067. Add regression test(s) protecting prior behavior while extending "Legendre/Jacobi perturbation feature family".
+- [x] 068. Run benchmark/holdout comparison and store artifact JSON/MD for "Legendre/Jacobi perturbation feature family".
 - [ ] 069. Update operator/docs/paper notes with truthful findings (wins + failures) for "Legendre/Jacobi perturbation feature family".
 - [ ] 070. Close stream with checklist audit: reproducible command, seed, and artifact path for "Legendre/Jacobi perturbation feature family".
 
 ## Stream 8: Shape-space invariants and hyperradius features
-- [ ] 071. Define acceptance criteria and measurable success metric for "Shape-space invariants and hyperradius features".
-- [ ] 072. Add a failing unit test that encodes the core mathematical contract for "Shape-space invariants and hyperradius features".
-- [ ] 073. Add a failing property/invariance test for "Shape-space invariants and hyperradius features" to prevent brittle overfit behavior.
-- [ ] 074. Implement the smallest code path to make the core unit test pass for "Shape-space invariants and hyperradius features".
-- [ ] 075. Refactor shared code into a reusable helper/module to keep "Shape-space invariants and hyperradius features" DRY.
-- [ ] 076. Add an integration test on deterministic fixtures that exercises "Shape-space invariants and hyperradius features" end-to-end.
-- [ ] 077. Add regression test(s) protecting prior behavior while extending "Shape-space invariants and hyperradius features".
-- [ ] 078. Run benchmark/holdout comparison and store artifact JSON/MD for "Shape-space invariants and hyperradius features".
+- [x] 071. Define acceptance criteria and measurable success metric for "Shape-space invariants and hyperradius features".
+- [x] 072. Add a failing unit test that encodes the core mathematical contract for "Shape-space invariants and hyperradius features".
+- [x] 073. Add a failing property/invariance test for "Shape-space invariants and hyperradius features" to prevent brittle overfit behavior.
+- [x] 074. Implement the smallest code path to make the core unit test pass for "Shape-space invariants and hyperradius features".
+- [x] 075. Refactor shared code into a reusable helper/module to keep "Shape-space invariants and hyperradius features" DRY.
+- [x] 076. Add an integration test on deterministic fixtures that exercises "Shape-space invariants and hyperradius features" end-to-end.
+- [x] 077. Add regression test(s) protecting prior behavior while extending "Shape-space invariants and hyperradius features".
+- [x] 078. Run benchmark/holdout comparison and store artifact JSON/MD for "Shape-space invariants and hyperradius features".
 - [ ] 079. Update operator/docs/paper notes with truthful findings (wins + failures) for "Shape-space invariants and hyperradius features".
 - [ ] 080. Close stream with checklist audit: reproducible command, seed, and artifact path for "Shape-space invariants and hyperradius features".
 
 ## Stream 9: Symmetry-invariant polynomial features
-- [ ] 081. Define acceptance criteria and measurable success metric for "Symmetry-invariant polynomial features".
-- [ ] 082. Add a failing unit test that encodes the core mathematical contract for "Symmetry-invariant polynomial features".
-- [ ] 083. Add a failing property/invariance test for "Symmetry-invariant polynomial features" to prevent brittle overfit behavior.
-- [ ] 084. Implement the smallest code path to make the core unit test pass for "Symmetry-invariant polynomial features".
-- [ ] 085. Refactor shared code into a reusable helper/module to keep "Symmetry-invariant polynomial features" DRY.
-- [ ] 086. Add an integration test on deterministic fixtures that exercises "Symmetry-invariant polynomial features" end-to-end.
-- [ ] 087. Add regression test(s) protecting prior behavior while extending "Symmetry-invariant polynomial features".
-- [ ] 088. Run benchmark/holdout comparison and store artifact JSON/MD for "Symmetry-invariant polynomial features".
+- [x] 081. Define acceptance criteria and measurable success metric for "Symmetry-invariant polynomial features".
+- [x] 082. Add a failing unit test that encodes the core mathematical contract for "Symmetry-invariant polynomial features".
+- [x] 083. Add a failing property/invariance test for "Symmetry-invariant polynomial features" to prevent brittle overfit behavior.
+- [x] 084. Implement the smallest code path to make the core unit test pass for "Symmetry-invariant polynomial features".
+- [x] 085. Refactor shared code into a reusable helper/module to keep "Symmetry-invariant polynomial features" DRY.
+- [x] 086. Add an integration test on deterministic fixtures that exercises "Symmetry-invariant polynomial features" end-to-end.
+- [x] 087. Add regression test(s) protecting prior behavior while extending "Symmetry-invariant polynomial features".
+- [x] 088. Run benchmark/holdout comparison and store artifact JSON/MD for "Symmetry-invariant polynomial features".
 - [ ] 089. Update operator/docs/paper notes with truthful findings (wins + failures) for "Symmetry-invariant polynomial features".
 - [ ] 090. Close stream with checklist audit: reproducible command, seed, and artifact path for "Symmetry-invariant polynomial features".
 
@@ -223,14 +223,14 @@ Legend:
 - [ ] 180. Close stream with checklist audit: reproducible command, seed, and artifact path for "Shadowing-time and shadowing-error metrics".
 
 ## Stream 19: MDL ranking objective and candidate selector
-- [ ] 181. Define acceptance criteria and measurable success metric for "MDL ranking objective and candidate selector".
-- [ ] 182. Add a failing unit test that encodes the core mathematical contract for "MDL ranking objective and candidate selector".
-- [ ] 183. Add a failing property/invariance test for "MDL ranking objective and candidate selector" to prevent brittle overfit behavior.
-- [ ] 184. Implement the smallest code path to make the core unit test pass for "MDL ranking objective and candidate selector".
-- [ ] 185. Refactor shared code into a reusable helper/module to keep "MDL ranking objective and candidate selector" DRY.
-- [ ] 186. Add an integration test on deterministic fixtures that exercises "MDL ranking objective and candidate selector" end-to-end.
-- [ ] 187. Add regression test(s) protecting prior behavior while extending "MDL ranking objective and candidate selector".
-- [ ] 188. Run benchmark/holdout comparison and store artifact JSON/MD for "MDL ranking objective and candidate selector".
+- [x] 181. Define acceptance criteria and measurable success metric for "MDL ranking objective and candidate selector".
+- [x] 182. Add a failing unit test that encodes the core mathematical contract for "MDL ranking objective and candidate selector".
+- [x] 183. Add a failing property/invariance test for "MDL ranking objective and candidate selector" to prevent brittle overfit behavior.
+- [x] 184. Implement the smallest code path to make the core unit test pass for "MDL ranking objective and candidate selector".
+- [x] 185. Refactor shared code into a reusable helper/module to keep "MDL ranking objective and candidate selector" DRY.
+- [x] 186. Add an integration test on deterministic fixtures that exercises "MDL ranking objective and candidate selector" end-to-end.
+- [x] 187. Add regression test(s) protecting prior behavior while extending "MDL ranking objective and candidate selector".
+- [x] 188. Run benchmark/holdout comparison and store artifact JSON/MD for "MDL ranking objective and candidate selector".
 - [ ] 189. Update operator/docs/paper notes with truthful findings (wins + failures) for "MDL ranking objective and candidate selector".
 - [ ] 190. Close stream with checklist audit: reproducible command, seed, and artifact path for "MDL ranking objective and candidate selector".
 
@@ -283,15 +283,15 @@ Legend:
 - [ ] 230. Close stream with checklist audit: reproducible command, seed, and artifact path for "Factory UX, CLI ergonomics, and reporting".
 
 ## Stream 24: Paper-quality evidence synthesis and tables
-- [ ] 231. Define acceptance criteria and measurable success metric for "Paper-quality evidence synthesis and tables".
-- [ ] 232. Add a failing unit test that encodes the core mathematical contract for "Paper-quality evidence synthesis and tables".
-- [ ] 233. Add a failing property/invariance test for "Paper-quality evidence synthesis and tables" to prevent brittle overfit behavior.
-- [ ] 234. Implement the smallest code path to make the core unit test pass for "Paper-quality evidence synthesis and tables".
-- [ ] 235. Refactor shared code into a reusable helper/module to keep "Paper-quality evidence synthesis and tables" DRY.
-- [ ] 236. Add an integration test on deterministic fixtures that exercises "Paper-quality evidence synthesis and tables" end-to-end.
-- [ ] 237. Add regression test(s) protecting prior behavior while extending "Paper-quality evidence synthesis and tables".
-- [ ] 238. Run benchmark/holdout comparison and store artifact JSON/MD for "Paper-quality evidence synthesis and tables".
-- [ ] 239. Update operator/docs/paper notes with truthful findings (wins + failures) for "Paper-quality evidence synthesis and tables".
+- [x] 231. Define acceptance criteria and measurable success metric for "Paper-quality evidence synthesis and tables".
+- [x] 232. Add a failing unit test that encodes the core mathematical contract for "Paper-quality evidence synthesis and tables".
+- [x] 233. Add a failing property/invariance test for "Paper-quality evidence synthesis and tables" to prevent brittle overfit behavior.
+- [x] 234. Implement the smallest code path to make the core unit test pass for "Paper-quality evidence synthesis and tables".
+- [x] 235. Refactor shared code into a reusable helper/module to keep "Paper-quality evidence synthesis and tables" DRY.
+- [x] 236. Add an integration test on deterministic fixtures that exercises "Paper-quality evidence synthesis and tables" end-to-end.
+- [x] 237. Add regression test(s) protecting prior behavior while extending "Paper-quality evidence synthesis and tables".
+- [x] 238. Run benchmark/holdout comparison and store artifact JSON/MD for "Paper-quality evidence synthesis and tables".
+- [x] 239. Update operator/docs/paper notes with truthful findings (wins + failures) for "Paper-quality evidence synthesis and tables".
 - [ ] 240. Close stream with checklist audit: reproducible command, seed, and artifact path for "Paper-quality evidence synthesis and tables".
 
 ## Stream 25: Release gating, ablations, and replication package
