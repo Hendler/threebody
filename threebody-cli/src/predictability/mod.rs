@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::Subcommand;
 
+mod context_window;
 mod detect;
 mod ensemble;
 mod extract;
@@ -155,6 +156,63 @@ pub enum PredictabilityCommand {
         #[arg(long, default_value_t = 0.1)]
         sensitivity_weight: f64,
     },
+    /// Estimate the minimal information/context window needed for strict holdout predictability.
+    ContextWindow {
+        /// Input CSV path.
+        #[arg(long, default_value = "traj.csv")]
+        input: PathBuf,
+        /// Numeric column name to model.
+        #[arg(long, default_value = "a1_x")]
+        column: String,
+        /// Optional sensor columns (comma-separated). When omitted, uses only --column.
+        #[arg(long, default_value = "")]
+        sensors: String,
+        /// Output report JSON path.
+        #[arg(long, default_value = "context_window_report.json")]
+        out: PathBuf,
+        /// Optional Markdown summary output path.
+        #[arg(long)]
+        markdown_out: Option<PathBuf>,
+        /// Fixed delay tau used for context-window sweeps.
+        #[arg(long, default_value_t = 1)]
+        tau: usize,
+        /// Embedding dimensions to sweep (comma-separated positive integers).
+        #[arg(long, default_value = "1,2,3,4,5,6,8,10")]
+        m: String,
+        /// kNN neighborhood sizes (comma-separated positive integers).
+        #[arg(long, default_value = "8,12,16")]
+        k: String,
+        /// Ridge lambdas (comma-separated nonnegative floats).
+        #[arg(long, default_value = "1e-8,1e-6,1e-4,1e-2")]
+        lambda: String,
+        /// Model family: linear | rational | delta_linear | delta_rational | both | all.
+        #[arg(long, default_value = "all")]
+        model: String,
+        /// Split mode: chronological | shuffled.
+        #[arg(long, default_value = "chronological")]
+        split_mode: String,
+        /// RNG seed used when split mode is shuffled.
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        /// Train fraction in (0,1).
+        #[arg(long, default_value_t = 0.7)]
+        train_frac: f64,
+        /// Validation fraction in [0,1); holdout is the remainder.
+        #[arg(long, default_value_t = 0.15)]
+        val_frac: f64,
+        /// Weight for sensitivity consistency in selection score.
+        #[arg(long, default_value_t = 0.1)]
+        sensitivity_weight: f64,
+        /// Minimum relative-improvement threshold for an effective context point.
+        #[arg(long, default_value_t = 0.0)]
+        improvement_threshold: f64,
+        /// Maximum sensitivity-median threshold for an effective context point.
+        #[arg(long, default_value_t = 0.1)]
+        max_sensitivity_median: f64,
+        /// Optional directory to keep per-m Takens reports.
+        #[arg(long)]
+        reports_dir: Option<PathBuf>,
+    },
     /// Summarize efficacy from one or more predictability report JSON files.
     Report {
         /// Input report JSON files (comma-separated or repeated).
@@ -294,6 +352,45 @@ pub fn run(cmd: PredictabilityCommand) -> anyhow::Result<()> {
             train_frac,
             val_frac,
             sensitivity_weight,
+        ),
+        PredictabilityCommand::ContextWindow {
+            input,
+            column,
+            sensors,
+            out,
+            markdown_out,
+            tau,
+            m,
+            k,
+            lambda,
+            model,
+            split_mode,
+            seed,
+            train_frac,
+            val_frac,
+            sensitivity_weight,
+            improvement_threshold,
+            max_sensitivity_median,
+            reports_dir,
+        } => context_window::run_context_window(
+            input,
+            column,
+            sensors,
+            out,
+            markdown_out,
+            tau,
+            m,
+            k,
+            lambda,
+            model,
+            split_mode,
+            seed,
+            train_frac,
+            val_frac,
+            sensitivity_weight,
+            improvement_threshold,
+            max_sensitivity_median,
+            reports_dir,
         ),
         PredictabilityCommand::Report {
             reports,

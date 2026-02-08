@@ -1083,3 +1083,91 @@ fn predictability_compare_reports_effect_size_and_non_regression() {
         Some(true)
     );
 }
+
+#[test]
+fn predictability_context_window_reports_minimum_effective_context() {
+    let exe = env!("CARGO_BIN_EXE_threebody-cli");
+    let tmp_dir = env::temp_dir().join(format!("threebody_context_window_{}", std::process::id()));
+    if tmp_dir.exists() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+    fs::create_dir_all(&tmp_dir).expect("create temp dir");
+
+    let input_csv = tmp_dir.join("traj.csv");
+    let sim = Command::new(exe)
+        .current_dir(&tmp_dir)
+        .args([
+            "simulate",
+            "--output",
+            input_csv.to_str().unwrap(),
+            "--steps",
+            "120",
+            "--dt",
+            "0.01",
+            "--preset",
+            "two-body",
+        ])
+        .output()
+        .expect("run simulate");
+    assert!(
+        sim.status.success(),
+        "simulate failed: {}",
+        String::from_utf8_lossy(&sim.stderr)
+    );
+    assert!(input_csv.exists());
+
+    let out_json = tmp_dir.join("context_window.json");
+    let out_md = tmp_dir.join("context_window.md");
+    let out = Command::new(exe)
+        .current_dir(&tmp_dir)
+        .args([
+            "predictability",
+            "context-window",
+            "--input",
+            input_csv.to_str().unwrap(),
+            "--column",
+            "r1_x",
+            "--sensors",
+            "r1_x,v1_x",
+            "--out",
+            out_json.to_str().unwrap(),
+            "--markdown-out",
+            out_md.to_str().unwrap(),
+            "--tau",
+            "1",
+            "--m",
+            "1,2,3",
+            "--k",
+            "6",
+            "--lambda",
+            "1e-8,1e-6",
+            "--model",
+            "all",
+            "--split-mode",
+            "chronological",
+            "--improvement-threshold",
+            "0.0",
+            "--max-sensitivity-median",
+            "10.0",
+        ])
+        .output()
+        .expect("run context-window");
+    assert!(
+        out.status.success(),
+        "context-window failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out_json.exists());
+    assert!(out_md.exists());
+
+    let json = fs::read_to_string(&out_json).expect("read context window report");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid context report");
+    let points = value
+        .get("points")
+        .and_then(|v| v.as_array())
+        .expect("points array");
+    assert_eq!(points.len(), 3);
+    let summary = value.get("summary").expect("summary");
+    assert_eq!(summary.get("n_points").and_then(|v| v.as_u64()), Some(3));
+    assert!(summary.get("best_m").and_then(|v| v.as_u64()).is_some());
+}

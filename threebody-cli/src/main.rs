@@ -5,17 +5,17 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use threebody_core::config::{Config, IntegratorKind};
 use threebody_core::diagnostics::compute_diagnostics;
-use threebody_core::forces::{ForceConfig, compute_accel};
+use threebody_core::forces::{compute_accel, ForceConfig};
 use threebody_core::frames::to_barycentric;
 use threebody_core::integrators::{
-    Integrator, boris::Boris, implicit_midpoint::ImplicitMidpoint, leapfrog::Leapfrog, rk45::Rk45,
+    boris::Boris, implicit_midpoint::ImplicitMidpoint, leapfrog::Leapfrog, rk45::Rk45, Integrator,
 };
 use threebody_core::math::vec3::Vec3;
 use threebody_core::output::csv::write_csv;
 use threebody_core::output::parse::{parse_header, require_columns};
 use threebody_core::output::sidecar::{build_sidecar, write_sidecar};
 use threebody_core::regime::compute_regime;
-use threebody_core::sim::{SimOptions, simulate};
+use threebody_core::sim::{simulate, SimOptions};
 use threebody_core::state::{Body, State, System};
 use threebody_discover::ga::DiscoveryConfig;
 use threebody_discover::judge::{
@@ -26,18 +26,18 @@ use threebody_discover::judge::{
 use threebody_discover::library::FeatureLibrary;
 use threebody_discover::llm::{AutoLlmClient, LlmClient, MockLlm, OpenAIClient};
 use threebody_discover::{
-    Dataset, DiscoverySolverSummary, FACTORY_EVALUATION_VERSION, FactoryEvaluationCandidate,
-    FactoryEvaluationInput, FactoryEvaluationIteration, FactoryEvaluationIterationJudge,
-    FitnessHeuristic, GaSolverSummary, LassoConfig, LassoSolverSummary, StlsConfig,
-    StlsSolverSummary, grid_search, lasso_path_search, run_search, stls_path_search,
+    grid_search, lasso_path_search, run_search, stls_path_search, Dataset, DiscoverySolverSummary,
+    FactoryEvaluationCandidate, FactoryEvaluationInput, FactoryEvaluationIteration,
+    FactoryEvaluationIterationJudge, FitnessHeuristic, GaSolverSummary, LassoConfig,
+    LassoSolverSummary, StlsConfig, StlsSolverSummary, FACTORY_EVALUATION_VERSION,
 };
 
 mod eval;
 mod predictability;
 
 use eval::{
-    SensitivityEval, VectorModel, format_vector_model, rollout_metrics, rollout_trace,
-    sensitivity_eval,
+    format_vector_model, rollout_metrics, rollout_trace, sensitivity_eval, SensitivityEval,
+    VectorModel,
 };
 
 #[derive(Parser)]
@@ -1883,6 +1883,21 @@ fn simulate_with_cfg(
 
 fn preset_system(name: &str) -> anyhow::Result<System> {
     match name {
+        "one-body" | "one_body" => {
+            let bodies = [
+                Body::new(1.0, 0.0),
+                Body::new(0.0, 0.0),
+                Body::new(0.0, 0.0),
+            ];
+            // Keep massless placeholders separated to avoid singular zero-distance rows.
+            let pos = [
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(10.0, 0.0, 0.0),
+                Vec3::new(-10.0, 0.0, 0.0),
+            ];
+            let vel = [Vec3::new(0.7, 0.2, 0.0), Vec3::zero(), Vec3::zero()];
+            Ok(System::new(bodies, State::new(pos, vel)))
+        }
         "two-body" => {
             let bodies = [
                 Body::new(1.0, 0.0),
@@ -1920,6 +1935,25 @@ fn preset_system(name: &str) -> anyhow::Result<System> {
                 Vec3::new(0.0, 1.0, 0.0),
                 Vec3::new(-0.866_025_403_784_438_6, -0.5, 0.0),
                 Vec3::new(0.866_025_403_784_438_6, -0.5, 0.0),
+            ];
+            Ok(System::new(bodies, State::new(pos, vel)))
+        }
+        "three-body-perturbed" | "three_body_perturbed" => {
+            // Slightly perturbed from the symmetric Lagrange setup to induce richer interactions.
+            let bodies = [
+                Body::new(1.0, 0.0),
+                Body::new(1.0, 0.0),
+                Body::new(1.0, 0.0),
+            ];
+            let pos = [
+                Vec3::new(0.56, -0.02, 0.01),
+                Vec3::new(-0.34, 0.51, -0.01),
+                Vec3::new(-0.22, -0.49, 0.0),
+            ];
+            let vel = [
+                Vec3::new(0.08, 0.93, 0.01),
+                Vec3::new(-0.88, -0.41, -0.02),
+                Vec3::new(0.80, -0.52, 0.01),
             ];
             Ok(System::new(bodies, State::new(pos, vel)))
         }
@@ -4746,9 +4780,7 @@ fn parse_feature_family_set(raw: &str) -> Option<FeatureFamilySet> {
                 FeatureFamily::HamiltonianInvariants
             }
             "jacobi_legendre" | "jacobi-legendre" | "jacobi" => FeatureFamily::JacobiLegendre,
-            "shape_invariants" | "shape-invariants" | "shape" => {
-                FeatureFamily::ShapeInvariants
-            }
+            "shape_invariants" | "shape-invariants" | "shape" => FeatureFamily::ShapeInvariants,
             "symmetry_invariants" | "symmetry-invariants" | "symmetry" => {
                 FeatureFamily::SymmetryInvariants
             }
@@ -8307,11 +8339,12 @@ fn annotate_candidate_selection_notes(
 ) {
     let selector_note = format!("selector_policy={}", selector_policy.as_str());
     for candidate in candidates {
-        candidate
-            .notes
-            .retain(|n| !n.starts_with("selector_policy=") && !n.starts_with("mdl_bits_per_sample="));
+        candidate.notes.retain(|n| {
+            !n.starts_with("selector_policy=") && !n.starts_with("mdl_bits_per_sample=")
+        });
         candidate.notes.push(selector_note.clone());
-        let mdl_bits = mdl_bits_per_sample_proxy(candidate.metrics.mse, candidate.metrics.complexity);
+        let mdl_bits =
+            mdl_bits_per_sample_proxy(candidate.metrics.mse, candidate.metrics.complexity);
         candidate
             .notes
             .push(format!("mdl_bits_per_sample={mdl_bits:.9}"));
@@ -8347,9 +8380,19 @@ fn candidate_sort_key(
         .unwrap_or(SelectorPolicy::NumericOnly);
 
     if matches!(selector, SelectorPolicy::NumericMdl) {
-        (weighted_rollout, mdl_bits, mse, candidate.metrics.complexity)
+        (
+            weighted_rollout,
+            mdl_bits,
+            mse,
+            candidate.metrics.complexity,
+        )
     } else {
-        (weighted_rollout, mse, mdl_bits, candidate.metrics.complexity)
+        (
+            weighted_rollout,
+            mse,
+            mdl_bits,
+            candidate.metrics.complexity,
+        )
     }
 }
 
@@ -11771,6 +11814,25 @@ mod tests {
     }
 
     #[test]
+    fn one_body_preset_has_single_massive_body() {
+        let ic = initial_conditions_from_preset("one-body").unwrap();
+        assert_eq!(ic.bodies.len(), 3);
+        assert_eq!(ic.bodies[0].mass, 1.0);
+        assert_eq!(ic.bodies[1].mass, 0.0);
+        assert_eq!(ic.bodies[2].mass, 0.0);
+    }
+
+    #[test]
+    fn three_body_perturbed_preset_is_supported() {
+        let ic = initial_conditions_from_preset("three-body-perturbed").unwrap();
+        assert_eq!(ic.bodies.len(), 3);
+        assert!(
+            ic.bodies.iter().all(|b| b.mass > 0.0),
+            "expected three interacting masses"
+        );
+    }
+
+    #[test]
     fn vector_dataset_includes_all_bodies() {
         let cfg = Config::default();
         let system = preset_system("two-body").unwrap();
@@ -12773,11 +12835,9 @@ mod tests {
             eq_z: threebody_discover::Equation { terms: vec![] },
         };
         let notes = canonicalize_model_partition_redundancy(&mut model, 1e-9);
-        assert!(
-            notes
-                .iter()
-                .any(|n| n.contains("canonicalized_exact_partition"))
-        );
+        assert!(notes
+            .iter()
+            .any(|n| n.contains("canonicalized_exact_partition")));
         let coeffs = axis_coeff_map(&model.eq_x);
         assert!(!coeffs.contains_key("grav_far_x"));
         let c_base = coeffs.get("grav_x").copied().unwrap_or(0.0);
@@ -12825,7 +12885,9 @@ mod tests {
         ];
         let templates = generate_elegant_equation_templates(&feats, "gravity_only");
         assert!(templates.iter().any(|(eq, _)| eq.contains("jacobi_quad_x")));
-        assert!(templates.iter().any(|(eq, _)| eq.contains("shape_radial_x")));
+        assert!(templates
+            .iter()
+            .any(|(eq, _)| eq.contains("shape_radial_x")));
         assert!(templates
             .iter()
             .any(|(eq, _)| eq.contains("sym_sigma1_grav_x")));
@@ -13237,11 +13299,9 @@ mod tests {
 
         let index = scan_best_results(&root).unwrap();
         assert_eq!(index.buckets.len(), 1);
-        assert!(
-            index.buckets[0]
-                .eval_input_path
-                .contains("quickstart_factory")
-        );
+        assert!(index.buckets[0]
+            .eval_input_path
+            .contains("quickstart_factory"));
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -13873,7 +13933,10 @@ mod tests {
         ] {
             let i = idx(name);
             assert!(f0[i].is_finite(), "feature {name} not finite");
-            assert!((f0[i] - f1[i]).abs() < 1e-12, "feature {name} should be body-invariant");
+            assert!(
+                (f0[i] - f1[i]).abs() < 1e-12,
+                "feature {name} should be body-invariant"
+            );
         }
 
         assert!(f0[idx("shape_hyperradius")] > 0.0);
@@ -13903,11 +13966,7 @@ mod tests {
         let high_complexity_better_mse = mk(0.90, 100);
         let low_complexity_worse_mse = mk(1.00, 1);
 
-        let a = candidate_sort_key(
-            &high_complexity_better_mse,
-            SensitivityMode::Objective,
-            0.0,
-        );
+        let a = candidate_sort_key(&high_complexity_better_mse, SensitivityMode::Objective, 0.0);
         let b = candidate_sort_key(&low_complexity_worse_mse, SensitivityMode::Objective, 0.0);
         assert!(
             b < a,
