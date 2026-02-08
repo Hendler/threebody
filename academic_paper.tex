@@ -472,6 +472,21 @@ Using \texttt{predictability report} on four channel reports (\texttt{a1\_x}, \t
 
 Interpretation for the guiding question: richer information can support much better local predictive formulas on some channels, but this does not yet transfer uniformly to all derived diagnostic channels.
 
+\subsection{Sensor-augmented efficacy comparison (February 8, 2026)}
+We then ran a matched baseline-vs-sensor comparison on a fresh trajectory (\texttt{steps}=800, $dt=0.01$), keeping the same strict holdout protocol:
+\begin{itemize}
+\item \textbf{Baseline}: Takens uses only the target channel itself.
+\item \textbf{Sensor-augmented}: Takens uses additional simulator channels via \texttt{--sensors} (state components and, for \texttt{max\_accel}, acceleration components).
+\end{itemize}
+
+Aggregate efficacy outcomes over the same four targets (\texttt{a1\_x}, \texttt{v1\_x}, \texttt{min\_pair\_dist}, \texttt{max\_accel}):
+\begin{itemize}
+\item baseline: median raw $\approx 0.99958$, median derived $\approx -2847.56$, $\Delta_{\mathrm{info}}\approx 2848.56$, effective channels $=2/4$;
+\item sensor-augmented: median raw $\approx 0.99996$, median derived $\approx -21453.65$, $\Delta_{\mathrm{info}}\approx 21454.65$, effective channels $=2/4$.
+\end{itemize}
+
+This is an important negative-positive mixed result. Additional sensors improved already-strong raw-state channel prediction (e.g., \texttt{a1\_x} improved to relative improvement $\approx 0.999973$), but substantially worsened derived-diagnostic channels in this local-map family. So richer information alone is not enough; the equation class and representation must match the target channel geometry.
+
 \subsection{Policy and claim-gate summary (main-body view)}
 Extended policy sweeps and paired matrix studies are now treated as supporting evidence rather than core narrative and are reported in Appendix~B.
 In the main body, the key outcomes are:
@@ -603,7 +618,7 @@ S. Mikkola and S. J. Aarseth, ``An implementation of N-body chain regularization
 \item Factory policy/gating metadata is explicit (\texttt{policy\_effective.json}); optional publication artifacts include \texttt{evaluation\_aggregate.json}, \texttt{claim\_assessment.json}, \texttt{strict\_holdout\_report.json}, \texttt{sensitivity\_eval.json}, and \texttt{paper\_summary.md}.
 \item Advanced controls now include multi-smooth atlas variants, one-shot smooth gate-geometry tuning (\texttt{gate\_geometry.json}), strict redundancy/collinearity pruning with algebraic partition canonicalization, sensitivity-aware ranking, selectable feature-family hypotheses, and deterministic equation-template injection for non-Newtonian candidates.
 \item New deterministic feature-family atoms include \texttt{jacobi\_legendre}, \texttt{shape\_invariants}, and \texttt{symmetry\_invariants}; selection can be switched to an MDL-prioritized comparator via \texttt{--selector-policy numeric\_mdl}.
-\item The \texttt{predictability takens} command now supports local linear and local rational maps (\texttt{--model}), strict split modes, and sensitivity-weighted selection (\texttt{--sensitivity-weight}), producing JSON reports with holdout and tangent-consistency metrics.
+\item The \texttt{predictability takens} command now supports local linear and local rational maps (\texttt{--model}), sensor-augmented embeddings from simulator columns (\texttt{--sensors}), strict split modes, and sensitivity-weighted selection (\texttt{--sensitivity-weight}), producing JSON reports with holdout and tangent-consistency metrics.
 \item The \texttt{predictability report} command aggregates channel-level efficacy from report JSON files with explicit thresholds (\texttt{--improvement-threshold}, \texttt{--max-sensitivity-median}) and writes JSON/Markdown claim artifacts.
 \item The \texttt{research\_v2\_atlas} policy defaults to an atlas model family and benchmark-first claim gating (\texttt{highbar\_v2\_benchmark\_first}).
 \item Bootstrap CI computation for the claim gate now uses index-safe resampling and is covered by a regression test to prevent out-of-bounds failures on 12-case suites.

@@ -21,9 +21,12 @@ This priority layer is additive: it does not remove simulation-accuracy or equat
 - [ ] R010. Add missing-data handling tests (NaN/inf/missing fields) and deterministic fallback behavior.
 - [ ] R011. Add multi-run aggregation command for seed suites (median, CI, win-rate by channel kind).
 - [ ] R012. Add novelty gate test that fails when no channel clears efficacy thresholds on strict holdout.
-- [ ] R013. Add information-value test: verify richer channel sets outperform reduced channel sets under matched splits.
+- [x] R013. Add information-value test harness: quantify whether richer channel sets outperform reduced channel sets under matched splits (controlled fixture: yes; current real-channel run: mixed).
 - [ ] R014. Auto-generate paper-ready efficacy table from JSON to avoid manual transcription drift.
 - [ ] R015. Add DRY helper library for shared quantiles/medians/claim-label logic across reporting tools.
+- [x] R016. Add sensor-augmented Takens input mode (`--sensors`) so equations can use richer simulator channels in the embedding state.
+- [x] R017. Add TDD fixture proving richer auxiliary sensors can materially improve one-step prediction in a controlled coupled system.
+- [x] R018. Run matched baseline-vs-sensor efficacy summaries on current trajectory channels and record channel-wise gains/failures.
 
 ## Stream 1: Project governance and reproducibility scaffold
 - [ ] 001. Define acceptance criteria and measurable success metric for "Project governance and reproducibility scaffold".
