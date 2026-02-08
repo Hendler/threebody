@@ -146,6 +146,27 @@ impl FeatureLibrary {
                         tags: vec!["gate".to_string()],
                     };
                 }
+                if name.starts_with("jacobi_") {
+                    return FeatureDescription {
+                        name: name.clone(),
+                        description: "Jacobi/Legendre geometric feature for residual-chaos modeling in transformed coordinates.".to_string(),
+                        tags: vec!["geometry".to_string(), "jacobi".to_string(), "chaos".to_string()],
+                    };
+                }
+                if name.starts_with("shape_") {
+                    return FeatureDescription {
+                        name: name.clone(),
+                        description: "Shape-space invariant/diagnostic feature (hyperradius, area, or normalized shape coordinate).".to_string(),
+                        tags: vec!["geometry".to_string(), "shape_space".to_string(), "invariant".to_string()],
+                    };
+                }
+                if name.starts_with("sym_") {
+                    return FeatureDescription {
+                        name: name.clone(),
+                        description: "Permutation-symmetry invariant feature built from pairwise-distance polynomials.".to_string(),
+                        tags: vec!["symmetry".to_string(), "invariant".to_string(), "chaos".to_string()],
+                    };
+                }
                 for (prefix, tag) in [("grav", "gravity"), ("elec", "electric"), ("mag", "magnetic")] {
                     if let Some(axis) = name.strip_prefix(&format!("{prefix}_close_")) {
                         return FeatureDescription {

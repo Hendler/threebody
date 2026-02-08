@@ -382,10 +382,11 @@ enum Commands {
         /// Maximum allowed sensitivity median relative error in gate mode.
         #[arg(long, default_value_t = 0.35)]
         sens_max_median_error: f64,
-        /// Feature-family hypotheses: newtonian,pn1,yukawa,darwin_like,tidal_invariants,jerk_augmented,hamiltonian_invariants,mixed.
+        /// Feature-family hypotheses:
+        /// newtonian,pn1,yukawa,darwin_like,tidal_invariants,jerk_augmented,hamiltonian_invariants,jacobi_legendre,shape_invariants,symmetry_invariants,mixed.
         #[arg(long, default_value = "mixed")]
         feature_family: String,
-        /// Selector policy: numeric_only | llm_assist | llm_math_creative.
+        /// Selector policy: numeric_only | numeric_mdl | llm_assist | llm_math_creative.
         #[arg(long, default_value = "llm_math_creative")]
         selector_policy: String,
         /// Factory policy profile (primary interface): research_v1 | research_v2_atlas | legacy.
@@ -670,12 +671,12 @@ fn main() -> anyhow::Result<()> {
             })?;
             let feature_families = parse_feature_family_set(&feature_family).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "unknown --feature-family={feature_family} (expected comma list of newtonian,pn1,yukawa,darwin_like,tidal_invariants,jerk_augmented,hamiltonian_invariants,mixed)"
+                    "unknown --feature-family={feature_family} (expected comma list of newtonian,pn1,yukawa,darwin_like,tidal_invariants,jerk_augmented,hamiltonian_invariants,jacobi_legendre,shape_invariants,symmetry_invariants,mixed)"
                 )
             })?;
             let selector_policy = parse_selector_policy(&selector_policy).ok_or_else(|| {
                 anyhow::anyhow!(
-                    "unknown --selector-policy={selector_policy} (expected numeric_only|llm_assist|llm_math_creative)"
+                    "unknown --selector-policy={selector_policy} (expected numeric_only|numeric_mdl|llm_assist|llm_math_creative)"
                 )
             })?;
             let claim_gate = parse_claim_gate_profile(&claim_gate).ok_or_else(|| {
@@ -3659,6 +3660,135 @@ fn compute_feature_vector(
     );
     let hamiltonian_flow = vi.cross(grav);
 
+    // Geometry-driven features (outside the default force bases): Jacobi/shape/symmetry.
+    let dist = |a: usize, b: usize| -> f64 {
+        let r2 = (system.state.pos[a] - system.state.pos[b]).norm_sq();
+        (r2 + epsilon * epsilon).sqrt()
+    };
+    let d12 = dist(0, 1);
+    let d23 = dist(1, 2);
+    let d13 = dist(0, 2);
+    let d12_sq = d12 * d12;
+    let d23_sq = d23 * d23;
+    let d13_sq = d13 * d13;
+    let sym_sigma1 = d12 + d23 + d13;
+    let sym_sigma2 = d12 * d23 + d23 * d13 + d13 * d12;
+    let sym_sigma3 = d12 * d23 * d13;
+    let sym_sigma3_inv = if sym_sigma3 > 1e-12 {
+        1.0 / sym_sigma3
+    } else {
+        0.0
+    };
+    let sym_sigma1_grav = grav * sym_sigma1;
+    let sym_sigma2_grav = grav * sym_sigma2;
+
+    let mut mass_sum = 0.0f64;
+    let mut com = Vec3::zero();
+    for i in 0..3 {
+        let m = system.bodies[i].mass;
+        mass_sum += m;
+        com = com + system.state.pos[i] * m;
+    }
+    if mass_sum > 0.0 {
+        com = com / mass_sum;
+    } else {
+        com = Vec3::zero();
+    }
+
+    let mut inertia = 0.0f64;
+    let mut kinetic = 0.0f64;
+    for i in 0..3 {
+        let m = system.bodies[i].mass;
+        let rel = system.state.pos[i] - com;
+        inertia += m * rel.norm_sq();
+        kinetic += 0.5 * m * system.state.vel[i].norm_sq();
+    }
+    let hyperradius_sq = if mass_sum > 0.0 {
+        (inertia / mass_sum).max(0.0)
+    } else {
+        0.0
+    };
+    let shape_hyperradius = hyperradius_sq.sqrt();
+    let shape_inv_hyperradius = if shape_hyperradius > 1e-12 {
+        1.0 / shape_hyperradius
+    } else {
+        0.0
+    };
+    let r2_safe = hyperradius_sq.max(1e-12);
+    let shape_xi = (d23_sq - d13_sq) / (2.0 * r2_safe);
+    let shape_eta = (d12_sq - 0.5 * (d23_sq + d13_sq)) / (3.0f64.sqrt() * r2_safe);
+    let area_vec = (system.state.pos[1] - system.state.pos[0])
+        .cross(system.state.pos[2] - system.state.pos[0])
+        * 0.5;
+    let shape_area = area_vec.norm();
+    let shape_area_normal = if shape_area > 1e-12 {
+        area_vec / shape_area
+    } else {
+        Vec3::zero()
+    };
+    let potential_abs = {
+        let mut p = 0.0f64;
+        for i in 0..3 {
+            for j in (i + 1)..3 {
+                let d = dist(i, j);
+                if d > 1e-12 {
+                    p += system.bodies[i].mass * system.bodies[j].mass / d;
+                }
+            }
+        }
+        p
+    };
+    let shape_virial_ratio = if potential_abs > 1e-12 {
+        2.0 * kinetic / potential_abs
+    } else {
+        0.0
+    };
+    let shape_radial = if shape_hyperradius > 1e-12 {
+        (system.state.pos[body] - com) / shape_hyperradius
+    } else {
+        Vec3::zero()
+    };
+
+    let (j, k) = match body {
+        0 => (1usize, 2usize),
+        1 => (0usize, 2usize),
+        _ => (0usize, 1usize),
+    };
+    let mj = system.bodies[j].mass;
+    let mk = system.bodies[k].mass;
+    let m_jk = mj + mk;
+    let com_jk = if m_jk > 0.0 {
+        (system.state.pos[j] * mj + system.state.pos[k] * mk) / m_jk
+    } else {
+        (system.state.pos[j] + system.state.pos[k]) * 0.5
+    };
+    let rho1 = system.state.pos[k] - system.state.pos[j];
+    let rho2 = system.state.pos[body] - com_jk;
+    let rho1_norm = (rho1.norm_sq() + epsilon * epsilon).sqrt();
+    let rho2_norm = (rho2.norm_sq() + epsilon * epsilon).sqrt();
+    let rho1_hat = if rho1_norm > 1e-12 {
+        rho1 / rho1_norm
+    } else {
+        Vec3::zero()
+    };
+    let rho2_hat = if rho2_norm > 1e-12 {
+        rho2 / rho2_norm
+    } else {
+        Vec3::zero()
+    };
+    let jacobi_ratio = if rho2_norm > 1e-12 {
+        rho1_norm / rho2_norm
+    } else {
+        0.0
+    };
+    let jacobi_cos_alpha = rho1_hat.dot(rho2_hat).clamp(-1.0, 1.0);
+    let jacobi_p2 = 0.5 * (3.0 * jacobi_cos_alpha * jacobi_cos_alpha - 1.0);
+    let jacobi_p3 = 0.5
+        * (5.0 * jacobi_cos_alpha * jacobi_cos_alpha * jacobi_cos_alpha - 3.0 * jacobi_cos_alpha);
+    let jacobi_quad = rho2_hat * (jacobi_ratio * jacobi_ratio * jacobi_p2);
+    let jacobi_oct = rho2_hat * (jacobi_ratio * jacobi_ratio * jacobi_ratio * jacobi_p3);
+    let jacobi_radial = rho2_hat * jacobi_ratio;
+
     let mut out = Vec::with_capacity(feature_names.len());
     for name in feature_names {
         let v = match name.as_str() {
@@ -3784,6 +3914,41 @@ fn compute_feature_vector(
             "hamiltonian_flow_x" => hamiltonian_flow.x,
             "hamiltonian_flow_y" => hamiltonian_flow.y,
             "hamiltonian_flow_z" => hamiltonian_flow.z,
+            "jacobi_ratio" => jacobi_ratio,
+            "jacobi_cos_alpha" => jacobi_cos_alpha,
+            "jacobi_p2" => jacobi_p2,
+            "jacobi_p3" => jacobi_p3,
+            "jacobi_quad_x" => jacobi_quad.x,
+            "jacobi_quad_y" => jacobi_quad.y,
+            "jacobi_quad_z" => jacobi_quad.z,
+            "jacobi_oct_x" => jacobi_oct.x,
+            "jacobi_oct_y" => jacobi_oct.y,
+            "jacobi_oct_z" => jacobi_oct.z,
+            "jacobi_radial_x" => jacobi_radial.x,
+            "jacobi_radial_y" => jacobi_radial.y,
+            "jacobi_radial_z" => jacobi_radial.z,
+            "shape_hyperradius" => shape_hyperradius,
+            "shape_inv_hyperradius" => shape_inv_hyperradius,
+            "shape_area" => shape_area,
+            "shape_xi" => shape_xi,
+            "shape_eta" => shape_eta,
+            "shape_virial_ratio" => shape_virial_ratio,
+            "shape_radial_x" => shape_radial.x,
+            "shape_radial_y" => shape_radial.y,
+            "shape_radial_z" => shape_radial.z,
+            "shape_area_normal_x" => shape_area_normal.x,
+            "shape_area_normal_y" => shape_area_normal.y,
+            "shape_area_normal_z" => shape_area_normal.z,
+            "sym_sigma1" => sym_sigma1,
+            "sym_sigma2" => sym_sigma2,
+            "sym_sigma3" => sym_sigma3,
+            "sym_sigma3_inv" => sym_sigma3_inv,
+            "sym_sigma1_grav_x" => sym_sigma1_grav.x,
+            "sym_sigma1_grav_y" => sym_sigma1_grav.y,
+            "sym_sigma1_grav_z" => sym_sigma1_grav.z,
+            "sym_sigma2_grav_x" => sym_sigma2_grav.x,
+            "sym_sigma2_grav_y" => sym_sigma2_grav.y,
+            "sym_sigma2_grav_z" => sym_sigma2_grav.z,
             _ => 0.0,
         };
         out.push(v);
@@ -4114,6 +4279,56 @@ fn family_feature_names(family: FeatureFamily) -> Vec<String> {
         .iter()
         .map(|s| s.to_string())
         .collect(),
+        FeatureFamily::JacobiLegendre => [
+            "jacobi_ratio",
+            "jacobi_cos_alpha",
+            "jacobi_p2",
+            "jacobi_p3",
+            "jacobi_quad_x",
+            "jacobi_quad_y",
+            "jacobi_quad_z",
+            "jacobi_oct_x",
+            "jacobi_oct_y",
+            "jacobi_oct_z",
+            "jacobi_radial_x",
+            "jacobi_radial_y",
+            "jacobi_radial_z",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+        FeatureFamily::ShapeInvariants => [
+            "shape_hyperradius",
+            "shape_inv_hyperradius",
+            "shape_area",
+            "shape_xi",
+            "shape_eta",
+            "shape_virial_ratio",
+            "shape_radial_x",
+            "shape_radial_y",
+            "shape_radial_z",
+            "shape_area_normal_x",
+            "shape_area_normal_y",
+            "shape_area_normal_z",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+        FeatureFamily::SymmetryInvariants => [
+            "sym_sigma1",
+            "sym_sigma2",
+            "sym_sigma3",
+            "sym_sigma3_inv",
+            "sym_sigma1_grav_x",
+            "sym_sigma1_grav_y",
+            "sym_sigma1_grav_z",
+            "sym_sigma2_grav_x",
+            "sym_sigma2_grav_y",
+            "sym_sigma2_grav_z",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
     }
 }
 
@@ -4188,6 +4403,9 @@ fn feature_belongs_to_family(name: &str, family: FeatureFamily) -> bool {
         FeatureFamily::TidalInvariants => name.starts_with("tidal_"),
         FeatureFamily::JerkAugmented => name.starts_with("jerk_"),
         FeatureFamily::HamiltonianInvariants => name.starts_with("hamiltonian_"),
+        FeatureFamily::JacobiLegendre => name.starts_with("jacobi_"),
+        FeatureFamily::ShapeInvariants => name.starts_with("shape_"),
+        FeatureFamily::SymmetryInvariants => name.starts_with("sym_"),
     }
 }
 
@@ -4421,6 +4639,7 @@ fn parse_sensitivity_mode(raw: &str) -> Option<SensitivityMode> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 enum SelectorPolicy {
     NumericOnly,
+    NumericMdl,
     LlmAssist,
     LlmMathCreative,
 }
@@ -4429,6 +4648,7 @@ impl SelectorPolicy {
     fn as_str(self) -> &'static str {
         match self {
             SelectorPolicy::NumericOnly => "numeric_only",
+            SelectorPolicy::NumericMdl => "numeric_mdl",
             SelectorPolicy::LlmAssist => "llm_assist",
             SelectorPolicy::LlmMathCreative => "llm_math_creative",
         }
@@ -4438,6 +4658,7 @@ impl SelectorPolicy {
 fn parse_selector_policy(raw: &str) -> Option<SelectorPolicy> {
     match raw.trim().to_lowercase().as_str() {
         "numeric_only" | "numeric-only" | "numeric" => Some(SelectorPolicy::NumericOnly),
+        "numeric_mdl" | "numeric-mdl" | "mdl" => Some(SelectorPolicy::NumericMdl),
         "llm_assist" | "llm-assist" | "assist" => Some(SelectorPolicy::LlmAssist),
         "llm_math_creative" | "llm-math-creative" | "creative" | "math_creative" => {
             Some(SelectorPolicy::LlmMathCreative)
@@ -4455,6 +4676,9 @@ enum FeatureFamily {
     TidalInvariants,
     JerkAugmented,
     HamiltonianInvariants,
+    JacobiLegendre,
+    ShapeInvariants,
+    SymmetryInvariants,
 }
 
 impl FeatureFamily {
@@ -4467,6 +4691,9 @@ impl FeatureFamily {
             FeatureFamily::TidalInvariants => "tidal_invariants",
             FeatureFamily::JerkAugmented => "jerk_augmented",
             FeatureFamily::HamiltonianInvariants => "hamiltonian_invariants",
+            FeatureFamily::JacobiLegendre => "jacobi_legendre",
+            FeatureFamily::ShapeInvariants => "shape_invariants",
+            FeatureFamily::SymmetryInvariants => "symmetry_invariants",
         }
     }
 }
@@ -4500,6 +4727,9 @@ fn parse_feature_family_set(raw: &str) -> Option<FeatureFamilySet> {
                 FeatureFamily::TidalInvariants,
                 FeatureFamily::JerkAugmented,
                 FeatureFamily::HamiltonianInvariants,
+                FeatureFamily::JacobiLegendre,
+                FeatureFamily::ShapeInvariants,
+                FeatureFamily::SymmetryInvariants,
             ] {
                 selected.insert(f);
             }
@@ -4514,6 +4744,13 @@ fn parse_feature_family_set(raw: &str) -> Option<FeatureFamilySet> {
             "jerk_augmented" | "jerk-augmented" | "jerk" => FeatureFamily::JerkAugmented,
             "hamiltonian_invariants" | "hamiltonian-invariants" | "hamiltonian" => {
                 FeatureFamily::HamiltonianInvariants
+            }
+            "jacobi_legendre" | "jacobi-legendre" | "jacobi" => FeatureFamily::JacobiLegendre,
+            "shape_invariants" | "shape-invariants" | "shape" => {
+                FeatureFamily::ShapeInvariants
+            }
+            "symmetry_invariants" | "symmetry-invariants" | "symmetry" => {
+                FeatureFamily::SymmetryInvariants
             }
             _ => return None,
         };
@@ -4560,6 +4797,9 @@ impl Default for FactoryAdvancedSettings {
                     FeatureFamily::TidalInvariants,
                     FeatureFamily::JerkAugmented,
                     FeatureFamily::HamiltonianInvariants,
+                    FeatureFamily::JacobiLegendre,
+                    FeatureFamily::ShapeInvariants,
+                    FeatureFamily::SymmetryInvariants,
                 ],
             },
             selector_policy: SelectorPolicy::LlmMathCreative,
@@ -4806,6 +5046,24 @@ fn generate_elegant_equation_templates(
         out.push((
             "ax=+1.000000*grav_x +0.010000*hamiltonian_flow_x ; ay=+1.000000*grav_y +0.010000*hamiltonian_flow_y ; az=+1.000000*grav_z +0.010000*hamiltonian_flow_z".to_string(),
             "template=hamiltonian_flow".to_string(),
+        ));
+    }
+    if has("jacobi_quad_x") && has("jacobi_quad_y") && has("jacobi_quad_z") {
+        out.push((
+            "ax=+1.000000*grav_x +0.040000*jacobi_quad_x ; ay=+1.000000*grav_y +0.040000*jacobi_quad_y ; az=+1.000000*grav_z +0.040000*jacobi_quad_z".to_string(),
+            "template=jacobi_quadrupole".to_string(),
+        ));
+    }
+    if has("shape_radial_x") && has("shape_radial_y") && has("shape_radial_z") {
+        out.push((
+            "ax=+1.000000*grav_x +0.015000*shape_radial_x ; ay=+1.000000*grav_y +0.015000*shape_radial_y ; az=+1.000000*grav_z +0.015000*shape_radial_z".to_string(),
+            "template=shape_radial".to_string(),
+        ));
+    }
+    if has("sym_sigma1_grav_x") && has("sym_sigma1_grav_y") && has("sym_sigma1_grav_z") {
+        out.push((
+            "ax=+0.950000*grav_x +0.015000*sym_sigma1_grav_x ; ay=+0.950000*grav_y +0.015000*sym_sigma1_grav_y ; az=+0.950000*grav_z +0.015000*sym_sigma1_grav_z".to_string(),
+            "template=symmetry_scaled_gravity".to_string(),
         ));
     }
     if regime != "gravity_only"
@@ -5678,6 +5936,8 @@ fn run_factory(
             selector_trace.push("carry_manual_equation=accepted".to_string());
         }
 
+        annotate_candidate_selection_notes(&mut vector_candidates, advanced.selector_policy);
+
         // Equation-GA (lightweight): treat equations themselves as a population across iterations.
         // We carry forward the current best (and recent elites), mix in MCTS archive parents,
         // and try a few small, axis-consistent mutations.
@@ -5807,6 +6067,8 @@ fn run_factory(
                 parent_used += 1;
             }
         }
+
+        annotate_candidate_selection_notes(&mut vector_candidates, advanced.selector_policy);
 
         let original_candidates = vector_candidates.clone();
         let mut quality_audit: Vec<CandidateQualityAudit> = Vec::new();
@@ -8023,11 +8285,44 @@ fn candidate_note_f64(notes: &[String], key: &str) -> Option<f64> {
     })
 }
 
+fn candidate_note_str<'a>(notes: &'a [String], key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    notes
+        .iter()
+        .find_map(|n| n.strip_prefix(&prefix))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+}
+
+fn mdl_bits_per_sample_proxy(mse: f64, complexity: usize) -> f64 {
+    let eps = 1e-15;
+    let mse_term = (mse.max(eps).ln() / std::f64::consts::LN_2) * 0.5;
+    let model_term = complexity as f64 * 0.05;
+    mse_term + model_term
+}
+
+fn annotate_candidate_selection_notes(
+    candidates: &mut [CandidateSummary],
+    selector_policy: SelectorPolicy,
+) {
+    let selector_note = format!("selector_policy={}", selector_policy.as_str());
+    for candidate in candidates {
+        candidate
+            .notes
+            .retain(|n| !n.starts_with("selector_policy=") && !n.starts_with("mdl_bits_per_sample="));
+        candidate.notes.push(selector_note.clone());
+        let mdl_bits = mdl_bits_per_sample_proxy(candidate.metrics.mse, candidate.metrics.complexity);
+        candidate
+            .notes
+            .push(format!("mdl_bits_per_sample={mdl_bits:.9}"));
+    }
+}
+
 fn candidate_sort_key(
     candidate: &CandidateSummary,
     mode: SensitivityMode,
     sens_weight: f64,
-) -> (f64, f64, usize) {
+) -> (f64, f64, f64, usize) {
     let base_rollout = candidate.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
     let rollout = if base_rollout.is_finite() {
         base_rollout
@@ -8044,7 +8339,18 @@ fn candidate_sort_key(
     } else {
         f64::INFINITY
     };
-    (weighted_rollout, mse, candidate.metrics.complexity)
+    let mdl_bits = candidate_note_f64(&candidate.notes, "mdl_bits_per_sample")
+        .filter(|v| v.is_finite())
+        .unwrap_or_else(|| mdl_bits_per_sample_proxy(mse, candidate.metrics.complexity));
+    let selector = candidate_note_str(&candidate.notes, "selector_policy")
+        .and_then(parse_selector_policy)
+        .unwrap_or(SelectorPolicy::NumericOnly);
+
+    if matches!(selector, SelectorPolicy::NumericMdl) {
+        (weighted_rollout, mdl_bits, mse, candidate.metrics.complexity)
+    } else {
+        (weighted_rollout, mse, mdl_bits, candidate.metrics.complexity)
+    }
 }
 
 fn axis_coeff_map(eq: &threebody_discover::Equation) -> std::collections::BTreeMap<String, f64> {
@@ -10012,6 +10318,9 @@ fn feature_names_for_equation_text(equation_text: &str) -> Vec<String> {
                 FeatureFamily::TidalInvariants,
                 FeatureFamily::JerkAugmented,
                 FeatureFamily::HamiltonianInvariants,
+                FeatureFamily::JacobiLegendre,
+                FeatureFamily::ShapeInvariants,
+                FeatureFamily::SymmetryInvariants,
             ],
         };
         augment_library_features(
@@ -10061,6 +10370,9 @@ fn feature_pool_for_axis(feature_names: &[String], axis: char, regime: &str) -> 
                 || name.starts_with("tidal_")
                 || name.starts_with("jerk_")
                 || name.starts_with("hamiltonian_")
+                || name.starts_with("jacobi_")
+                || name.starts_with("shape_")
+                || name.starts_with("sym_")
         } else {
             true
         }
@@ -12261,10 +12573,16 @@ mod tests {
             parse_selector_policy("llm_math_creative"),
             Some(SelectorPolicy::LlmMathCreative)
         );
-        let fam = parse_feature_family_set("newtonian,pn1,yukawa").expect("family parse");
+        assert_eq!(
+            parse_selector_policy("numeric_mdl"),
+            Some(SelectorPolicy::NumericMdl)
+        );
+        let fam = parse_feature_family_set("newtonian,pn1,yukawa,shape_invariants")
+            .expect("family parse");
         assert!(fam.labels().contains(&"newtonian"));
         assert!(fam.labels().contains(&"pn1"));
         assert!(fam.labels().contains(&"yukawa"));
+        assert!(fam.labels().contains(&"shape_invariants"));
     }
 
     #[test]
@@ -12487,6 +12805,30 @@ mod tests {
         let templates = generate_elegant_equation_templates(&feats, "gravity_only");
         assert!(templates.iter().any(|(eq, _)| eq.contains("pn1_grav_x")));
         assert!(templates.iter().any(|(eq, _)| eq.contains("yukawa_grav_x")));
+    }
+
+    #[test]
+    fn elegant_templates_include_geometry_terms_when_available() {
+        let feats = vec![
+            "grav_x".to_string(),
+            "grav_y".to_string(),
+            "grav_z".to_string(),
+            "jacobi_quad_x".to_string(),
+            "jacobi_quad_y".to_string(),
+            "jacobi_quad_z".to_string(),
+            "shape_radial_x".to_string(),
+            "shape_radial_y".to_string(),
+            "shape_radial_z".to_string(),
+            "sym_sigma1_grav_x".to_string(),
+            "sym_sigma1_grav_y".to_string(),
+            "sym_sigma1_grav_z".to_string(),
+        ];
+        let templates = generate_elegant_equation_templates(&feats, "gravity_only");
+        assert!(templates.iter().any(|(eq, _)| eq.contains("jacobi_quad_x")));
+        assert!(templates.iter().any(|(eq, _)| eq.contains("shape_radial_x")));
+        assert!(templates
+            .iter()
+            .any(|(eq, _)| eq.contains("sym_sigma1_grav_x")));
     }
 
     #[test]
@@ -13465,6 +13807,112 @@ mod tests {
                 accel[i]
             );
         }
+    }
+
+    #[test]
+    fn jacobi_shape_and_symmetry_features_are_finite_and_consistent() {
+        let mut cfg = Config::default();
+        cfg.enable_gravity = true;
+        cfg.enable_em = false;
+        cfg.softening = 0.0;
+
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(2.0, 0.0),
+            Body::new(3.0, 0.0),
+        ];
+        let pos = [
+            Vec3::new(-0.7, 0.1, 0.2),
+            Vec3::new(1.1, -0.4, 0.0),
+            Vec3::new(0.2, 1.3, -0.3),
+        ];
+        let vel = [
+            Vec3::new(0.02, 0.01, -0.01),
+            Vec3::new(-0.03, 0.04, 0.02),
+            Vec3::new(0.01, -0.02, 0.03),
+        ];
+        let system = System::new(bodies, State::new(pos, vel));
+        let feature_names = vec![
+            "jacobi_ratio".to_string(),
+            "jacobi_cos_alpha".to_string(),
+            "jacobi_p2".to_string(),
+            "jacobi_p3".to_string(),
+            "shape_hyperradius".to_string(),
+            "shape_inv_hyperradius".to_string(),
+            "shape_area".to_string(),
+            "shape_xi".to_string(),
+            "shape_eta".to_string(),
+            "shape_virial_ratio".to_string(),
+            "sym_sigma1".to_string(),
+            "sym_sigma2".to_string(),
+            "sym_sigma3".to_string(),
+            "sym_sigma3_inv".to_string(),
+        ];
+        let idx = |name: &str| feature_names.iter().position(|n| n == name).unwrap();
+        let f0 = compute_feature_vector(&system, 0, &cfg, &feature_names);
+        let f1 = compute_feature_vector(&system, 1, &cfg, &feature_names);
+
+        let cos = f0[idx("jacobi_cos_alpha")];
+        assert!(cos.is_finite());
+        assert!((-1.0 - 1e-12..=1.0 + 1e-12).contains(&cos));
+        let p2_expected = 0.5 * (3.0 * cos * cos - 1.0);
+        assert!((f0[idx("jacobi_p2")] - p2_expected).abs() < 1e-12);
+        assert!(f0[idx("jacobi_ratio")].is_finite());
+
+        for name in [
+            "shape_hyperradius",
+            "shape_inv_hyperradius",
+            "shape_area",
+            "shape_xi",
+            "shape_eta",
+            "shape_virial_ratio",
+            "sym_sigma1",
+            "sym_sigma2",
+            "sym_sigma3",
+            "sym_sigma3_inv",
+        ] {
+            let i = idx(name);
+            assert!(f0[i].is_finite(), "feature {name} not finite");
+            assert!((f0[i] - f1[i]).abs() < 1e-12, "feature {name} should be body-invariant");
+        }
+
+        assert!(f0[idx("shape_hyperradius")] > 0.0);
+        assert!(f0[idx("shape_area")] > 0.0);
+        assert!(f0[idx("sym_sigma3")] > 0.0);
+        assert!(
+            (f0[idx("sym_sigma3")] * f0[idx("sym_sigma3_inv")] - 1.0).abs() < 1e-8,
+            "sym_sigma3 * sym_sigma3_inv should be near 1"
+        );
+    }
+
+    #[test]
+    fn candidate_sort_key_uses_mdl_when_requested() {
+        let mk = |mse: f64, complexity: usize| CandidateSummary {
+            id: 0,
+            equation: Equation { terms: vec![] },
+            equation_text: "ax=0 ; ay=0 ; az=0".to_string(),
+            metrics: CandidateMetrics {
+                mse,
+                complexity,
+                rollout_rmse: Some(0.2),
+                divergence_time: None,
+                stability_flags: vec![],
+            },
+            notes: vec!["selector_policy=numeric_mdl".to_string()],
+        };
+        let high_complexity_better_mse = mk(0.90, 100);
+        let low_complexity_worse_mse = mk(1.00, 1);
+
+        let a = candidate_sort_key(
+            &high_complexity_better_mse,
+            SensitivityMode::Objective,
+            0.0,
+        );
+        let b = candidate_sort_key(&low_complexity_worse_mse, SensitivityMode::Objective, 0.0);
+        assert!(
+            b < a,
+            "numeric_mdl should prefer shorter description length over a tiny mse gain"
+        );
     }
 
     #[test]
