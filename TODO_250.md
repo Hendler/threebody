@@ -15,8 +15,8 @@ This priority layer is additive: it does not remove simulation-accuracy or equat
 - [x] R004. Add integration test proving `predictability report` writes JSON+Markdown and classifies mixed outcomes correctly.
 - [x] R005. Run reproducible efficacy summary on current Takens outputs and store artifacts (`results/efficacy_report_v1.json`, `results/efficacy_report_v1.md`).
 - [x] R006. Update paper main text with reporting rubric and measured efficacy aggregate.
-- [ ] R007. Add bootstrap confidence intervals for median improvement (all/raw/derived) in efficacy reports.
-- [ ] R008. Add paired-report comparator (`before` vs `after`) with effect-size and non-regression flags.
+- [x] R007. Add bootstrap confidence intervals for median improvement (all/raw/derived) in efficacy reports.
+- [x] R008. Add paired-report comparator (`before` vs `after`) with effect-size and non-regression flags.
 - [ ] R009. Add schema validation test to guarantee backward-compatible report parsing.
 - [ ] R010. Add missing-data handling tests (NaN/inf/missing fields) and deterministic fallback behavior.
 - [ ] R011. Add multi-run aggregation command for seed suites (median, CI, win-rate by channel kind).
