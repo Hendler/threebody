@@ -11,17 +11,8 @@
 \begin{document}
 \maketitle
 
-\begin{center}
-\fbox{\parbox{0.97\linewidth}{
-\textbf{Primary research question (posed by Jonathan Hendler):}
-If we collect better sensors and richer information about a deterministic three-body system, can we discover and use better mathematics that predicts its evolution more accurately over time?
-
-This question is the central objective of this paper and now explicitly guides future work.
-}}
-\end{center}
-
 \begin{abstract}
-The primary research question for this project, explicitly posed by Jonathan Hendler, is whether better sensing/information can enable better mathematics for prediction in deterministic three-body dynamics. We present a two-system framework for testing that question under coupled gravitational and electromagnetic interactions. The first system is a high-fidelity numerical simulator (``oracle'') designed for reproducibility, performance, and explicit error control. It supports Newtonian gravity and a nonrelativistic electromagnetic interaction model including electric and magnetic fields as well as scalar and vector potentials ($\phi$, $A$). The second system is a model-discovery engine that searches for sparse, interpretable equations that predict the oracle's trajectories with minimal complexity. In the current implementation, discovery proceeds via structured feature libraries and sparse regression (STLS/LASSO)\cite{Brunton2016,Tibshirani1996}, using simulator-provided accelerations to avoid derivative noise; an optional GA baseline is also available.
+This project is guided by a central question posed at project inception by Jonathan Hendler: can richer sensing/information in a deterministic three-body system enable mathematically better prediction over time? We present a two-system framework for testing that question under coupled gravitational and electromagnetic interactions. The first system is a high-fidelity numerical simulator (``oracle'') designed for reproducibility, performance, and explicit error control. It supports Newtonian gravity and a nonrelativistic electromagnetic interaction model including electric and magnetic fields as well as scalar and vector potentials ($\phi$, $A$). The second system is a model-discovery engine that searches for sparse, interpretable equations that predict the oracle's trajectories with minimal complexity. In the current implementation, discovery proceeds via structured feature libraries and sparse regression (STLS/LASSO)\cite{Brunton2016,Tibshirani1996}, using simulator-provided accelerations to avoid derivative noise; an optional GA baseline is also available.
 
 This revision adds three math families outside the prior force-library core (\texttt{jacobi\_legendre}, \texttt{shape\_invariants}, \texttt{symmetry\_invariants}), plus an MDL-aware deterministic selector mode (\texttt{numeric\_mdl}) layered on top of existing MCTS archive reuse and strict holdout gates. In matched deterministic gravity-only runs on February 8, 2026 (\texttt{research\_v2\_atlas}, 3 iterations, 150 steps, $dt=0.01$), the best equation and benchmark metrics were unchanged versus baseline: median relative improvement $0.0$ (12-seed suite, 95\% bootstrap CI $[0,0]$), benchmark relative improvement $\approx 1.3\times10^{-16}$, and \texttt{strict\_holdout\_passed=false}. A targeted global-model run with the new families produced a simpler equation (complexity 5) but a small negative benchmark delta ($-7.5\times10^{-5}$, CI fully negative). Therefore, current evidence supports tooling progress and stronger falsification, not a new physical law.
 
@@ -29,7 +20,7 @@ We additionally implemented a deterministic delay-embedding track (\texttt{predi
 To make the guiding question operational, we added a reporting layer that now includes deterministic bootstrap confidence intervals and an explicit before/after comparator with effect-size and non-regression flags. The measured gain from baseline to sensor-augmented delta mode was substantial on this run: all-channel median improvement delta $\approx +0.7619$ and derived-channel median improvement delta $\approx +1.5231$.
 We also introduced an information-context framing: for a target channel and sensor set, define context volume $W=(\tau m)|S|$ and estimate the minimum $W^\star$ that meets a strict holdout gate. In a matched high-bar analysis ($\Delta_{\mathrm{rel}}>0.6$, sensitivity median $\le 0.2$), we measured $W^\star=3$ for one-body inertial and two-body Kepler regimes, versus $W^\star=20$ for a perturbed three-body regime, suggesting higher information demand as interaction complexity increases.
 
-We emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. We argue that novelty arises not from claiming a universal closed-form solution, but from automatically discovering compact regime-specific laws with explicit validity domains, strict holdout testing, and reproducible failure reporting against the oracle.
+We emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. Relative to bounded-horizon ANN surrogates for three-body dynamics\cite{Breen2020} and generic sparse-discovery pipelines\cite{Brunton2016}, novelty here is methodological: deterministic claim-gated reporting, explicit information-context thresholds, and reproducible failure reporting against the oracle.
 Code repository: \texttt{https://github.com/Hendler/threebody}.
 \end{abstract}
 
@@ -37,11 +28,14 @@ Code repository: \texttt{https://github.com/Hendler/threebody}.
 The classical three-body problem is a paradigmatic nonlinear dynamical system exhibiting sensitivity to initial conditions and, for most configurations, the absence of closed-form global solutions. Practical prediction therefore relies on numerical integration, while theory offers partial analytic structure (integrals of motion, special solutions, perturbation expansions, invariant manifolds). For modern applications---ranging from celestial mechanics to charged particle dynamics---one often wants both: (i) an accurate simulator suitable as ``ground truth,'' and (ii) interpretable approximations that predict well and illuminate structure.
 
 \subsection*{Guiding question and scope}
-The guiding question for this research, requested by Jonathan Hendler, is:
+At project inception, Jonathan Hendler posed the guiding question:
 \begin{quote}
 Given richer measurements of a deterministic three-body system, can we discover and use mathematically better predictive laws?
 \end{quote}
 All methods and evaluations in this paper are judged against that question: they must improve strict holdout prediction, not only in-sample fit.
+
+\subsection*{Relation to prior work and novelty boundary}
+Related literature gives useful anchors: data-driven sparse equation discovery (e.g., SINDy)\cite{Brunton2016}; delay-embedding reconstruction and embedding-dimension diagnostics\cite{Takens1981,Kennel1992,KennelAbarbanel2002}; and bounded-horizon neural surrogates for chaotic three-body trajectories\cite{Breen2020}. Our contribution is not a universal closed-form solution and not a claim that local models solve long-horizon chaos. The genuinely new element is the integrated protocol: strict claim gates tied to holdout metrics, explicit context-volume testing via $W=(\tau m)|S|$, and deterministic before/after sensor-value comparisons.
 
 \subsection*{Predictability context-window framing}
 To sharpen the guiding question, we treat prediction as an information-budget problem. For a target channel $x_t$ and sensor set $S$, a delay embedding uses:
@@ -594,7 +588,7 @@ Future work priorities are explicitly ordered by the guiding question posed by J
 \item Turn the context-window hypothesis into a full response surface $W^\star(\text{regime}, \text{channel}, \tau_\Delta, \tau_s, H)$, including multi-horizon $H$ and uncertainty bands over seeds.
 \item Add strict multi-horizon holdout metrics (1-step, short-horizon, and shadowing-time) so ``predicts better over time'' is measured directly, not inferred from one-step scores.
 \item Build explicit information-value experiments: compare sensor subsets under matched splits and compute uncertainty bars for each subset to estimate marginal value of each diagnostic channel.
-\item Extend deterministic equation families with mathematically compact non-physics bases from dynamical systems: Koopman/EDMD dictionaries, Ulam transfer operators, symbolic-dynamics/entropy features, and recurrence-quantification gates.
+\item Extend deterministic equation families with mathematically compact non-physics bases from dynamical systems: Koopman/EDMD dictionaries\cite{Williams2015}, Ulam transfer operators, symbolic-dynamics/entropy features, and recurrence-quantification gates.
 \item Keep strict falsification gates: paired before/after comparisons with non-regression flags, bootstrap CIs, and preregistered thresholds before any novelty claim.
 \item Improve oracle fidelity where it most limits discovery: close-encounter regularization (KS/chain or Sundman), higher-precision truth mode, and stronger EM-model caveat tracking.
 \item Auto-generate paper tables/figures directly from JSON artifacts to prevent transcription drift between code outputs and manuscript claims.
@@ -609,6 +603,13 @@ Yes, in a qualified sense. Under strict one-step holdout evaluation, richer simu
 \item \textbf{Claim C1 (local predictability gain):} In the tested matched protocol, sensor-augmented delta-enabled Takens models materially improved holdout performance versus baseline local context.
 \item \textbf{Claim C2 (context-demand signal):} Defining context volume $W=(\tau m)|S|$, the estimated minimum effective context under a high-bar gate increased from $W^\star=3$ (one-body/two-body references) to $W^\star=20$ (perturbed three-body, tested channel/sensors). This supports an \emph{empirical} information-context scaling hypothesis.
 \item \textbf{Claim C3 (negative global result):} In global force-library discovery, added geometry families and MDL-aware ranking did not yield robust strict-holdout gains over the Newtonian baseline in reported matched runs.
+\end{itemize}
+
+\subsection*{What is genuinely novel in this work}
+\begin{itemize}
+\item Not a new universal law, but a reproducible \emph{novelty gate}: claims are conditioned on strict holdout improvement, sensitivity consistency, and paired non-regression.
+\item An explicit information-context metric and testable threshold workflow ($W^\star$) integrated into routine reporting, building on embedding theory but operationalized for this simulator/discovery stack\cite{Takens1981,Kennel1992,KennelAbarbanel2002}.
+\item A deterministic sensor-value protocol that quantifies when richer measurements improve interpretable local formulas, complementing prior three-body ML-surrogate work\cite{Breen2020}.
 \end{itemize}
 
 \subsection*{What is not concluded}
@@ -649,8 +650,20 @@ R. Tibshirani, ``Regression shrinkage and selection via the lasso,'' \emph{Journ
 \bibitem{Lorenz1963}
 E. N. Lorenz, ``Deterministic nonperiodic flow,'' \emph{Journal of the Atmospheric Sciences}, vol. 20, no. 2, pp. 130--141, 1963. doi:10.1175/1520-0469(1963)020<0130:DNF>2.0.CO;2.
 
+\bibitem{Breen2020}
+P. G. Breen, C. N. Foley, T. C. N. Boekholt, and S. F. Portegies Zwart, ``Newton versus the machine: solving the chaotic three-body problem using deep neural networks,'' \emph{Monthly Notices of the Royal Astronomical Society}, vol. 494, no. 2, pp. 2465--2470, 2020. doi:10.1093/mnras/staa713.
+
 \bibitem{Takens1981}
 F. Takens, ``Detecting strange attractors in turbulence,'' in \emph{Dynamical Systems and Turbulence, Warwick 1980}, D. A. Rand and L.-S. Young, Eds. Berlin, Heidelberg: Springer, 1981, pp. 366--381. doi:10.1007/BFb0091924.
+
+\bibitem{Kennel1992}
+M. B. Kennel, R. Brown, and H. D. I. Abarbanel, ``Determining embedding dimension for phase-space reconstruction using a geometrical construction,'' \emph{Physical Review A}, vol. 45, no. 6, pp. 3403--3411, 1992. doi:10.1103/PhysRevA.45.3403.
+
+\bibitem{KennelAbarbanel2002}
+M. B. Kennel and H. D. I. Abarbanel, ``False neighbors and false strands: a reliable minimum embedding dimension algorithm,'' \emph{Physical Review E}, vol. 66, no. 2, 026209, 2002. doi:10.1103/PhysRevE.66.026209.
+
+\bibitem{Williams2015}
+M. O. Williams, I. G. Kevrekidis, and C. W. Rowley, ``A data-driven approximation of the Koopman operator: extending dynamic mode decomposition,'' \emph{Journal of Nonlinear Science}, vol. 25, no. 6, pp. 1307--1346, 2015. doi:10.1007/s00332-015-9258-5.
 
 \bibitem{Dormand1980}
 J. R. Dormand and P. J. Prince, ``A family of embedded Runge--Kutta formulae,'' \emph{Journal of Computational and Applied Mathematics}, vol. 6, no. 1, pp. 19--26, 1980. doi:10.1016/0771-050X(80)90013-3.
