@@ -360,6 +360,12 @@ Interpretation: the local linearization is moderately consistent over this short
 For physicists: this run shows that the added atlas parameterization can collapse algebraically to a redundant representation of the same dominant basis, and benchmark-first gating correctly blocks an overclaim.
 For novice readers: we added better checks, but this run did \emph{not} discover a better formula than what we already had.
 
+We also ran a matched \texttt{research\_v1} global baseline (same seed, bucket, and run budget) on February 8, 2026. It produced the exact sparse law
+\[
+a_i\approx g_i^\ast
+\]
+with the same best within-run RMSE ($7.6666\times 10^{-2}$), the same benchmark RMSE mean ($1.8800\times 10^{-2}$), and the same strict-holdout outcome (\texttt{false}). Thus, in this configuration the atlas added descriptive flexibility but no measurable predictive gain.
+
 \subsection{Current empirical evidence for archive-guided search}
 We ran a controlled local sweep (8 factory iterations, STLS, \texttt{three-body} preset, \texttt{steps}=200, $dt=0.01$, mock LLM), varying $c\in\{0.4,0.7,1.0\}$ and $K\in\{6,8,12\}$ at fixed seed.
 \begin{itemize}
