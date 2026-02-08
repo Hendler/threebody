@@ -14,7 +14,7 @@
 \begin{abstract}
 We present a two-system framework for studying and predicting three-body dynamics under coupled gravitational and electromagnetic interactions. The first system is a high-fidelity numerical simulator (``oracle'') designed for reproducibility, performance, and explicit error control. It supports Newtonian gravity and a nonrelativistic electromagnetic interaction model including electric and magnetic fields as well as scalar and vector potentials ($\phi$, $A$). The second system is a model-discovery engine that searches for sparse, interpretable equations that predict the oracle's trajectories with minimal complexity. In the current implementation, discovery proceeds via structured feature libraries and sparse regression (STLS/LASSO)\cite{Brunton2016,Tibshirani1996}, using simulator-provided accelerations to avoid derivative noise; an optional GA baseline is also available.
 
-This revision adds: (i) a local deterministic ``atlas'' model family (piecewise close/far feature gates), (ii) a sensitivity-equation check using tangent dynamics $\dot{\delta x}=J_f(x)\delta x$ on discovered models, and (iii) a strict benchmark-first holdout gate for claims. In a deterministic gravity-only run on February 8, 2026 (\texttt{research\_v2\_atlas}, 4 iterations, 200 steps, $dt=0.01$), the pipeline produced a compact but algebraically redundant formula equivalent to near-Newtonian gravity; the strict holdout gate reported \texttt{no\_improvement}. We therefore report methodological progress (better falsification and diagnostics), not a new physical law.
+This revision adds: (i) a local deterministic ``atlas'' model family with binary or smooth close/far gates, (ii) explicit candidate-quality controls (redundancy/collinearity pruning and sensitivity-aware objective weighting), (iii) a deterministic ``math-creative'' selector template set (Newtonian, PN1, Yukawa, tidal, jerk, Hamiltonian-flow forms), and (iv) a strict benchmark-first holdout gate for claims. In a deterministic gravity-only run on February 8, 2026 (\texttt{research\_v2\_atlas}, 3 iterations, 200 steps, $dt=0.01$, smooth gate $r_0=0.5$, width $0.08$), the best within-run formula was $a_i \approx g_i^\ast + 0.01\,\mathrm{jerk}_i$, but strict holdout still reported \texttt{no\_improvement}: median relative improvement $-1.091$ on the 12-seed suite (95\% bootstrap CI $[-2.411,-0.459]$) with benchmark regression. We therefore report methodological progress (better falsification and diagnostics), not a new physical law.
 
 We emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. We argue that novelty arises not from claiming a universal closed-form solution, but from automatically discovering compact regime-specific laws with explicit validity domains, strict holdout testing, and reproducible failure reporting against the oracle.
 Code repository: \texttt{https://github.com/Hendler/threebody}.
@@ -231,16 +231,22 @@ To target regime-local structure, we added a model-family switch:
 \item \textbf{atlas}: separate sparse equations on close/far gated subsets, then merged into a deterministic piecewise formula.
 \end{itemize}
 
-In the current implementation, the atlas uses binary gates already in the extended library:
+In the current implementation, atlas gating supports two deterministic modes selected by \texttt{--atlas-gate}:
+\begin{itemize}
+\item \textbf{binary}:
 \begin{equation*}
-\mathrm{gate}_{\mathrm{close}}=\mathbf{1}\{\min_{i<j}\|r_{ij}\|<r_{\mathrm{gate}}\},\qquad
+\mathrm{gate}_{\mathrm{close}}=\mathbf{1}\{r_{\min}<r_{\mathrm{gate}}\},\qquad
 \mathrm{gate}_{\mathrm{far}}=1-\mathrm{gate}_{\mathrm{close}},
 \end{equation*}
-with gated basis atoms such as
+where $r_{\min}=\min_{i<j}\|r_{ij}\|$.
+\item \textbf{smooth} (current default):
 \begin{equation*}
-g^{\mathrm{close}}_{i,\alpha}=\mathrm{gate}_{\mathrm{close}}\,g_{i,\alpha},\qquad
-g^{\mathrm{far}}_{i,\alpha}=\mathrm{gate}_{\mathrm{far}}\,g_{i,\alpha}.
+\mathrm{gate}^{(s)}_{\mathrm{close}}=\sigma\!\left(\frac{r_0-r_{\min}}{w}\right),\qquad
+\mathrm{gate}^{(s)}_{\mathrm{far}}=1-\mathrm{gate}^{(s)}_{\mathrm{close}},
 \end{equation*}
+with user-set center $r_0$ and width $w>0$.
+\end{itemize}
+The library includes corresponding gated atoms (e.g., $g^{\mathrm{close}}_{i,\alpha}$, $g^{\mathrm{far}}_{i,\alpha}$ and smooth variants), and can be augmented with explicit hypothesis families (\texttt{pn1}, \texttt{yukawa}, \texttt{tidal\_invariants}, \texttt{jerk\_augmented}, \texttt{hamiltonian\_invariants}).
 
 To test whether discovered dynamics encode meaningful local linearization, we added a tangent-flow diagnostic on the discovered predictor:
 \begin{equation*}
@@ -253,6 +259,12 @@ where $x\in\mathbb{R}^{18}$ stacks $(r_1,r_2,r_3,v_1,v_2,v_3)$ and $J_{f_\theta}
 \item median/p90/max relative norm error between observed and linearized perturbations.
 \end{itemize}
 This does not prove global validity, but it quantifies whether the discovered local dynamics are self-consistent over the tested horizon.
+
+Candidate selection now also records per-candidate redundancy flags and maximum in-model feature collinearity. Under \texttt{--redundancy-prune strict}, candidates can be dropped before ranking if they are algebraically redundant (e.g., near linear combinations of gated/base terms) or exceed a configurable collinearity threshold. With \texttt{--sensitivity-mode objective}, the ranking key is adjusted to
+\begin{equation*}
+\mathrm{RMSE}_{\mathrm{rollout}}+\lambda_s\,\varepsilon_{\mathrm{sens}},
+\end{equation*}
+where $\varepsilon_{\mathrm{sens}}$ is median sensitivity relative error and $\lambda_s$ is user-configurable.
 
 \subsection{What counts as ``predicts well''}
 Pointwise acceleration fit is not sufficient. We evaluate:
@@ -315,36 +327,38 @@ For gravity-only or weak-EM regimes:
 \item Sparse models can achieve strong short-horizon rollout fidelity with few terms.
 \end{itemize}
 
-\subsection{New deterministic run with atlas + strict holdout (February 8, 2026)}
+\subsection{Deterministic smooth-atlas run with strict holdout (February 8, 2026)}
 We ran:
 \begin{itemize}
-\item \texttt{factory --policy research\_v2\_atlas --model-family auto --claim-gate highbar\_v2\_benchmark\_first}
-\item 4 iterations, \texttt{steps}=200, $dt=0.01$, gravity-only, STLS, deterministic seed suite (\texttt{deterministic\_v1}), LLM off.
+\item \texttt{factory --auto --policy research\_v2\_atlas --claim-gate highbar\_v2\_benchmark\_first --publish-report}
+\item \texttt{--atlas-gate smooth --gate-r0 0.5 --gate-width 0.08 --redundancy-prune strict}
+\item \texttt{--sensitivity-mode objective --sens-weight 0.05 --feature-family mixed --selector-policy llm\_math\_creative}
+\item 3 iterations, \texttt{steps}=200, $dt=0.01$, gravity-only, STLS, deterministic seed suite (\texttt{deterministic\_v1}, 12 seeds), mock LLM judge.
 \end{itemize}
 
-Best discovered equation (run\_004):
+Best discovered equation (run\_002):
 \begin{equation*}
 \begin{aligned}
-a_{i,x}&\approx 0.499995\,g^{\mathrm{close}}_{i,x}+0.499995\,g^{\mathrm{far}}_{i,x}+0.500005\,g_{i,x},\\
-a_{i,y}&\approx 0.499962\,g^{\mathrm{close}}_{i,y}+0.499962\,g^{\mathrm{far}}_{i,y}+0.500038\,g_{i,y},\\
-a_{i,z}&\approx 0.499989\,g^{\mathrm{close}}_{i,z}+0.499989\,g^{\mathrm{far}}_{i,z}+0.500011\,g_{i,z}.
+a_{i,x}&\approx 1.000000\,g_{i,x}+0.010000\,\mathrm{jerk}_{i,x},\\
+a_{i,y}&\approx 1.000000\,g_{i,y}+0.010000\,\mathrm{jerk}_{i,y},\\
+a_{i,z}&\approx 1.000000\,g_{i,z}+0.010000\,\mathrm{jerk}_{i,z}.
 \end{aligned}
 \end{equation*}
-Since $g^{\mathrm{close}}_{i,\alpha}+g^{\mathrm{far}}_{i,\alpha}=g_{i,\alpha}$, this is effectively near-Newtonian gravity with redundant terms, not a new force law.
+This is a local perturbation of the Newtonian basis, not a new fundamental force law.
 
 \begin{center}
 \begin{tabular}{lr}
 \hline
 metric & value \\
 \hline
-best within-run rollout RMSE & $7.6666\times 10^{-2}$ \\
-prior best on same oracle (apples-to-apples) & $5.0725\times 10^{-2}$ \\
-$\Delta$ (current-prior, same oracle) & $+2.5941\times 10^{-2}$ \\
-benchmark RMSE mean (current) & $1.8800\times 10^{-2}$ \\
+best within-run rollout RMSE & $1.1616\times 10^{-2}$ \\
+prior best on same oracle (apples-to-apples) & $5.853\times 10^{-3}$ \\
+$\Delta$ (current-prior, same oracle) & $+5.763\times 10^{-3}$ \\
+benchmark RMSE mean (current) & $2.681142\times 10^{1}$ \\
 benchmark RMSE mean (prior) & $1.8321\times 10^{-2}$ \\
-benchmark relative improvement & $-2.617\%$ \\
-seed-suite median relative improvement & $6.668\%$ \\
-seed-suite bootstrap CI$_{95}$ & $[-12.776\%,\,14.274\%]$ \\
+benchmark relative improvement & $-1.462428\times 10^{3}$ \\
+seed-suite median relative improvement & $-1.091311$ \\
+seed-suite bootstrap CI$_{95}$ & $[-2.411172,\,-0.458917]$ \\
 strict holdout pass & false \\
 \hline
 \end{tabular}
@@ -352,19 +366,20 @@ strict holdout pass & false \\
 
 Sensitivity-equation diagnostics (same best model):
 \begin{itemize}
-\item observed FTLE $\approx 0.8069$, linearized FTLE $\approx 0.7755$,
-\item relative perturbation-norm error: median $0.0875$, p90 $0.1777$, max $0.1946$.
+\item observed FTLE $\approx 6.8664$, linearized FTLE $\approx 6.6950$,
+\item relative perturbation-norm error: median $0.1289$, p90 $0.1737$, max $0.1751$.
 \end{itemize}
 Interpretation: the local linearization is moderately consistent over this short horizon, but the model does not beat the incumbent on strict holdout.
 
-For physicists: this run shows that the added atlas parameterization can collapse algebraically to a redundant representation of the same dominant basis, and benchmark-first gating correctly blocks an overclaim.
-For novice readers: we added better checks, but this run did \emph{not} discover a better formula than what we already had.
+Selector/pruning behavior in this run:
+\begin{itemize}
+\item The deterministic template selector admitted all six template families each iteration (Newtonian core, PN1, Yukawa, tidal, jerk, Hamiltonian-flow).
+\item Strict redundancy/collinearity pruning dropped 5/19, 7/21, and 8/15 candidates in runs 1--3, respectively.
+\item The equation-search archive top nodes remained Newtonian core and Newtonian+PN1 forms; richer terms were explored but did not generalize under strict holdout.
+\end{itemize}
 
-We also ran a matched \texttt{research\_v1} global baseline (same seed, bucket, and run budget) on February 8, 2026. It produced the exact sparse law
-\[
-a_i\approx g_i^\ast
-\]
-with the same best within-run RMSE ($7.6666\times 10^{-2}$), the same benchmark RMSE mean ($1.8800\times 10^{-2}$), and the same strict-holdout outcome (\texttt{false}). Thus, in this configuration the atlas added descriptive flexibility but no measurable predictive gain.
+For physicists: this is a useful negative result. The expanded deterministic hypothesis space plus sensitivity-aware ranking did not improve benchmark-level predictive accuracy in this bucket, and the gate correctly prevented over-claiming.
+For novice readers: we tried smarter equation families and stricter filters, but they still did not beat the previous best overall.
 
 \subsection{Current empirical evidence for archive-guided search}
 We ran a controlled local sweep (8 factory iterations, STLS, \texttt{three-body} preset, \texttt{steps}=200, $dt=0.01$, mock LLM), varying $c\in\{0.4,0.7,1.0\}$ and $K\in\{6,8,12\}$ at fixed seed.
@@ -383,7 +398,7 @@ In the February 8, 2026 \texttt{research\_v2\_atlas} run, the strict profile \te
 \item \texttt{benchmark\_passed=false},
 \item \texttt{strict\_holdout\_passed=false}.
 \end{itemize}
-This is intended behavior: even though the seed-suite median relative improvement was positive, the bootstrap interval crossed zero and the benchmark non-regression test failed, so strong-improvement language was blocked.
+This is intended behavior: the seed-suite median relative improvement was negative, the bootstrap interval remained below zero, and the benchmark non-regression test failed, so strong-improvement language was blocked.
 
 \subsection{Claim-gated legacy vs.\ research comparison (matrix run)}
 On February 8, 2026, we ran a 5-case paired matrix with clean buckets (3 factory iterations per run, STLS, LLM off, deterministic 12-seed claim suite). For each case, we first ran \texttt{legacy}, then \texttt{research\_v1} with the same seed and bucket.
@@ -482,7 +497,7 @@ We interpret ``novel'' as compact approximations that outperform naive baselines
 \begin{itemize}
 \item Add principled close-encounter regularization (KS/chain, Sundman transforms) and/or multi-precision truth mode (beyond softening/smooth substepping).
 \item Implement predict and score commands with standardized benchmarks (divergence time, RMS error curves).
-\item Strengthen atlas discovery by enforcing algebraic non-redundancy (e.g., avoid selecting $\{g^{\mathrm{close}},g^{\mathrm{far}},g\}$ simultaneously when linearly dependent) and by testing smooth rather than binary regime gates.
+\item Strengthen atlas discovery by enforcing algebraic non-redundancy and calibrating/learning gate geometry (multi-threshold or multi-chart smooth gates) rather than a single fixed $(r_0,w)$.
 \item Replace numerical Jacobian sensitivity checks with mixed analytic/numeric Jacobians and variational-integrator consistency checks.
 \item Extend discovery to probabilistic forecasts for chaotic regimes.
 \item Run statistically powered multi-seed hyperparameter studies for archive/UCT settings before claiming accuracy gains.
@@ -558,6 +573,7 @@ S. Mikkola and S. J. Aarseth, ``An implementation of N-body chain regularization
 \item Factory now includes a charged preset (\texttt{em-three-body}) so EM-enabled policy comparisons can be run without external IC injection.
 \item Factory now persists equation-search state (\texttt{equation\_search\_archive.json}), uncertainty-aware ranking metadata, and a compact archive report (\texttt{equation\_search\_report.md}) for auditability.
 \item Factory policy/gating metadata is explicit (\texttt{policy\_effective.json}); optional publication artifacts include \texttt{evaluation\_aggregate.json}, \texttt{claim\_assessment.json}, \texttt{strict\_holdout\_report.json}, \texttt{sensitivity\_eval.json}, and \texttt{paper\_summary.md}.
+\item Advanced controls now include smooth atlas gates (\texttt{--atlas-gate smooth}, \texttt{--gate-r0}, \texttt{--gate-width}), strict redundancy/collinearity pruning, sensitivity-aware ranking, selectable feature-family hypotheses, and deterministic equation-template injection for non-Newtonian candidates.
 \item The \texttt{research\_v2\_atlas} policy defaults to an atlas model family and benchmark-first claim gating (\texttt{highbar\_v2\_benchmark\_first}).
 \item Bootstrap CI computation for the claim gate now uses index-safe resampling and is covered by a regression test to prevent out-of-bounds failures on 12-case suites.
 \end{itemize}
