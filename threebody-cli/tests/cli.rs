@@ -796,3 +796,92 @@ fn run_alias_works() {
         .expect("run alias");
     assert!(out.status.success(), "run failed: {:?}", out);
 }
+
+#[test]
+fn predictability_takens_writes_report_with_sensitivity_fields() {
+    let exe = env!("CARGO_BIN_EXE_threebody-cli");
+    let tmp_dir = env::temp_dir().join(format!("threebody_takens_{}", std::process::id()));
+    if tmp_dir.exists() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+    fs::create_dir_all(&tmp_dir).expect("create temp dir");
+
+    let input_csv = tmp_dir.join("traj.csv");
+    let sim = Command::new(exe)
+        .current_dir(&tmp_dir)
+        .args([
+            "simulate",
+            "--output",
+            input_csv.to_str().unwrap(),
+            "--steps",
+            "80",
+            "--dt",
+            "0.01",
+        ])
+        .output()
+        .expect("run simulate");
+    assert!(sim.status.success(), "simulate failed: {:?}", sim);
+    assert!(input_csv.exists());
+
+    let report_path = tmp_dir.join("takens_report.json");
+    let out = Command::new(exe)
+        .current_dir(&tmp_dir)
+        .args([
+            "predictability",
+            "takens",
+            "--input",
+            input_csv.to_str().unwrap(),
+            "--column",
+            "min_pair_dist",
+            "--out",
+            report_path.to_str().unwrap(),
+            "--tau",
+            "1,2",
+            "--m",
+            "3,4",
+            "--k",
+            "6,10",
+            "--lambda",
+            "1e-8,1e-6",
+            "--model",
+            "both",
+            "--split-mode",
+            "chronological",
+            "--sensitivity-weight",
+            "0.1",
+            "--train-frac",
+            "0.7",
+            "--val-frac",
+            "0.15",
+        ])
+        .output()
+        .expect("run predictability takens");
+
+    assert!(
+        out.status.success(),
+        "takens failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(report_path.exists());
+
+    let json = fs::read_to_string(&report_path).expect("takens report json");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid takens report");
+    assert_eq!(
+        value.get("column").and_then(|v| v.as_str()),
+        Some("min_pair_dist")
+    );
+    let best = value.get("best").expect("best row in report");
+    let model = best
+        .get("config")
+        .and_then(|v| v.get("model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    assert!(model == "linear" || model == "rational");
+    assert!(best.get("holdout_mse").and_then(|v| v.as_f64()).is_some());
+    assert!(
+        best.get("holdout_sensitivity")
+            .and_then(|v| v.get("median_rel_error"))
+            .and_then(|v| v.as_f64())
+            .is_some()
+    );
+}

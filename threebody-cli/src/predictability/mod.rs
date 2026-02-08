@@ -6,6 +6,7 @@ mod detect;
 mod ensemble;
 mod extract;
 mod features;
+mod takens;
 mod train_map;
 
 pub const PREDICTABILITY_VERSION: &str = "v1";
@@ -108,6 +109,48 @@ pub enum PredictabilityCommand {
         #[arg(long, default_value_t = 42)]
         seed: u64,
     },
+    /// Fit a Takens delay-embedding local map with strict holdout evaluation.
+    Takens {
+        /// Input CSV path.
+        #[arg(long, default_value = "traj.csv")]
+        input: PathBuf,
+        /// Numeric column name to model.
+        #[arg(long, default_value = "min_pair_dist")]
+        column: String,
+        /// Output report JSON path.
+        #[arg(long, default_value = "takens_report.json")]
+        out: PathBuf,
+        /// Delay values (comma-separated positive integers).
+        #[arg(long, default_value = "1,2,3")]
+        tau: String,
+        /// Embedding dimensions (comma-separated positive integers).
+        #[arg(long, default_value = "3,4,5")]
+        m: String,
+        /// kNN neighborhood sizes (comma-separated positive integers).
+        #[arg(long, default_value = "8,12,16")]
+        k: String,
+        /// Ridge lambdas (comma-separated nonnegative floats).
+        #[arg(long, default_value = "1e-8,1e-6,1e-4,1e-2")]
+        lambda: String,
+        /// Model family: linear | rational | both (or comma-separated list).
+        #[arg(long, default_value = "both")]
+        model: String,
+        /// Split mode: chronological | shuffled.
+        #[arg(long, default_value = "chronological")]
+        split_mode: String,
+        /// RNG seed used when split mode is shuffled.
+        #[arg(long, default_value_t = 42)]
+        seed: u64,
+        /// Train fraction in (0,1).
+        #[arg(long, default_value_t = 0.7)]
+        train_frac: f64,
+        /// Validation fraction in [0,1); holdout is the remainder.
+        #[arg(long, default_value_t = 0.15)]
+        val_frac: f64,
+        /// Weight for sensitivity consistency in selection score.
+        #[arg(long, default_value_t = 0.1)]
+        sensitivity_weight: f64,
+    },
     /// Forecast with lock detection and optional encounter map (reserved for v1).
     Forecast {
         #[arg(long)]
@@ -172,6 +215,35 @@ pub fn run(cmd: PredictabilityCommand) -> anyhow::Result<()> {
             out,
             seed,
         } => train_map::run_train_map(encounters, out, seed),
+        PredictabilityCommand::Takens {
+            input,
+            column,
+            out,
+            tau,
+            m,
+            k,
+            lambda,
+            model,
+            split_mode,
+            seed,
+            train_frac,
+            val_frac,
+            sensitivity_weight,
+        } => takens::run_takens(
+            input,
+            column,
+            out,
+            tau,
+            m,
+            k,
+            lambda,
+            model,
+            split_mode,
+            seed,
+            train_frac,
+            val_frac,
+            sensitivity_weight,
+        ),
         PredictabilityCommand::Forecast { .. } => {
             anyhow::bail!("predictability forecast not implemented yet")
         }

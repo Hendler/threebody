@@ -1,0 +1,1089 @@
+use std::cmp::Ordering;
+use std::fs;
+use std::io::{self, BufRead};
+use std::path::PathBuf;
+
+use serde::Serialize;
+use threebody_core::output::parse::{parse_header, require_columns};
+
+use crate::predictability::PREDICTABILITY_VERSION;
+
+#[derive(Debug, Clone)]
+struct DelaySample {
+    z: Vec<f64>,
+    y: f64,
+    target_step: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum SplitMode {
+    Chronological,
+    Shuffled,
+}
+
+impl SplitMode {
+    fn parse(raw: &str) -> anyhow::Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "chronological" | "chrono" | "time" => Ok(Self::Chronological),
+            "shuffled" | "shuffle" | "random" => Ok(Self::Shuffled),
+            _ => anyhow::bail!("unknown split mode: {raw} (expected chronological|shuffled)"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ModelKind {
+    Linear,
+    Rational,
+}
+
+impl ModelKind {
+    fn parse_list(raw: &str) -> anyhow::Result<Vec<Self>> {
+        let mut out = Vec::new();
+        for tok in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            match tok.to_ascii_lowercase().as_str() {
+                "linear" => push_unique_model(&mut out, Self::Linear),
+                "rational" => push_unique_model(&mut out, Self::Rational),
+                "both" | "all" => {
+                    push_unique_model(&mut out, Self::Linear);
+                    push_unique_model(&mut out, Self::Rational);
+                }
+                _ => anyhow::bail!(
+                    "unknown model kind: {tok} (expected linear|rational|both or CSV list)"
+                ),
+            }
+        }
+        if out.is_empty() {
+            anyhow::bail!("model list is empty");
+        }
+        Ok(out)
+    }
+}
+
+fn push_unique_model(dst: &mut Vec<ModelKind>, model: ModelKind) {
+    if !dst.contains(&model) {
+        dst.push(model);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SplitIndices {
+    train: Vec<usize>,
+    val: Vec<usize>,
+    holdout: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SplitCounts {
+    train: usize,
+    val: usize,
+    holdout: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TakensConfig {
+    tau: usize,
+    m: usize,
+    k: usize,
+    lambda: f64,
+    model: ModelKind,
+    split_mode: SplitMode,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SensitivitySummary {
+    n_pairs: usize,
+    median_rel_error: f64,
+    p90_rel_error: f64,
+    max_rel_error: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct GridEval {
+    config: TakensConfig,
+    n_embedded: usize,
+    split: SplitCounts,
+    rank_score: f64,
+    val_mse: f64,
+    val_sensitivity_median: f64,
+    holdout_mse: f64,
+    holdout_baseline_mse: f64,
+    holdout_sensitivity_median: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BestEval {
+    config: TakensConfig,
+    n_embedded: usize,
+    split: SplitCounts,
+    rank_score: f64,
+    val_mse: f64,
+    val_sensitivity: SensitivitySummary,
+    holdout_mse: f64,
+    holdout_baseline_mse: f64,
+    holdout_relative_improvement: f64,
+    holdout_sensitivity: SensitivitySummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct TakensReport {
+    version: String,
+    input_csv: String,
+    column: String,
+    n_raw: usize,
+    grid_evals: usize,
+    sensitivity_weight: f64,
+    best: BestEval,
+    notes: Vec<String>,
+}
+
+pub(crate) fn run_takens(
+    input: PathBuf,
+    column: String,
+    out: PathBuf,
+    tau_raw: String,
+    m_raw: String,
+    k_raw: String,
+    lambda_raw: String,
+    model_raw: String,
+    split_mode_raw: String,
+    seed: u64,
+    train_frac: f64,
+    val_frac: f64,
+    sensitivity_weight: f64,
+) -> anyhow::Result<()> {
+    if !input.exists() {
+        anyhow::bail!("input CSV not found: {}", input.display());
+    }
+    if !sensitivity_weight.is_finite() || sensitivity_weight < 0.0 {
+        anyhow::bail!(
+            "sensitivity_weight must be finite and nonnegative, got {}",
+            sensitivity_weight
+        );
+    }
+
+    let split_mode = SplitMode::parse(&split_mode_raw)?;
+    let taus = parse_csv_usize_list(&tau_raw, "tau")?;
+    let ms = parse_csv_usize_list(&m_raw, "m")?;
+    let ks = parse_csv_usize_list(&k_raw, "k")?;
+    let lambdas = parse_csv_f64_list(&lambda_raw, "lambda")?;
+    let models = ModelKind::parse_list(&model_raw)?;
+
+    let series = read_numeric_column(&input, &column)?;
+    if series.len() < 16 {
+        anyhow::bail!(
+            "series too short in column {column}: {} (need at least 16 samples)",
+            series.len()
+        );
+    }
+
+    let mut all_rows = Vec::new();
+    let mut best_rank_score = f64::INFINITY;
+    let mut best_val_sensitivity = None;
+    let mut best_holdout_sensitivity = None;
+
+    for &tau in &taus {
+        for &m in &ms {
+            let samples = build_delay_embedding(&series, tau, m)?;
+            if samples.len() < 8 {
+                continue;
+            }
+            let split = split_indices(samples.len(), split_mode, seed, train_frac, val_frac)?;
+            if matches!(split_mode, SplitMode::Chronological) {
+                assert_no_chronological_leakage(&samples, &split)?;
+            }
+            for &k in &ks {
+                for &lambda in &lambdas {
+                    for &model in &models {
+                        let val_mse = evaluate_model_mse(
+                            &samples,
+                            &split.train,
+                            &split.val,
+                            k,
+                            lambda,
+                            model,
+                        )?;
+                        let holdout_mse = evaluate_model_mse(
+                            &samples,
+                            &split.train,
+                            &split.holdout,
+                            k,
+                            lambda,
+                            model,
+                        )?;
+                        let holdout_baseline_mse = evaluate_persistence_mse(&samples, &split.holdout)?;
+                        let val_sensitivity = evaluate_sensitivity_summary(
+                            &samples,
+                            &split.train,
+                            &split.val,
+                            k,
+                            lambda,
+                            model,
+                        )?;
+                        let holdout_sensitivity = evaluate_sensitivity_summary(
+                            &samples,
+                            &split.train,
+                            &split.holdout,
+                            k,
+                            lambda,
+                            model,
+                        )?;
+                        let rank_score = val_mse
+                            * (1.0 + sensitivity_weight * val_sensitivity.median_rel_error.max(0.0));
+
+                        let row = GridEval {
+                            config: TakensConfig {
+                                tau,
+                                m,
+                                k,
+                                lambda,
+                                model,
+                                split_mode,
+                            },
+                            n_embedded: samples.len(),
+                            split: SplitCounts {
+                                train: split.train.len(),
+                                val: split.val.len(),
+                                holdout: split.holdout.len(),
+                            },
+                            rank_score,
+                            val_mse,
+                            val_sensitivity_median: val_sensitivity.median_rel_error,
+                            holdout_mse,
+                            holdout_baseline_mse,
+                            holdout_sensitivity_median: holdout_sensitivity.median_rel_error,
+                        };
+
+                        if rank_score < best_rank_score {
+                            best_rank_score = rank_score;
+                            best_val_sensitivity = Some(val_sensitivity);
+                            best_holdout_sensitivity = Some(holdout_sensitivity);
+                        }
+                        all_rows.push(row);
+                    }
+                }
+            }
+        }
+    }
+
+    if all_rows.is_empty() {
+        anyhow::bail!("no valid Takens grid rows were produced");
+    }
+    all_rows.sort_by(|a, b| {
+        a.rank_score
+            .partial_cmp(&b.rank_score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.val_mse.partial_cmp(&b.val_mse).unwrap_or(Ordering::Equal))
+    });
+
+    let best_row = &all_rows[0];
+    let best_val_sensitivity = best_val_sensitivity
+        .ok_or_else(|| anyhow::anyhow!("missing validation sensitivity for best model"))?;
+    let best_holdout_sensitivity = best_holdout_sensitivity
+        .ok_or_else(|| anyhow::anyhow!("missing holdout sensitivity for best model"))?;
+
+    let rel = if best_row.holdout_baseline_mse > 0.0 {
+        (best_row.holdout_baseline_mse - best_row.holdout_mse) / best_row.holdout_baseline_mse
+    } else {
+        0.0
+    };
+
+    let best = BestEval {
+        config: best_row.config.clone(),
+        n_embedded: best_row.n_embedded,
+        split: best_row.split.clone(),
+        rank_score: best_row.rank_score,
+        val_mse: best_row.val_mse,
+        val_sensitivity: best_val_sensitivity,
+        holdout_mse: best_row.holdout_mse,
+        holdout_baseline_mse: best_row.holdout_baseline_mse,
+        holdout_relative_improvement: rel,
+        holdout_sensitivity: best_holdout_sensitivity,
+    };
+
+    let report = TakensReport {
+        version: PREDICTABILITY_VERSION.to_string(),
+        input_csv: input.display().to_string(),
+        column: column.clone(),
+        n_raw: series.len(),
+        grid_evals: all_rows.len(),
+        sensitivity_weight,
+        best,
+        notes: vec![
+            "Takens embedding uses z_t=[x_t, x_{t-tau}, ..., x_{t-(m-1)tau}] with one-step target x_{t+1}."
+                .to_string(),
+            "Model families include local linear and local linear-fractional (rational) maps fit on kNN neighborhoods."
+                .to_string(),
+            "Primary score is strict holdout MSE; baseline is persistence y_hat=x_t.".to_string(),
+            "Selection rank_score = val_mse * (1 + sensitivity_weight * val_sensitivity_median)."
+                .to_string(),
+            "Chronological split enforces no-future-leakage across train/val/holdout.".to_string(),
+        ],
+    };
+
+    fs::write(&out, serde_json::to_string_pretty(&report)?)?;
+    eprintln!(
+        "wrote Takens report: {} | model={:?} holdout_mse={:.6e} baseline={:.6e} rel_impr={:.6} sens_med={:.6}",
+        out.display(),
+        report.best.config.model,
+        report.best.holdout_mse,
+        report.best.holdout_baseline_mse,
+        report.best.holdout_relative_improvement,
+        report.best.holdout_sensitivity.median_rel_error,
+    );
+    Ok(())
+}
+
+fn parse_csv_usize_list(raw: &str, field: &str) -> anyhow::Result<Vec<usize>> {
+    let mut out = Vec::new();
+    for tok in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let v: usize = tok
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid {field} value {tok:?}: {e}"))?;
+        if v == 0 {
+            anyhow::bail!("{field} values must be positive");
+        }
+        out.push(v);
+    }
+    if out.is_empty() {
+        anyhow::bail!("{field} list is empty");
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+fn parse_csv_f64_list(raw: &str, field: &str) -> anyhow::Result<Vec<f64>> {
+    let mut out = Vec::new();
+    for tok in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        let v: f64 = tok
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid {field} value {tok:?}: {e}"))?;
+        if !v.is_finite() || v < 0.0 {
+            anyhow::bail!("{field} values must be finite and nonnegative");
+        }
+        out.push(v);
+    }
+    if out.is_empty() {
+        anyhow::bail!("{field} list is empty");
+    }
+    out.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    out.dedup_by(|a, b| (*a - *b).abs() <= 1e-15);
+    Ok(out)
+}
+
+fn read_numeric_column(input: &PathBuf, column: &str) -> anyhow::Result<Vec<f64>> {
+    let file = fs::File::open(input)?;
+    let mut reader = io::BufReader::new(file);
+    let mut header_line = String::new();
+    if reader.read_line(&mut header_line)? == 0 {
+        anyhow::bail!("empty CSV: {}", input.display());
+    }
+    let header = parse_header(&header_line);
+    let map = require_columns(&header, &[column]).map_err(anyhow::Error::msg)?;
+    let col_idx = *map.get(column).expect("required column index");
+
+    let mut out = Vec::new();
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let cols: Vec<&str> = line.split(',').collect();
+        let raw = cols.get(col_idx).copied().ok_or_else(|| {
+            anyhow::anyhow!(
+                "row {} missing column {} in {}",
+                line_no + 2,
+                column,
+                input.display()
+            )
+        })?;
+        let v: f64 = raw.parse().map_err(|e| {
+            anyhow::anyhow!(
+                "row {} invalid {}={:?} in {}: {}",
+                line_no + 2,
+                column,
+                raw,
+                input.display(),
+                e
+            )
+        })?;
+        if v.is_finite() {
+            out.push(v);
+        }
+    }
+    Ok(out)
+}
+
+fn build_delay_embedding(series: &[f64], tau: usize, m: usize) -> anyhow::Result<Vec<DelaySample>> {
+    if tau == 0 || m == 0 {
+        anyhow::bail!("tau and m must be positive");
+    }
+    let lag = (m - 1) * tau;
+    if series.len() <= lag + 1 {
+        anyhow::bail!(
+            "series too short for tau={}, m={} (need > {})",
+            tau,
+            m,
+            lag + 1
+        );
+    }
+    let mut out = Vec::new();
+    for t in lag..(series.len() - 1) {
+        let mut z = Vec::with_capacity(m);
+        for j in 0..m {
+            z.push(series[t - j * tau]);
+        }
+        let y = series[t + 1];
+        if z.iter().all(|v| v.is_finite()) && y.is_finite() {
+            out.push(DelaySample {
+                z,
+                y,
+                target_step: t + 1,
+            });
+        }
+    }
+    Ok(out)
+}
+
+fn split_indices(
+    n: usize,
+    mode: SplitMode,
+    seed: u64,
+    train_frac: f64,
+    val_frac: f64,
+) -> anyhow::Result<SplitIndices> {
+    if n < 6 {
+        anyhow::bail!("need at least 6 embedded samples, got {n}");
+    }
+    if !(0.0..1.0).contains(&train_frac) {
+        anyhow::bail!("train_frac must be in (0,1), got {train_frac}");
+    }
+    if !(0.0..1.0).contains(&val_frac) {
+        anyhow::bail!("val_frac must be in (0,1), got {val_frac}");
+    }
+    if train_frac + val_frac >= 1.0 {
+        anyhow::bail!("train_frac + val_frac must be < 1");
+    }
+
+    let mut idx: Vec<usize> = (0..n).collect();
+    if matches!(mode, SplitMode::Shuffled) {
+        let mut rng = threebody_discover::ga::Lcg::new(seed);
+        for i in (1..n).rev() {
+            let j = rng.gen_range_usize(0, i);
+            idx.swap(i, j);
+        }
+    }
+
+    let mut n_train = (train_frac * n as f64).floor() as usize;
+    let mut n_val = (val_frac * n as f64).floor() as usize;
+    n_train = n_train.clamp(2, n.saturating_sub(3));
+    n_val = n_val.clamp(2, n.saturating_sub(n_train + 1));
+    let n_holdout = n.saturating_sub(n_train + n_val);
+    if n_holdout < 2 {
+        n_val = n_val.saturating_sub(1);
+    }
+
+    let train = idx[..n_train].to_vec();
+    let val = idx[n_train..(n_train + n_val)].to_vec();
+    let holdout = idx[(n_train + n_val)..].to_vec();
+    if train.is_empty() || val.is_empty() || holdout.is_empty() {
+        anyhow::bail!(
+            "invalid split sizes: train={}, val={}, holdout={}",
+            train.len(),
+            val.len(),
+            holdout.len()
+        );
+    }
+
+    Ok(SplitIndices {
+        train,
+        val,
+        holdout,
+    })
+}
+
+fn assert_no_chronological_leakage(samples: &[DelaySample], split: &SplitIndices) -> anyhow::Result<()> {
+    let max_train = split
+        .train
+        .iter()
+        .filter_map(|&i| samples.get(i).map(|s| s.target_step))
+        .max()
+        .ok_or_else(|| anyhow::anyhow!("empty train split"))?;
+    let min_val = split
+        .val
+        .iter()
+        .filter_map(|&i| samples.get(i).map(|s| s.target_step))
+        .min()
+        .ok_or_else(|| anyhow::anyhow!("empty val split"))?;
+    let min_holdout = split
+        .holdout
+        .iter()
+        .filter_map(|&i| samples.get(i).map(|s| s.target_step))
+        .min()
+        .ok_or_else(|| anyhow::anyhow!("empty holdout split"))?;
+    if max_train >= min_val || max_train >= min_holdout {
+        anyhow::bail!(
+            "chronological leakage detected (max_train_target_step={} min_val={} min_holdout={})",
+            max_train,
+            min_val,
+            min_holdout
+        );
+    }
+    Ok(())
+}
+
+fn sq_dist(a: &[f64], b: &[f64]) -> f64 {
+    let mut sum = 0.0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let d = x - y;
+        sum += d * d;
+    }
+    sum
+}
+
+fn dot(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+fn feature_vector(z: &[f64]) -> Vec<f64> {
+    let mut phi = Vec::with_capacity(z.len() + 1);
+    phi.push(1.0);
+    phi.extend_from_slice(z);
+    phi
+}
+
+fn solve_linear_system(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
+    let n = b.len();
+    if n == 0 || a.len() != n || a.iter().any(|row| row.len() != n) {
+        return None;
+    }
+    for col in 0..n {
+        let mut pivot = col;
+        let mut pivot_abs = a[col][col].abs();
+        for (r, row) in a.iter().enumerate().take(n).skip(col + 1) {
+            let v = row[col].abs();
+            if v > pivot_abs {
+                pivot_abs = v;
+                pivot = r;
+            }
+        }
+        if pivot_abs <= 1e-15 || !pivot_abs.is_finite() {
+            return None;
+        }
+        if pivot != col {
+            a.swap(col, pivot);
+            b.swap(col, pivot);
+        }
+
+        let diag = a[col][col];
+        for j in col..n {
+            a[col][j] /= diag;
+        }
+        b[col] /= diag;
+
+        for r in 0..n {
+            if r == col {
+                continue;
+            }
+            let factor = a[r][col];
+            if factor == 0.0 {
+                continue;
+            }
+            for j in col..n {
+                a[r][j] -= factor * a[col][j];
+            }
+            b[r] -= factor * b[col];
+        }
+    }
+    Some(b)
+}
+
+fn nearest_neighbors(samples: &[DelaySample], train_indices: &[usize], query: &[f64], k: usize) -> Vec<usize> {
+    let mut ranked: Vec<(f64, usize)> = train_indices
+        .iter()
+        .filter_map(|&i| samples.get(i).map(|s| (sq_dist(&s.z, query), i)))
+        .collect();
+    ranked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
+    ranked
+        .into_iter()
+        .take(k.max(1))
+        .map(|(_, i)| i)
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+enum LocalModel {
+    Linear {
+        beta: Vec<f64>,
+    },
+    Rational {
+        beta: Vec<f64>,
+        delta: Vec<f64>,
+    },
+}
+
+impl LocalModel {
+    fn predict(&self, query_z: &[f64]) -> Option<f64> {
+        let phi = feature_vector(query_z);
+        match self {
+            Self::Linear { beta } => {
+                let pred = dot(beta, &phi);
+                if pred.is_finite() {
+                    Some(pred)
+                } else {
+                    None
+                }
+            }
+            Self::Rational { beta, delta } => {
+                let num = dot(beta, &phi);
+                let raw_den = 1.0 + dot(delta, &phi);
+                let den = if raw_den.abs() < 1e-9 {
+                    if raw_den.is_sign_negative() {
+                        -1e-9
+                    } else {
+                        1e-9
+                    }
+                } else {
+                    raw_den
+                };
+                let pred = num / den;
+                if pred.is_finite() {
+                    Some(pred)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn gradient(&self, query_z: &[f64]) -> Option<Vec<f64>> {
+        let d = query_z.len();
+        match self {
+            Self::Linear { beta } => {
+                if beta.len() != d + 1 {
+                    return None;
+                }
+                Some(beta[1..].to_vec())
+            }
+            Self::Rational { beta, delta } => {
+                if beta.len() != d + 1 || delta.len() != d + 1 {
+                    return None;
+                }
+                let phi = feature_vector(query_z);
+                let num = dot(beta, &phi);
+                let den = 1.0 + dot(delta, &phi);
+                if den.abs() < 1e-12 {
+                    return None;
+                }
+                let mut grad = vec![0.0; d];
+                for j in 0..d {
+                    let num_j = beta[j + 1] * den - num * delta[j + 1];
+                    let g = num_j / (den * den);
+                    if !g.is_finite() {
+                        return None;
+                    }
+                    grad[j] = g;
+                }
+                Some(grad)
+            }
+        }
+    }
+}
+
+fn fit_linear_model(samples: &[DelaySample], neighbors: &[usize], lambda: f64) -> Option<LocalModel> {
+    let first = samples.get(*neighbors.first()?)?;
+    let p = first.z.len() + 1;
+    let mut xtx = vec![vec![0.0; p]; p];
+    let mut xty = vec![0.0; p];
+
+    for &idx in neighbors {
+        let s = samples.get(idx)?;
+        let phi = feature_vector(&s.z);
+        for i in 0..p {
+            xty[i] += phi[i] * s.y;
+            for j in 0..p {
+                xtx[i][j] += phi[i] * phi[j];
+            }
+        }
+    }
+
+    let lambda = lambda.max(0.0);
+    for (i, row) in xtx.iter_mut().enumerate().take(p).skip(1) {
+        row[i] += lambda;
+    }
+
+    let beta = solve_linear_system(xtx, xty)?;
+    Some(LocalModel::Linear { beta })
+}
+
+fn fit_rational_model(samples: &[DelaySample], neighbors: &[usize], lambda: f64) -> Option<LocalModel> {
+    let first = samples.get(*neighbors.first()?)?;
+    let p = first.z.len() + 1;
+    let n_param = 2 * p;
+    let mut ata = vec![vec![0.0; n_param]; n_param];
+    let mut atb = vec![0.0; n_param];
+
+    for &idx in neighbors {
+        let s = samples.get(idx)?;
+        let phi = feature_vector(&s.z);
+        let y = s.y;
+        let mut row = vec![0.0; n_param];
+        for j in 0..p {
+            row[j] = phi[j];
+            row[p + j] = -y * phi[j];
+        }
+
+        for i in 0..n_param {
+            atb[i] += row[i] * y;
+            for j in 0..n_param {
+                ata[i][j] += row[i] * row[j];
+            }
+        }
+    }
+
+    let lambda = lambda.max(0.0);
+    for (i, row) in ata.iter_mut().enumerate().take(n_param).skip(1) {
+        row[i] += lambda;
+    }
+
+    let theta = solve_linear_system(ata, atb)?;
+    let beta = theta[..p].to_vec();
+    let delta = theta[p..].to_vec();
+    Some(LocalModel::Rational { beta, delta })
+}
+
+fn fit_local_model(
+    samples: &[DelaySample],
+    train_indices: &[usize],
+    query: &[f64],
+    k: usize,
+    lambda: f64,
+    model: ModelKind,
+) -> Option<(LocalModel, f64)> {
+    if train_indices.is_empty() || query.is_empty() {
+        return None;
+    }
+
+    let neighbors = nearest_neighbors(samples, train_indices, query, k);
+    let fallback = samples.get(*neighbors.first()?)?.y;
+    let local = match model {
+        ModelKind::Linear => fit_linear_model(samples, &neighbors, lambda)?,
+        ModelKind::Rational => fit_rational_model(samples, &neighbors, lambda)?,
+    };
+    Some((local, fallback))
+}
+
+fn evaluate_model_mse(
+    samples: &[DelaySample],
+    train_indices: &[usize],
+    eval_indices: &[usize],
+    k: usize,
+    lambda: f64,
+    model: ModelKind,
+) -> anyhow::Result<f64> {
+    if eval_indices.is_empty() {
+        anyhow::bail!("empty evaluation split");
+    }
+
+    let mut se = 0.0;
+    let mut n = 0usize;
+    for &i in eval_indices {
+        let s = samples
+            .get(i)
+            .ok_or_else(|| anyhow::anyhow!("evaluation index out of bounds: {i}"))?;
+
+        let pred = fit_local_model(samples, train_indices, &s.z, k, lambda, model)
+            .and_then(|(local, fallback)| local.predict(&s.z).or(Some(fallback)))
+            .ok_or_else(|| anyhow::anyhow!("prediction failed for index {i}"))?;
+
+        let err = pred - s.y;
+        se += err * err;
+        n += 1;
+    }
+    Ok(se / n as f64)
+}
+
+fn evaluate_sensitivity_summary(
+    samples: &[DelaySample],
+    train_indices: &[usize],
+    eval_indices: &[usize],
+    k: usize,
+    lambda: f64,
+    model: ModelKind,
+) -> anyhow::Result<SensitivitySummary> {
+    if eval_indices.len() < 2 {
+        anyhow::bail!("sensitivity evaluation requires at least 2 points");
+    }
+
+    let mut rel_errors = Vec::new();
+    for &i in eval_indices {
+        let s_i = samples
+            .get(i)
+            .ok_or_else(|| anyhow::anyhow!("evaluation index out of bounds: {i}"))?;
+
+        let (_, j) = eval_indices
+            .iter()
+            .filter(|&&j| j != i)
+            .filter_map(|&j| {
+                let s_j = samples.get(j)?;
+                Some((sq_dist(&s_i.z, &s_j.z), j))
+            })
+            .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal))
+            .ok_or_else(|| anyhow::anyhow!("failed to find sensitivity peer for index {i}"))?;
+
+        let s_j = samples
+            .get(j)
+            .ok_or_else(|| anyhow::anyhow!("sensitivity peer index out of bounds: {j}"))?;
+
+        let (local, _) = fit_local_model(samples, train_indices, &s_i.z, k, lambda, model)
+            .ok_or_else(|| anyhow::anyhow!("local model fit failed for index {i}"))?;
+        let grad = local
+            .gradient(&s_i.z)
+            .ok_or_else(|| anyhow::anyhow!("gradient failed for index {i}"))?;
+
+        let mut dz = vec![0.0; s_i.z.len()];
+        for (slot, (a, b)) in dz.iter_mut().zip(s_j.z.iter().zip(s_i.z.iter())) {
+            *slot = a - b;
+        }
+        let dy_obs = s_j.y - s_i.y;
+        let dy_pred = dot(&grad, &dz);
+
+        let denom = dy_obs.abs().max(1e-12);
+        let rel = (dy_pred - dy_obs).abs() / denom;
+        if rel.is_finite() {
+            rel_errors.push(rel);
+        }
+    }
+
+    if rel_errors.is_empty() {
+        anyhow::bail!("no finite sensitivity errors computed");
+    }
+
+    rel_errors.sort_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+    let median = quantile_sorted(&rel_errors, 0.5);
+    let p90 = quantile_sorted(&rel_errors, 0.9);
+    let max_rel = *rel_errors.last().unwrap_or(&median);
+
+    Ok(SensitivitySummary {
+        n_pairs: rel_errors.len(),
+        median_rel_error: median,
+        p90_rel_error: p90,
+        max_rel_error: max_rel,
+    })
+}
+
+fn quantile_sorted(xs: &[f64], q: f64) -> f64 {
+    if xs.is_empty() {
+        return f64::NAN;
+    }
+    if xs.len() == 1 {
+        return xs[0];
+    }
+
+    let q = q.clamp(0.0, 1.0);
+    let pos = q * (xs.len() - 1) as f64;
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    if lo == hi {
+        xs[lo]
+    } else {
+        let w = pos - lo as f64;
+        xs[lo] * (1.0 - w) + xs[hi] * w
+    }
+}
+
+fn evaluate_persistence_mse(samples: &[DelaySample], eval_indices: &[usize]) -> anyhow::Result<f64> {
+    if eval_indices.is_empty() {
+        anyhow::bail!("empty evaluation split");
+    }
+    let mut se = 0.0;
+    let mut n = 0usize;
+    for &i in eval_indices {
+        let s = samples
+            .get(i)
+            .ok_or_else(|| anyhow::anyhow!("evaluation index out of bounds: {i}"))?;
+        let pred = *s
+            .z
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("empty embedding vector at index {i}"))?;
+        let err = pred - s.y;
+        se += err * err;
+        n += 1;
+    }
+    Ok(se / n as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ModelKind, SplitMode, assert_no_chronological_leakage, build_delay_embedding,
+        evaluate_model_mse, evaluate_persistence_mse, evaluate_sensitivity_summary, split_indices,
+    };
+
+    fn logistic_series(n: usize, r: f64, x0: f64) -> Vec<f64> {
+        let mut out = Vec::with_capacity(n);
+        let mut x = x0;
+        for _ in 0..n {
+            out.push(x);
+            x = r * x * (1.0 - x);
+        }
+        out
+    }
+
+    fn rational_series(n: usize, a0: f64, a1: f64, b1: f64, x0: f64) -> Vec<f64> {
+        let mut out = Vec::with_capacity(n);
+        let mut x = x0;
+        for _ in 0..n {
+            out.push(x);
+            let den = (1.0 + b1 * x).abs().max(1e-9);
+            x = (a0 + a1 * x) / den;
+        }
+        out
+    }
+
+    fn ar2_series(n: usize, a1: f64, a2: f64, b: f64, x0: f64, x1: f64) -> Vec<f64> {
+        let mut out = Vec::with_capacity(n);
+        let mut prev2 = x0;
+        let mut prev1 = x1;
+        out.push(prev2);
+        out.push(prev1);
+        while out.len() < n {
+            let x = a1 * prev1 + a2 * prev2 + b;
+            out.push(x);
+            prev2 = prev1;
+            prev1 = x;
+        }
+        out
+    }
+
+    #[test]
+    fn delay_embedding_indexing_is_correct() {
+        let series: Vec<f64> = (0..10).map(|v| v as f64).collect();
+        let emb = build_delay_embedding(&series, 2, 3).unwrap();
+        assert_eq!(emb.len(), 5);
+        assert_eq!(emb[0].z, vec![4.0, 2.0, 0.0]);
+        assert_eq!(emb[0].y, 5.0);
+        assert_eq!(emb[0].target_step, 5);
+        let last = emb.last().unwrap();
+        assert_eq!(last.z, vec![8.0, 6.0, 4.0]);
+        assert_eq!(last.y, 9.0);
+        assert_eq!(last.target_step, 9);
+    }
+
+    #[test]
+    fn chronological_split_is_disjoint_and_ordered() {
+        let split = split_indices(30, SplitMode::Chronological, 42, 0.7, 0.15).unwrap();
+        assert!(!split.train.is_empty());
+        assert!(!split.val.is_empty());
+        assert!(!split.holdout.is_empty());
+        assert!(
+            split.train.iter().all(|&i| i < split.val[0]),
+            "train indices should come before val"
+        );
+        assert!(
+            split.val
+                .iter()
+                .all(|&i| i > *split.train.last().unwrap() && i < split.holdout[0]),
+            "val indices should sit between train and holdout"
+        );
+    }
+
+    #[test]
+    fn shuffled_split_is_reproducible_with_seed() {
+        let a = split_indices(40, SplitMode::Shuffled, 123, 0.7, 0.15).unwrap();
+        let b = split_indices(40, SplitMode::Shuffled, 123, 0.7, 0.15).unwrap();
+        assert_eq!(a.train, b.train);
+        assert_eq!(a.val, b.val);
+        assert_eq!(a.holdout, b.holdout);
+    }
+
+    #[test]
+    fn chronological_split_has_no_future_leakage() {
+        let series = logistic_series(120, 3.9, 0.231);
+        let emb = build_delay_embedding(&series, 1, 4).unwrap();
+        let split = split_indices(emb.len(), SplitMode::Chronological, 42, 0.7, 0.15).unwrap();
+        assert_no_chronological_leakage(&emb, &split).unwrap();
+    }
+
+    #[test]
+    fn local_linear_map_beats_persistence_on_logistic_fixture() {
+        let series = logistic_series(500, 3.9, 0.231);
+        let emb = build_delay_embedding(&series, 1, 4).unwrap();
+        let split = split_indices(emb.len(), SplitMode::Chronological, 42, 0.7, 0.15).unwrap();
+        assert_no_chronological_leakage(&emb, &split).unwrap();
+
+        let holdout_mse =
+            evaluate_model_mse(&emb, &split.train, &split.holdout, 12, 1e-8, ModelKind::Linear)
+                .unwrap();
+        let baseline_mse = evaluate_persistence_mse(&emb, &split.holdout).unwrap();
+        assert!(
+            holdout_mse < baseline_mse * 0.9,
+            "expected local map MSE < persistence MSE (got local={} baseline={})",
+            holdout_mse,
+            baseline_mse
+        );
+    }
+
+    #[test]
+    fn local_rational_map_beats_local_linear_on_rational_fixture() {
+        let series = rational_series(500, 0.05, 1.4, 2.0, 0.2);
+        let emb = build_delay_embedding(&series, 1, 1).unwrap();
+        let split = split_indices(emb.len(), SplitMode::Chronological, 7, 0.7, 0.15).unwrap();
+        assert_no_chronological_leakage(&emb, &split).unwrap();
+
+        let k_global = split.train.len();
+        let linear_mse = evaluate_model_mse(
+            &emb,
+            &split.train,
+            &split.holdout,
+            k_global,
+            1e-8,
+            ModelKind::Linear,
+        )
+        .unwrap();
+        let rational_mse = evaluate_model_mse(
+            &emb,
+            &split.train,
+            &split.holdout,
+            k_global,
+            1e-8,
+            ModelKind::Rational,
+        )
+        .unwrap();
+
+        assert!(
+            rational_mse < linear_mse * 0.5,
+            "expected rational local map to improve over linear (linear={} rational={})",
+            linear_mse,
+            rational_mse
+        );
+    }
+
+    #[test]
+    fn sensitivity_summary_is_low_for_linear_ar2_system() {
+        let series = ar2_series(600, 0.6, -0.2, 0.1, 0.11, 0.27);
+        let emb = build_delay_embedding(&series, 1, 2).unwrap();
+        let split = split_indices(emb.len(), SplitMode::Chronological, 11, 0.7, 0.15).unwrap();
+        assert_no_chronological_leakage(&emb, &split).unwrap();
+
+        let sens = evaluate_sensitivity_summary(
+            &emb,
+            &split.train,
+            &split.holdout,
+            18,
+            1e-8,
+            ModelKind::Linear,
+        )
+        .unwrap();
+
+        assert!(
+            sens.median_rel_error < 0.15,
+            "expected low linear sensitivity error, got {:?}",
+            sens
+        );
+    }
+}
