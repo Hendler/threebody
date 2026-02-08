@@ -14,7 +14,7 @@
 \begin{abstract}
 We present a two-system framework for studying and predicting three-body dynamics under coupled gravitational and electromagnetic interactions. The first system is a high-fidelity numerical simulator (``oracle'') designed for reproducibility, performance, and explicit error control. It supports Newtonian gravity and a nonrelativistic electromagnetic interaction model including electric and magnetic fields as well as scalar and vector potentials ($\phi$, $A$). The second system is a model-discovery engine that searches for sparse, interpretable equations that predict the oracle's trajectories with minimal complexity. In the current implementation, discovery proceeds via structured feature libraries and sparse regression (STLS/LASSO)\cite{Brunton2016,Tibshirani1996}, using simulator-provided accelerations to avoid derivative noise; an optional GA baseline is also available.
 
-This revision adds: (i) a local deterministic ``atlas'' model family with binary or smooth close/far gates, (ii) explicit candidate-quality controls (redundancy/collinearity pruning and sensitivity-aware objective weighting), (iii) a deterministic ``math-creative'' selector template set (Newtonian, PN1, Yukawa, tidal, jerk, Hamiltonian-flow forms), and (iv) a strict benchmark-first holdout gate for claims. In a deterministic gravity-only run on February 8, 2026 (\texttt{research\_v2\_atlas}, 3 iterations, 200 steps, $dt=0.01$, smooth gate $r_0=0.5$, width $0.08$), the best within-run formula was $a_i \approx g_i^\ast + 0.01\,\mathrm{jerk}_i$, but strict holdout still reported \texttt{no\_improvement}: median relative improvement $-1.091$ on the 12-seed suite (95\% bootstrap CI $[-2.411,-0.459]$) with benchmark regression. We therefore report methodological progress (better falsification and diagnostics), not a new physical law.
+This revision adds: (i) a local deterministic ``atlas'' model family with binary/smooth gates and multi-smooth variants, (ii) explicit candidate-quality controls (redundancy/collinearity pruning, algebraic canonicalization, and sensitivity-aware objective weighting), (iii) a deterministic ``math-creative'' selector template set (Newtonian, PN1, Yukawa, tidal, jerk, Hamiltonian-flow forms), and (iv) a strict benchmark-first holdout gate for claims. In a deterministic gravity-only run on February 8, 2026 (\texttt{research\_v2\_atlas}, 3 iterations, 200 steps, $dt=0.01$), the smooth gate geometry was auto-tuned from CLI $(r_0,w)=(0.5,0.08)$ to $(0.2111,0.0350)$, and the best within-run formula remained $a_i \approx g_i^\ast + 0.01\,\mathrm{jerk}_i$. Strict holdout still reported \texttt{no\_improvement}: median relative improvement $-1.091$ on the 12-seed suite (95\% bootstrap CI $[-2.411,-0.459]$) with benchmark regression. We therefore report methodological progress (better falsification and diagnostics), not a new physical law.
 
 We emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. We argue that novelty arises not from claiming a universal closed-form solution, but from automatically discovering compact regime-specific laws with explicit validity domains, strict holdout testing, and reproducible failure reporting against the oracle.
 Code repository: \texttt{https://github.com/Hendler/threebody}.
@@ -246,7 +246,19 @@ where $r_{\min}=\min_{i<j}\|r_{ij}\|$.
 \end{equation*}
 with user-set center $r_0$ and width $w>0$.
 \end{itemize}
-The library includes corresponding gated atoms (e.g., $g^{\mathrm{close}}_{i,\alpha}$, $g^{\mathrm{far}}_{i,\alpha}$ and smooth variants), and can be augmented with explicit hypothesis families (\texttt{pn1}, \texttt{yukawa}, \texttt{tidal\_invariants}, \texttt{jerk\_augmented}, \texttt{hamiltonian\_invariants}).
+For smooth mode we additionally include two shifted smooth pairs
+\begin{equation*}
+\mathrm{gate}^{(s,\Delta)}_{\mathrm{close}}=\sigma\!\left(\frac{(r_0+\Delta)-r_{\min}}{w}\right),\qquad
+\mathrm{gate}^{(s,\Delta)}_{\mathrm{far}}=1-\mathrm{gate}^{(s,\Delta)}_{\mathrm{close}},
+\end{equation*}
+with $\Delta\in\{-w,+w\}$, yielding three deterministic smooth atlas variants (\texttt{primary}, \texttt{inner}, \texttt{outer}).
+The library includes corresponding gated atoms (e.g., $g^{\mathrm{close}}_{i,\alpha}$, $g^{\mathrm{far}}_{i,\alpha}$ and smooth/multi-smooth variants), and can be augmented with explicit hypothesis families (\texttt{pn1}, \texttt{yukawa}, \texttt{tidal\_invariants}, \texttt{jerk\_augmented}, \texttt{hamiltonian\_invariants}).
+
+For smooth atlas runs, we also implement a deterministic one-shot gate-geometry tuner on the first trajectory. It chooses $(r_0,w)$ from a small grid by maximizing
+\begin{equation*}
+J(r_0,w)=0.65\,B+0.35\,C,
+\end{equation*}
+where $B$ is a gate-balance score (close/far occupancy near $50\%$) and $C$ is a close-vs-far acceleration-contrast score; the selected values and candidate scores are logged in \texttt{gate\_geometry.json}.
 
 To test whether discovered dynamics encode meaningful local linearization, we added a tangent-flow diagnostic on the discovered predictor:
 \begin{equation*}
@@ -265,6 +277,11 @@ Candidate selection now also records per-candidate redundancy flags and maximum 
 \mathrm{RMSE}_{\mathrm{rollout}}+\lambda_s\,\varepsilon_{\mathrm{sens}},
 \end{equation*}
 where $\varepsilon_{\mathrm{sens}}$ is median sensitivity relative error and $\lambda_s$ is user-configurable.
+For exact partition identities (e.g., $g_{i,\alpha}=g^{\mathrm{close}}_{i,\alpha}+g^{\mathrm{far}}_{i,\alpha}$), we canonicalize coefficients before auditing by removing one redundant gated term:
+\begin{equation*}
+c_b g + c_c g^{\mathrm{close}} + c_f g^{\mathrm{far}}
+\equiv (c_b+c_f)g + (c_c-c_f)g^{\mathrm{close}}.
+\end{equation*}
 
 \subsection{What counts as ``predicts well''}
 Pointwise acceleration fit is not sufficient. We evaluate:
@@ -334,6 +351,7 @@ We ran:
 \item \texttt{--atlas-gate smooth --gate-r0 0.5 --gate-width 0.08 --redundancy-prune strict}
 \item \texttt{--sensitivity-mode objective --sens-weight 0.05 --feature-family mixed --selector-policy llm\_math\_creative}
 \item 3 iterations, \texttt{steps}=200, $dt=0.01$, gravity-only, STLS, deterministic seed suite (\texttt{deterministic\_v1}, 12 seeds), mock LLM judge.
+\item Effective smooth-gate geometry (auto-tuned on run\_001): $r_0=0.211105$, $w=0.035026$ (\texttt{gate\_geometry.json}).
 \end{itemize}
 
 Best discovered equation (run\_002):
@@ -374,7 +392,8 @@ Interpretation: the local linearization is moderately consistent over this short
 Selector/pruning behavior in this run:
 \begin{itemize}
 \item The deterministic template selector admitted all six template families each iteration (Newtonian core, PN1, Yukawa, tidal, jerk, Hamiltonian-flow).
-\item Strict redundancy/collinearity pruning dropped 5/19, 7/21, and 8/15 candidates in runs 1--3, respectively.
+\item Multi-smooth atlas generation produced 28, 32, and 18 gated atlas candidates in runs 1--3, with variant splits (inner/outer/primary) of (4/16/8), (8/8/16), and (2/8/8).
+\item Strict redundancy/collinearity pruning dropped 7/40, 7/49, and 8/33 candidates in runs 1--3, respectively.
 \item The equation-search archive top nodes remained Newtonian core and Newtonian+PN1 forms; richer terms were explored but did not generalize under strict holdout.
 \end{itemize}
 
@@ -497,7 +516,7 @@ We interpret ``novel'' as compact approximations that outperform naive baselines
 \begin{itemize}
 \item Add principled close-encounter regularization (KS/chain, Sundman transforms) and/or multi-precision truth mode (beyond softening/smooth substepping).
 \item Implement predict and score commands with standardized benchmarks (divergence time, RMS error curves).
-\item Strengthen atlas discovery by enforcing algebraic non-redundancy and calibrating/learning gate geometry (multi-threshold or multi-chart smooth gates) rather than a single fixed $(r_0,w)$.
+\item Extend atlas gate learning beyond one-shot tuning: learn chart geometry on explicit train/validation splits, allow multi-threshold chart counts per regime, and test whether tuned gates transfer across held-out seed suites.
 \item Replace numerical Jacobian sensitivity checks with mixed analytic/numeric Jacobians and variational-integrator consistency checks.
 \item Extend discovery to probabilistic forecasts for chaotic regimes.
 \item Run statistically powered multi-seed hyperparameter studies for archive/UCT settings before claiming accuracy gains.
@@ -573,7 +592,7 @@ S. Mikkola and S. J. Aarseth, ``An implementation of N-body chain regularization
 \item Factory now includes a charged preset (\texttt{em-three-body}) so EM-enabled policy comparisons can be run without external IC injection.
 \item Factory now persists equation-search state (\texttt{equation\_search\_archive.json}), uncertainty-aware ranking metadata, and a compact archive report (\texttt{equation\_search\_report.md}) for auditability.
 \item Factory policy/gating metadata is explicit (\texttt{policy\_effective.json}); optional publication artifacts include \texttt{evaluation\_aggregate.json}, \texttt{claim\_assessment.json}, \texttt{strict\_holdout\_report.json}, \texttt{sensitivity\_eval.json}, and \texttt{paper\_summary.md}.
-\item Advanced controls now include smooth atlas gates (\texttt{--atlas-gate smooth}, \texttt{--gate-r0}, \texttt{--gate-width}), strict redundancy/collinearity pruning, sensitivity-aware ranking, selectable feature-family hypotheses, and deterministic equation-template injection for non-Newtonian candidates.
+\item Advanced controls now include multi-smooth atlas variants, one-shot smooth gate-geometry tuning (\texttt{gate\_geometry.json}), strict redundancy/collinearity pruning with algebraic partition canonicalization, sensitivity-aware ranking, selectable feature-family hypotheses, and deterministic equation-template injection for non-Newtonian candidates.
 \item The \texttt{research\_v2\_atlas} policy defaults to an atlas model family and benchmark-first claim gating (\texttt{highbar\_v2\_benchmark\_first}).
 \item Bootstrap CI computation for the claim gate now uses index-safe resampling and is covered by a regression test to prevent out-of-bounds failures on 12-case suites.
 \end{itemize}
