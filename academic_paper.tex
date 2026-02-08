@@ -601,15 +601,32 @@ Future work priorities are explicitly ordered by the guiding question posed by J
 \end{itemize}
 
 \section{Conclusion}
-The primary question of this paper is now explicit and testable: can richer deterministic measurements of a three-body system support better predictive mathematics under strict holdout testing? In this revision, the strongest positive result is in the predictability track: sensor-augmented residual local formulas (delta-enabled Takens family) improved matched one-step holdout efficacy from 2/4 effective channels to 4/4, with a paired non-regression pass across all shared channels and large derived-channel gain. This is concrete evidence that better information and better representation can materially improve predictive accuracy in at least one rigorous setting.
+\subsection*{Direct answer to the primary question}
+Yes, in a qualified sense. Under strict one-step holdout evaluation, richer simulator information plus a better local representation (sensor-augmented residual maps) improved matched efficacy from 2/4 effective channels to 4/4, with paired non-regression on all shared channels. Therefore, better information can enable better predictive mathematics in a deterministic three-body setting.
 
-We also introduced and tested a context-window formulation of that question. Using $W=(\tau m)|S|$ and a high-bar strict gate, estimated minimum effective context increased from $W^\star=3$ in one-body/two-body reference regimes to $W^\star=20$ in a perturbed three-body regime. This is not a universal theorem, but it is a reproducible empirical signal that ``how much information you need'' grows with dynamical interaction complexity.
+\subsection*{Formal claims supported by current evidence}
+\begin{itemize}
+\item \textbf{Claim C1 (local predictability gain):} In the tested matched protocol, sensor-augmented delta-enabled Takens models materially improved holdout performance versus baseline local context.
+\item \textbf{Claim C2 (context-demand signal):} Defining context volume $W=(\tau m)|S|$, the estimated minimum effective context under a high-bar gate increased from $W^\star=3$ (one-body/two-body references) to $W^\star=20$ (perturbed three-body, tested channel/sensors). This supports an \emph{empirical} information-context scaling hypothesis.
+\item \textbf{Claim C3 (negative global result):} In global force-library discovery, added geometry families and MDL-aware ranking did not yield robust strict-holdout gains over the Newtonian baseline in reported matched runs.
+\end{itemize}
 
-At the same time, our force-library global-equation discovery track still has an important negative result: new geometry feature families and MDL-aware selection did not produce a robust strict-holdout gain over Newtonian baseline in the reported matched runs. So we do \emph{not} claim a new universal law.
+\subsection*{What is not concluded}
+\begin{itemize}
+\item We do \emph{not} claim a universal closed-form three-body law.
+\item We do \emph{not} claim long-horizon shadowing success from one-step metrics.
+\item We do \emph{not} claim a proved theorem for $W^\star$ scaling; current evidence is empirical, protocol-dependent, and channel-dependent.
+\end{itemize}
 
-For physicists: the current evidence supports a regime-specific, finite-horizon view of novelty. Local deterministic residual maps plus state augmentation are promising; global compact closures remain unresolved. For novice readers: the system is not random, but it is very sensitive. We got better predictions by giving the model better measurements and by predicting short-term changes directly, yet we still cannot produce one simple equation that predicts everything for long times.
+\subsection*{Claim gate for future novelty statements}
+To keep conclusions scientifically tight, future ``novel math'' claims should satisfy all of:
+\[
+\Delta_{\mathrm{rel}}>0,\quad \varepsilon_{\mathrm{sens}}\le\tau_s,\quad \text{paired non-regression}= \texttt{true},
+\]
+plus uncertainty support (bootstrap CI not crossing zero in the relevant direction) on preregistered holdout suites.
 
-Overall, the framework is now stronger in scientific discipline: strict holdouts, sensitivity checks, bootstrap uncertainty summaries, and explicit before/after non-regression reporting. That makes negative and positive findings equally useful, and it narrows the next path to genuine novelty.
+\subsection*{Practical takeaway}
+For physicists: current novelty is regime-specific and finite-horizon; local residual maps with explicit sensor context are promising, while global compact closures remain unresolved. For novice readers: the system is chaotic but not random; better measurements and smarter short-term equations can improve predictions, yet one simple formula for all long-term behavior remains out of reach.
 
 \section*{References}
 \begin{thebibliography}{99}
