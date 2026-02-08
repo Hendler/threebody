@@ -1153,13 +1153,37 @@ fn learn_sparse_sensor_gates(x_norm: &[Vec<f64>], y_norm: &[f64], n_sensors: usi
         .copied()
         .fold(0.0f64, |a, b| if b > a { b } else { a })
         .max(1e-9);
-    let sparse_threshold = 0.10;
-    let min_gate = 0.15;
+    let sparse_threshold = 0.08;
+    let min_gate = 0.20;
+    let prior_gate = 0.45;
+    let prior_mix = (2.0 / n_sensors as f64).clamp(0.08, 0.22);
     let mut gates = vec![0.0; n_sensors];
     for s in 0..n_sensors {
         let norm = (scores[s] / max_score).clamp(0.0, 1.0);
         let sparse = ((norm - sparse_threshold) / (1.0 - sparse_threshold)).clamp(0.0, 1.0);
-        gates[s] = (min_gate + (1.0 - min_gate) * sparse).clamp(min_gate, 1.0);
+        let sparse_gate = (min_gate + (1.0 - min_gate) * sparse).clamp(min_gate, 1.0);
+        gates[s] = ((1.0 - prior_mix) * sparse_gate + prior_mix * prior_gate).clamp(min_gate, 1.0);
+    }
+
+    // Keep a minimum active sensor budget so the temporal model does not collapse to one channel.
+    let active_threshold = 0.35;
+    let target_active = if n_sensors <= 2 {
+        1
+    } else {
+        ((n_sensors as f64) * 0.30).ceil() as usize
+    }
+    .clamp(2, n_sensors.min(8));
+    let active_now = gates.iter().filter(|g| **g >= active_threshold).count();
+    if active_now < target_active {
+        let mut ranked = (0..n_sensors).collect::<Vec<_>>();
+        ranked.sort_by(|&a, &b| {
+            scores[b]
+                .partial_cmp(&scores[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for &idx in ranked.iter().take(target_active) {
+            gates[idx] = gates[idx].max(active_threshold);
+        }
     }
 
     if gates.iter().all(|g| *g <= min_gate + 1e-9) {
@@ -2130,6 +2154,47 @@ mod tests {
             "expected delta_mlp to beat persistence on nonlinear residual fixture (baseline={} delta_mlp={})",
             baseline_mse,
             delta_mlp_mse
+        );
+    }
+
+    #[test]
+    fn sparse_sensor_gates_keep_multiple_channels_active() {
+        let n = 240usize;
+        let n_sensors = 10usize;
+        let n_lags = 2usize;
+        let mut x_norm = Vec::with_capacity(n);
+        let mut y_norm = Vec::with_capacity(n);
+        for t in 0..n {
+            let tt = t as f64;
+            let mut row = Vec::with_capacity(n_sensors * n_lags);
+            for lag in 0..n_lags {
+                for s in 0..n_sensors {
+                    let sf = s as f64 + 1.0;
+                    let lf = lag as f64;
+                    let val =
+                        (0.017 * tt + 0.11 * sf + 0.07 * lf).sin() + 0.35 * (0.013 * tt * sf).cos();
+                    row.push(val);
+                }
+            }
+            let y = 0.30 * row[0]
+                + 0.22 * row[1]
+                + 0.18 * row[2]
+                + 0.12 * row[3]
+                + 0.06 * row[4]
+                + 0.02 * row[8];
+            x_norm.push(row);
+            y_norm.push(y);
+        }
+
+        let gates = super::learn_sparse_sensor_gates(&x_norm, &y_norm, n_sensors);
+        assert_eq!(gates.len(), n_sensors);
+        assert!(gates.iter().all(|g| g.is_finite() && *g >= 0.0 && *g <= 1.0));
+        let active = gates.iter().filter(|g| **g >= 0.35).count();
+        assert!(
+            active >= 3,
+            "expected at least 3 active sensors, got {} gates={:?}",
+            active,
+            gates
         );
     }
 }

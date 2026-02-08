@@ -9030,13 +9030,29 @@ fn update_equation_search_archive(
 fn mcts_uct_score(
     node: &EquationSearchNode,
     total_visits: usize,
+    total_seed_buckets: usize,
     explore_c: f64,
     uncertainty_bonus: f64,
 ) -> f64 {
-    if !node.best_score.is_finite() {
+    if !node.best_score.is_finite() || !node.mean_score.is_finite() {
         return f64::NEG_INFINITY;
     }
-    let exploit = 1.0 / (1.0 + node.best_score.max(0.0));
+    let best_exploit = 1.0 / (1.0 + node.best_score.max(0.0));
+    let mean_exploit = 1.0 / (1.0 + node.mean_score.max(0.0));
+    let seed_coverage = if total_seed_buckets == 0 || node.seed_counts.is_empty() {
+        0.0
+    } else {
+        (node.seed_counts.len() as f64 / total_seed_buckets as f64).clamp(0.0, 1.0)
+    };
+    let improvement_rate = if node.visits == 0 {
+        0.0
+    } else {
+        (node.improvements as f64 / node.visits as f64).clamp(0.0, 1.0)
+    };
+    // Prefer nodes that are strong on best-case and average score, while rewarding
+    // cross-seed robustness and consistent improvement.
+    let exploit =
+        0.65 * best_exploit + 0.25 * mean_exploit + 0.08 * seed_coverage + 0.02 * improvement_rate;
     let explore = ((total_visits.max(1) as f64).ln() / (node.visits as f64 + 1.0)).sqrt();
     let uncertainty = node.score_stddev / (1.0 + node.mean_score.max(0.0));
     exploit + explore_c * explore + uncertainty_bonus.max(0.0) * uncertainty
@@ -9051,6 +9067,12 @@ fn archive_select_parents_mcts(
     uncertainty_bonus: f64,
 ) -> Vec<(String, String)> {
     let total_visits = archive.nodes.iter().map(|n| n.visits.max(1)).sum::<usize>();
+    let total_seed_buckets = archive
+        .nodes
+        .iter()
+        .flat_map(|n| n.seed_counts.keys().copied())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     let mut scored = Vec::new();
     for node in &archive.nodes {
         let Some(norm) = normalize_equation_text_for_features(&node.equation_text, feature_names)
@@ -9060,7 +9082,13 @@ fn archive_select_parents_mcts(
         if seen.contains(&norm) {
             continue;
         }
-        let uct = mcts_uct_score(node, total_visits, explore_c, uncertainty_bonus);
+        let uct = mcts_uct_score(
+            node,
+            total_visits,
+            total_seed_buckets,
+            explore_c,
+            uncertainty_bonus,
+        );
         if uct.is_finite() {
             scored.push((uct, norm));
         }
@@ -9093,7 +9121,7 @@ fn render_equation_search_report_md(
     md.push_str("# Equation Search Report\n\n");
     md.push_str(&format!("- version: {}\n", archive.version));
     md.push_str(&format!(
-        "- policy: mcts_uct(c={}), exploit=1/(1+best_score)\n",
+        "- policy: mcts_uct(c={}), exploit=0.65/(1+best)+0.25/(1+mean)+0.08*seed\\_coverage+0.02*improvement\\_rate\n",
         settings.uct_explore_c
     ));
     md.push_str(&format!(
@@ -13011,6 +13039,12 @@ mod tests {
             .iter()
             .map(|node| node.visits.max(1))
             .sum::<usize>();
+        let total_seed_buckets = archive
+            .nodes
+            .iter()
+            .flat_map(|node| node.seed_counts.keys().copied())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         let mut expected = archive
             .nodes
             .iter()
@@ -13020,7 +13054,7 @@ mod tests {
                 if seen.contains(&norm) {
                     None
                 } else {
-                    Some((mcts_uct_score(node, total_visits, 0.7, 0.0), norm))
+                    Some((mcts_uct_score(node, total_visits, total_seed_buckets, 0.7, 0.0), norm))
                 }
             })
             .collect::<Vec<_>>();
@@ -13060,17 +13094,56 @@ mod tests {
             ..stable.clone()
         };
         let total_visits = 20;
-        let stable_no_bonus = mcts_uct_score(&stable, total_visits, 0.4, 0.0);
-        let uncertain_no_bonus = mcts_uct_score(&uncertain, total_visits, 0.4, 0.0);
+        let total_seed_buckets = 1;
+        let stable_no_bonus = mcts_uct_score(&stable, total_visits, total_seed_buckets, 0.4, 0.0);
+        let uncertain_no_bonus =
+            mcts_uct_score(&uncertain, total_visits, total_seed_buckets, 0.4, 0.0);
         assert!(
             (stable_no_bonus - uncertain_no_bonus).abs() < 1e-12,
             "without uncertainty bonus they should be tied"
         );
-        let stable_with_bonus = mcts_uct_score(&stable, total_visits, 0.4, 0.5);
-        let uncertain_with_bonus = mcts_uct_score(&uncertain, total_visits, 0.4, 0.5);
+        let stable_with_bonus =
+            mcts_uct_score(&stable, total_visits, total_seed_buckets, 0.4, 0.5);
+        let uncertain_with_bonus =
+            mcts_uct_score(&uncertain, total_visits, total_seed_buckets, 0.4, 0.5);
         assert!(
             uncertain_with_bonus > stable_with_bonus,
             "uncertainty bonus should prefer higher estimated variance"
+        );
+    }
+
+    #[test]
+    fn mcts_uct_score_rewards_seed_coverage_for_similar_quality() {
+        let base = EquationSearchNode {
+            equation_text: "ax=+1.000000*grav_x ; ay=+1.000000*grav_y ; az=+1.000000*grav_z"
+                .to_string(),
+            visits: 6,
+            mean_score: 0.35,
+            best_score: 0.25,
+            score_m2: 0.0,
+            score_stddev: 0.02,
+            last_seen_iter: 2,
+            improvements: 1,
+            descriptor: EquationDescriptor::from_equation_text(
+                "ax=+1.000000*grav_x ; ay=+1.000000*grav_y ; az=+1.000000*grav_z",
+            ),
+            source_counts: std::collections::BTreeMap::from([("grid".to_string(), 1)]),
+            seed_counts: std::collections::BTreeMap::from([(1, 1)]),
+        };
+        let wider = EquationSearchNode {
+            seed_counts: std::collections::BTreeMap::from([(1, 1), (2, 1), (3, 1), (4, 1)]),
+            ..base.clone()
+        };
+
+        let total_visits = 40;
+        let total_seed_buckets = 4;
+        let base_score = mcts_uct_score(&base, total_visits, total_seed_buckets, 0.4, 0.0);
+        let wider_score = mcts_uct_score(&wider, total_visits, total_seed_buckets, 0.4, 0.0);
+        assert!(
+            wider_score > base_score,
+            "expected wider seed coverage to increase UCT score (base={} wider={})",
+            base_score,
+            wider_score
         );
     }
 
