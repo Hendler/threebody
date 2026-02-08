@@ -9,7 +9,7 @@ use threebody_core::sim::SimStep;
 use threebody_core::state::Body;
 
 use super::ensemble::EnsembleManifest;
-use super::features::{pair_metrics, PairId};
+use super::features::{PairId, pair_metrics};
 use crate::predictability::PREDICTABILITY_VERSION;
 
 #[derive(Debug, Clone, Serialize)]
@@ -104,11 +104,7 @@ pub(crate) fn run_detect(
         member_steps.push(steps);
     }
 
-    let steps_common = member_steps
-        .iter()
-        .map(|s| s.len())
-        .min()
-        .unwrap_or(0);
+    let steps_common = member_steps.iter().map(|s| s.len()).min().unwrap_or(0);
     if steps_common == 0 {
         anyhow::bail!("no steps loaded");
     }
@@ -154,7 +150,8 @@ pub(crate) fn run_detect(
         let (e_mean, e_std, a_mean, a_std, eps_mean, eps_std) =
             binary_metric_stats_for_mode(&cfg, &member_steps, step_idx, mode_pair);
 
-        let committed_frac = committed_fraction(final_mode_pair, &final_pairs, &settle_steps, step_idx);
+        let committed_frac =
+            committed_fraction(final_mode_pair, &final_pairs, &settle_steps, step_idx);
 
         let rec = LockPointRecord {
             step: step_idx,
@@ -243,7 +240,12 @@ fn settle_step(series: &[PairId], final_pair: PairId) -> usize {
     0
 }
 
-fn committed_fraction(final_mode: PairId, final_pairs: &[PairId], settle_steps: &[usize], step_idx: usize) -> f64 {
+fn committed_fraction(
+    final_mode: PairId,
+    final_pairs: &[PairId],
+    settle_steps: &[usize],
+    step_idx: usize,
+) -> f64 {
     let n = final_pairs.len().max(1);
     let mut committed = 0usize;
     for mi in 0..final_pairs.len() {
@@ -350,7 +352,11 @@ fn binary_metric_stats_for_mode(
 }
 
 #[cfg(test)]
-fn first_lock_from_series(series: &[(PairId, f64)], min_mode_frac: f64, window: usize) -> Option<(usize, PairId)> {
+fn first_lock_from_series(
+    series: &[(PairId, f64)],
+    min_mode_frac: f64,
+    window: usize,
+) -> Option<(usize, PairId)> {
     if window == 0 {
         return None;
     }

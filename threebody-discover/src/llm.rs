@@ -1,14 +1,15 @@
 use crate::judge::{
-    build_factory_evaluation_prompt, build_ic_prompt, build_judge_prompt, FactoryEvaluationInput, IcRequest,
-    InitialConditionSpec, JudgeInput, JudgeRecommendations, JudgeResponse, JudgeScore, ScoreComponents,
+    FactoryEvaluationInput, IcRequest, InitialConditionSpec, JudgeInput, JudgeRecommendations,
+    JudgeResponse, JudgeScore, ScoreComponents, build_factory_evaluation_prompt, build_ic_prompt,
+    build_judge_prompt,
 };
 use serde::{Deserialize, Serialize};
 use std::env;
+use std::fmt;
 use std::fs;
 use std::path::Path;
-use std::fmt;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug)]
 pub struct LlmError(pub String);
@@ -22,9 +23,15 @@ impl fmt::Display for LlmError {
 impl std::error::Error for LlmError {}
 
 pub trait LlmClient {
-    fn propose_initial_conditions(&self, request: &IcRequest) -> Result<LlmResult<InitialConditionSpec>, LlmError>;
+    fn propose_initial_conditions(
+        &self,
+        request: &IcRequest,
+    ) -> Result<LlmResult<InitialConditionSpec>, LlmError>;
     fn judge_candidates(&self, input: &JudgeInput) -> Result<LlmResult<JudgeResponse>, LlmError>;
-    fn explain_factory_evaluation(&self, input: &FactoryEvaluationInput) -> Result<LlmResult<String>, LlmError>;
+    fn explain_factory_evaluation(
+        &self,
+        input: &FactoryEvaluationInput,
+    ) -> Result<LlmResult<String>, LlmError>;
 }
 
 #[derive(Debug, Clone)]
@@ -38,7 +45,10 @@ pub struct LlmResult<T> {
 pub struct MockLlm;
 
 impl LlmClient for MockLlm {
-    fn propose_initial_conditions(&self, request: &IcRequest) -> Result<LlmResult<InitialConditionSpec>, LlmError> {
+    fn propose_initial_conditions(
+        &self,
+        request: &IcRequest,
+    ) -> Result<LlmResult<InitialConditionSpec>, LlmError> {
         let prompt = build_ic_prompt(request);
         let seed = request.seed.unwrap_or_else(|| {
             SystemTime::now()
@@ -49,15 +59,34 @@ impl LlmClient for MockLlm {
         let offset = (seed % 10) as f64 * 0.01;
         let value = InitialConditionSpec {
             bodies: vec![
-                crate::judge::BodyInit { mass: 1.0, charge: 0.0, pos: [-0.5 - offset, 0.0, 0.0], vel: [0.0, 0.7, 0.0] },
-                crate::judge::BodyInit { mass: 1.0, charge: 0.0, pos: [0.5 + offset, 0.0, 0.0], vel: [0.0, -0.7, 0.0] },
-                crate::judge::BodyInit { mass: 0.1, charge: 0.0, pos: [0.0, 0.3, 0.0], vel: [0.0, 0.0, 0.0] },
+                crate::judge::BodyInit {
+                    mass: 1.0,
+                    charge: 0.0,
+                    pos: [-0.5 - offset, 0.0, 0.0],
+                    vel: [0.0, 0.7, 0.0],
+                },
+                crate::judge::BodyInit {
+                    mass: 1.0,
+                    charge: 0.0,
+                    pos: [0.5 + offset, 0.0, 0.0],
+                    vel: [0.0, -0.7, 0.0],
+                },
+                crate::judge::BodyInit {
+                    mass: 0.1,
+                    charge: 0.0,
+                    pos: [0.0, 0.3, 0.0],
+                    vel: [0.0, 0.0, 0.0],
+                },
             ],
             barycentric: true,
             notes: "mock two-body-plus-perturber".to_string(),
         };
         let response = serde_json::to_string(&value).map_err(|e| LlmError(e.to_string()))?;
-        Ok(LlmResult { value, prompt, response })
+        Ok(LlmResult {
+            value,
+            prompt,
+            response,
+        })
     }
 
     fn judge_candidates(&self, input: &JudgeInput) -> Result<LlmResult<JudgeResponse>, LlmError> {
@@ -69,7 +98,11 @@ impl LlmClient for MockLlm {
             let parsimony = (5.0 / (1.0 + c.metrics.complexity as f64)).min(5.0);
             let physical = 3.0;
             let regime = 3.0;
-            let stability = if c.metrics.stability_flags.is_empty() { 4.0 } else { 2.0 };
+            let stability = if c.metrics.stability_flags.is_empty() {
+                4.0
+            } else {
+                2.0
+            };
             let total = input.rubric.weights.fidelity * fidelity
                 + input.rubric.weights.parsimony * parsimony
                 + input.rubric.weights.physical_plausibility * physical
@@ -91,31 +124,40 @@ impl LlmClient for MockLlm {
         }
         scores.sort_by(|a, b| b.total.partial_cmp(&a.total).unwrap());
         let ranking = scores.iter().map(|s| s.id).collect();
-            let value = JudgeResponse {
+        let value = JudgeResponse {
             version: input.rubric.version.clone(),
             ranking,
             scores,
-                recommendations: JudgeRecommendations {
-                    next_initial_conditions: None,
-                    next_rollout_integrator: Some("leapfrog".to_string()),
-                    next_ga_heuristic: Some("mse".to_string()),
-                    next_discovery_solver: Some("stls".to_string()),
-                    next_normalize: Some(true),
-                    next_feature_library: None,
-                    next_stls_threshold: None,
+            recommendations: JudgeRecommendations {
+                next_initial_conditions: None,
+                next_rollout_integrator: Some("leapfrog".to_string()),
+                next_ga_heuristic: Some("mse".to_string()),
+                next_discovery_solver: Some("stls".to_string()),
+                next_normalize: Some(true),
+                next_feature_library: None,
+                next_stls_threshold: None,
                 next_ridge_lambda: None,
                 next_lasso_alpha: None,
                 next_manual_equation_text: None,
-                next_search_directions: vec!["expand library with explicit r-hat terms".to_string()],
+                next_search_directions: vec![
+                    "expand library with explicit r-hat terms".to_string(),
+                ],
                 notes: "mock judge".to_string(),
             },
             summary: "mock judge summary".to_string(),
         };
         let response = serde_json::to_string(&value).map_err(|e| LlmError(e.to_string()))?;
-        Ok(LlmResult { value, prompt, response })
+        Ok(LlmResult {
+            value,
+            prompt,
+            response,
+        })
     }
 
-    fn explain_factory_evaluation(&self, input: &FactoryEvaluationInput) -> Result<LlmResult<String>, LlmError> {
+    fn explain_factory_evaluation(
+        &self,
+        input: &FactoryEvaluationInput,
+    ) -> Result<LlmResult<String>, LlmError> {
         let prompt = build_factory_evaluation_prompt(input);
         let response = build_mock_factory_evaluation_md(input);
         Ok(LlmResult {
@@ -150,15 +192,24 @@ impl OpenAIClient {
         let default_path = Path::new(".openai_key");
         let key_path = key_file.or_else(|| default_path.exists().then_some(default_path));
         let api_key = if let Some(path) = key_path {
-            let raw = fs::read_to_string(path)
-                .map_err(|e| LlmError(format!("failed to read OpenAI key file {}: {}", path.display(), e)))?;
+            let raw = fs::read_to_string(path).map_err(|e| {
+                LlmError(format!(
+                    "failed to read OpenAI key file {}: {}",
+                    path.display(),
+                    e
+                ))
+            })?;
             let trimmed = raw.trim();
             if trimmed.is_empty() {
-                return Err(LlmError(format!("OpenAI key file {} is empty", path.display())));
+                return Err(LlmError(format!(
+                    "OpenAI key file {} is empty",
+                    path.display()
+                )));
             }
             trimmed.to_string()
         } else {
-            env::var("OPENAI_API_KEY").map_err(|_| LlmError("OPENAI_API_KEY missing".to_string()))?
+            env::var("OPENAI_API_KEY")
+                .map_err(|_| LlmError("OPENAI_API_KEY missing".to_string()))?
         };
         let base_url = env::var("OPENAI_BASE_URL")
             .or_else(|_| env::var("THREEBODY_OPENAI_BASE_URL"))
@@ -170,7 +221,9 @@ impl OpenAIClient {
             .map(|raw| match raw.trim().to_lowercase().as_str() {
                 "auto" => Ok(OpenAIApiStyle::Auto),
                 "responses" => Ok(OpenAIApiStyle::Responses),
-                "chat" | "chat_completions" | "chat-completions" => Ok(OpenAIApiStyle::ChatCompletions),
+                "chat" | "chat_completions" | "chat-completions" => {
+                    Ok(OpenAIApiStyle::ChatCompletions)
+                }
                 other => Err(LlmError(format!(
                     "invalid OPENAI_API_STYLE={other} (expected auto|responses|chat)"
                 ))),
@@ -196,7 +249,9 @@ impl OpenAIClient {
         impl OpenAIRequestError {
             fn should_try_chat_fallback(&self) -> bool {
                 match self {
-                    OpenAIRequestError::Http { status, .. } => matches!(*status, 400 | 404 | 405 | 410 | 501),
+                    OpenAIRequestError::Http { status, .. } => {
+                        matches!(*status, 400 | 404 | 405 | 410 | 501)
+                    }
                     OpenAIRequestError::Parse(_) => true,
                     OpenAIRequestError::Transport(_) => false,
                 }
@@ -207,7 +262,9 @@ impl OpenAIClient {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 match self {
                     OpenAIRequestError::Transport(msg) => write!(f, "transport error: {msg}"),
-                    OpenAIRequestError::Http { status, body } => write!(f, "http error: status={status} body={body}"),
+                    OpenAIRequestError::Http { status, body } => {
+                        write!(f, "http error: status={status} body={body}")
+                    }
                     OpenAIRequestError::Parse(msg) => write!(f, "parse error: {msg}"),
                 }
             }
@@ -258,7 +315,10 @@ impl OpenAIClient {
             let resp = client
                 .post(url)
                 .bearer_auth(api_key)
-                .json(&Req { model, input: prompt })
+                .json(&Req {
+                    model,
+                    input: prompt,
+                })
                 .send()
                 .map_err(|e| OpenAIRequestError::Transport(e.to_string()))?;
             let status = resp.status();
@@ -271,10 +331,12 @@ impl OpenAIClient {
                     body: truncate_body(&body_text),
                 });
             }
-            let parsed: Resp =
-                serde_json::from_str(&body_text).map_err(|e| OpenAIRequestError::Parse(e.to_string()))?;
+            let parsed: Resp = serde_json::from_str(&body_text)
+                .map_err(|e| OpenAIRequestError::Parse(e.to_string()))?;
             let Some(output) = parsed.output else {
-                return Err(OpenAIRequestError::Parse("missing output array".to_string()));
+                return Err(OpenAIRequestError::Parse(
+                    "missing output array".to_string(),
+                ));
             };
             for out in output {
                 if let Some(content) = out.content {
@@ -343,10 +405,12 @@ impl OpenAIClient {
                     body: truncate_body(&body_text),
                 });
             }
-            let parsed: Resp =
-                serde_json::from_str(&body_text).map_err(|e| OpenAIRequestError::Parse(e.to_string()))?;
+            let parsed: Resp = serde_json::from_str(&body_text)
+                .map_err(|e| OpenAIRequestError::Parse(e.to_string()))?;
             let Some(choices) = parsed.choices else {
-                return Err(OpenAIRequestError::Parse("missing choices array".to_string()));
+                return Err(OpenAIRequestError::Parse(
+                    "missing choices array".to_string(),
+                ));
             };
             for c in choices {
                 if let Some(m) = c.message {
@@ -378,24 +442,30 @@ impl OpenAIClient {
                 prompt,
             )
             .map_err(|e| LlmError(e.to_string())),
-            OpenAIApiStyle::Auto => match request_responses(&client, &self.base_url, &self.api_key, &self.model, prompt) {
-                Ok(text) => Ok(text),
-                Err(err) if err.should_try_chat_fallback() => request_chat_completions(
-                    &client,
-                    &self.base_url,
-                    &self.api_key,
-                    &self.model,
-                    prompt,
-                )
-                .map_err(|e2| LlmError(format!("responses failed: {err}; chat failed: {e2}"))),
-                Err(err) => Err(LlmError(err.to_string())),
-            },
+            OpenAIApiStyle::Auto => {
+                match request_responses(&client, &self.base_url, &self.api_key, &self.model, prompt)
+                {
+                    Ok(text) => Ok(text),
+                    Err(err) if err.should_try_chat_fallback() => request_chat_completions(
+                        &client,
+                        &self.base_url,
+                        &self.api_key,
+                        &self.model,
+                        prompt,
+                    )
+                    .map_err(|e2| LlmError(format!("responses failed: {err}; chat failed: {e2}"))),
+                    Err(err) => Err(LlmError(err.to_string())),
+                }
+            }
         }
     }
 }
 
 impl LlmClient for OpenAIClient {
-    fn propose_initial_conditions(&self, request: &IcRequest) -> Result<LlmResult<InitialConditionSpec>, LlmError> {
+    fn propose_initial_conditions(
+        &self,
+        request: &IcRequest,
+    ) -> Result<LlmResult<InitialConditionSpec>, LlmError> {
         let prompt = build_ic_prompt(request);
         let text = self.request(&prompt)?;
         let value = parse_json(&text)?;
@@ -417,7 +487,10 @@ impl LlmClient for OpenAIClient {
         })
     }
 
-    fn explain_factory_evaluation(&self, input: &FactoryEvaluationInput) -> Result<LlmResult<String>, LlmError> {
+    fn explain_factory_evaluation(
+        &self,
+        input: &FactoryEvaluationInput,
+    ) -> Result<LlmResult<String>, LlmError> {
         let prompt = build_factory_evaluation_prompt(input);
         let text = self.request(&prompt)?;
         Ok(LlmResult {
@@ -485,7 +558,10 @@ impl AutoLlmClient {
 }
 
 impl LlmClient for AutoLlmClient {
-    fn propose_initial_conditions(&self, request: &IcRequest) -> Result<LlmResult<InitialConditionSpec>, LlmError> {
+    fn propose_initial_conditions(
+        &self,
+        request: &IcRequest,
+    ) -> Result<LlmResult<InitialConditionSpec>, LlmError> {
         if let Some(result) = self.try_primary(|p| p.propose_initial_conditions(request)) {
             match result {
                 Ok(v) => return Ok(v),
@@ -505,7 +581,10 @@ impl LlmClient for AutoLlmClient {
         self.fallback.judge_candidates(input)
     }
 
-    fn explain_factory_evaluation(&self, input: &FactoryEvaluationInput) -> Result<LlmResult<String>, LlmError> {
+    fn explain_factory_evaluation(
+        &self,
+        input: &FactoryEvaluationInput,
+    ) -> Result<LlmResult<String>, LlmError> {
         if let Some(result) = self.try_primary(|p| p.explain_factory_evaluation(input)) {
             match result {
                 Ok(v) => return Ok(v),
@@ -534,8 +613,16 @@ fn build_mock_factory_evaluation_md(input: &FactoryEvaluationInput) -> String {
                 Some((_rid, _regime, best)) => {
                     let cand_roll = cand.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
                     let best_roll = best.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
-                    let cand_mse = if cand.metrics.mse.is_finite() { cand.metrics.mse } else { f64::INFINITY };
-                    let best_mse = if best.metrics.mse.is_finite() { best.metrics.mse } else { f64::INFINITY };
+                    let cand_mse = if cand.metrics.mse.is_finite() {
+                        cand.metrics.mse
+                    } else {
+                        f64::INFINITY
+                    };
+                    let best_mse = if best.metrics.mse.is_finite() {
+                        best.metrics.mse
+                    } else {
+                        f64::INFINITY
+                    };
                     let better = cand_roll < best_roll
                         || (cand_roll == best_roll && cand_mse < best_mse)
                         || (cand_roll == best_roll
@@ -563,12 +650,20 @@ fn build_mock_factory_evaluation_md(input: &FactoryEvaluationInput) -> String {
     md.push_str("1) picks initial conditions (sometimes via an LLM),\n");
     md.push_str("2) simulates a trajectory (the “oracle”),\n");
     md.push_str("3) fits simple equations to predict acceleration, and\n");
-    md.push_str("4) optionally uses an LLM judge to interpret results and suggest next settings.\n");
+    md.push_str(
+        "4) optionally uses an LLM judge to interpret results and suggest next settings.\n",
+    );
 
     md.push_str("\n## Best result (plain English)\n");
     if let Some((run_id, regime, cand)) = best_run {
-        md.push_str(&format!("- Best run: `{}` (regime: `{}`)\n", run_id, regime));
-        md.push_str(&format!("- Equation (vector form): {}\n", cand.equation_text));
+        md.push_str(&format!(
+            "- Best run: `{}` (regime: `{}`)\n",
+            run_id, regime
+        ));
+        md.push_str(&format!(
+            "- Equation (vector form): {}\n",
+            cand.equation_text
+        ));
         md.push_str(&format!(
             "- Metrics: mse={:.6e}, rollout_rmse={}, divergence_time={}, complexity={}\n",
             cand.metrics.mse,
@@ -598,18 +693,26 @@ fn build_mock_factory_evaluation_md(input: &FactoryEvaluationInput) -> String {
     md.push_str("- `mse`: average squared error on the training samples (lower is better).\n");
     md.push_str("- `rollout_rmse`: how far the learned model’s simulated trajectory drifts from the oracle (lower is better).\n");
     md.push_str("- `divergence_time`: how long the learned model stays close before it diverges (higher is better).\n");
-    md.push_str("- `complexity`: roughly how long the equation is (lower usually generalizes better).\n");
+    md.push_str(
+        "- `complexity`: roughly how long the equation is (lower usually generalizes better).\n",
+    );
 
     md.push_str("\n## Next steps (easy)\n");
     md.push_str("- Run more iterations and compare `evaluation.md` across runs.\n");
-    md.push_str("- Look at `run_###/report.md` and check whether improvements reduce `rollout_rmse`.\n");
+    md.push_str(
+        "- Look at `run_###/report.md` and check whether improvements reduce `rollout_rmse`.\n",
+    );
     md.push_str("- Try switching the rollout integrator between `euler` and `leapfrog`.\n");
 
     md.push_str("\n## Next steps (more advanced)\n");
     md.push_str("- Try `--solver lasso` vs `--solver stls` and compare stability.\n");
-    md.push_str("- Tune sparsity: increase STLS threshold (or LASSO alpha) to simplify equations.\n");
+    md.push_str(
+        "- Tune sparsity: increase STLS threshold (or LASSO alpha) to simplify equations.\n",
+    );
     md.push_str("- Expand or refine the feature library (new physics-inspired terms), then re-run discovery.\n");
-    md.push_str("- Validate on new initial conditions (generalization), not just the same trajectory.\n");
+    md.push_str(
+        "- Validate on new initial conditions (generalization), not just the same trajectory.\n",
+    );
 
     md.push_str("\n## How to report improvements\n");
     md.push_str("If you’re not a math/physics expert, the most helpful report is:\n");
@@ -624,23 +727,28 @@ fn parse_json<T: serde::de::DeserializeOwned>(text: &str) -> Result<T, LlmError>
     if let Ok(value) = serde_json::from_str::<T>(text) {
         return Ok(value);
     }
-    let start = text.find('{').ok_or_else(|| LlmError("missing json object".to_string()))?;
-    let end = text.rfind('}').ok_or_else(|| LlmError("missing json object end".to_string()))?;
+    let start = text
+        .find('{')
+        .ok_or_else(|| LlmError("missing json object".to_string()))?;
+    let end = text
+        .rfind('}')
+        .ok_or_else(|| LlmError("missing json object end".to_string()))?;
     let slice = &text[start..=end];
     serde_json::from_str(slice).map_err(|e| LlmError(e.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{AutoLlmClient, LlmClient, MockLlm, OpenAIClient, OpenAIApiStyle};
-    use crate::judge::{
-        CandidateMetrics, CandidateSummary, DatasetSummary, FactoryEvaluationCandidate, FactoryEvaluationInput,
-        FactoryEvaluationIteration, FeatureDescription, IcBounds, IcRequest, JudgeInput, Rubric,
-    };
+    use super::{AutoLlmClient, LlmClient, MockLlm, OpenAIApiStyle, OpenAIClient};
     use crate::equation::Equation;
+    use crate::judge::{
+        CandidateMetrics, CandidateSummary, DatasetSummary, FactoryEvaluationCandidate,
+        FactoryEvaluationInput, FactoryEvaluationIteration, FeatureDescription, IcBounds,
+        IcRequest, JudgeInput, Rubric,
+    };
+    use std::fs;
     use std::io::{BufRead, BufReader, Write};
     use std::net::TcpListener;
-    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -864,7 +972,10 @@ mod tests {
             let mut line = String::new();
             let mut reader = BufReader::new(&mut stream);
             reader.read_line(&mut line).unwrap();
-            assert!(line.contains("POST /v1/responses "), "unexpected request: {line}");
+            assert!(
+                line.contains("POST /v1/responses "),
+                "unexpected request: {line}"
+            );
 
             let body = r#"{"output":[{"content":[{"text":"ok-from-responses"}]}]}"#;
             let resp = format!(
@@ -897,7 +1008,10 @@ mod tests {
                 let mut line = String::new();
                 let mut reader = BufReader::new(&mut stream);
                 reader.read_line(&mut line).unwrap();
-                assert!(line.contains("POST /v1/responses "), "unexpected request: {line}");
+                assert!(
+                    line.contains("POST /v1/responses "),
+                    "unexpected request: {line}"
+                );
                 let body = "not found";
                 let resp = format!(
                     "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

@@ -54,8 +54,16 @@ mod tests {
 
     #[test]
     fn static_configuration_is_deterministic() {
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(1.0, 0.0)];
-        let pos = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0), Vec3::new(0.0, 3.0, 0.0)];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(1.0, 0.0),
+            Body::new(1.0, 0.0),
+        ];
+        let pos = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(2.0, 0.0, 0.0),
+            Vec3::new(0.0, 3.0, 0.0),
+        ];
         let vel = [Vec3::zero(); 3];
         let acc = [Vec3::zero(); 3];
         let system = System::new(bodies, State::new(pos, vel));

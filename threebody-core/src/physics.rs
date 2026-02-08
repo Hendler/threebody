@@ -61,12 +61,7 @@ pub const fn model_validity() -> ModelValidity {
 
 /// Compute gravitational acceleration on body i from body j.
 /// Uses the formula: a_i = G * m_j * (r_j - r_i) / |r_j - r_i|^3.
-pub fn gravity_accel_single(
-    g: f64,
-    m_j: f64,
-    r_i: [f64; 3],
-    r_j: [f64; 3],
-) -> [f64; 3] {
+pub fn gravity_accel_single(g: f64, m_j: f64, r_i: [f64; 3], r_j: [f64; 3]) -> [f64; 3] {
     let dx = r_j[0] - r_i[0];
     let dy = r_j[1] - r_i[1];
     let dz = r_j[2] - r_i[2];

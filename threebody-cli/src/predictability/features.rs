@@ -46,7 +46,8 @@ pub(crate) fn pair_metrics(cfg: &Config, system: &System, i: usize, j: usize) ->
         0.0
     };
     let coeffs = analysis::pair_central_coefficients(cfg, &system.bodies[i], &system.bodies[j]);
-    let specific_energy = analysis::specific_energy_1overr(r_vec, v_vec, coeffs.kappa, cfg.softening);
+    let specific_energy =
+        analysis::specific_energy_1overr(r_vec, v_vec, coeffs.kappa, cfg.softening);
     let h = r_vec.cross(v_vec).norm();
     let els = analysis::osculating_elements_1overr(r_vec, v_vec, coeffs.kappa, cfg.softening);
     let (e, a) = match els {
@@ -84,4 +85,3 @@ pub(crate) fn all_pair_metrics(cfg: &Config, system: &System) -> Vec<PairMetrics
         .map(|(i, j)| pair_metrics(cfg, system, *i, *j))
         .collect()
 }
-

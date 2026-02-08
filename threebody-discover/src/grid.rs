@@ -1,10 +1,7 @@
-use crate::equation::{score_equation, Equation, EquationScore, TopK};
 use crate::Dataset;
+use crate::equation::{Equation, EquationScore, TopK, score_equation};
 
-pub fn grid_search(
-    equations: &[Equation],
-    dataset: &Dataset,
-) -> TopK {
+pub fn grid_search(equations: &[Equation], dataset: &Dataset) -> TopK {
     let mut topk = TopK::new(3);
     for eq in equations {
         topk.update(EquationScore {
@@ -28,10 +25,30 @@ mod tests {
             vec![1.0, 2.0],
         );
         let equations = vec![
-            Equation { terms: vec![Term { feature: "x".to_string(), coeff: 1.0 }] },
-            Equation { terms: vec![Term { feature: "x".to_string(), coeff: 2.0 }] },
-            Equation { terms: vec![Term { feature: "x".to_string(), coeff: 0.5 }] },
-            Equation { terms: vec![Term { feature: "x".to_string(), coeff: 3.0 }] },
+            Equation {
+                terms: vec![Term {
+                    feature: "x".to_string(),
+                    coeff: 1.0,
+                }],
+            },
+            Equation {
+                terms: vec![Term {
+                    feature: "x".to_string(),
+                    coeff: 2.0,
+                }],
+            },
+            Equation {
+                terms: vec![Term {
+                    feature: "x".to_string(),
+                    coeff: 0.5,
+                }],
+            },
+            Equation {
+                terms: vec![Term {
+                    feature: "x".to_string(),
+                    coeff: 3.0,
+                }],
+            },
         ];
         let topk = grid_search(&equations, &dataset);
         assert_eq!(topk.entries.len(), 3);

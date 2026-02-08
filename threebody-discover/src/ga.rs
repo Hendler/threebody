@@ -1,6 +1,6 @@
-use crate::equation::{score_equation_with, Equation, EquationScore, FitnessHeuristic, TopK};
-use crate::library::FeatureLibrary;
 use crate::Dataset;
+use crate::equation::{Equation, EquationScore, FitnessHeuristic, TopK, score_equation_with};
+use crate::library::FeatureLibrary;
 
 #[derive(Clone, Debug)]
 pub struct DiscoveryConfig {
@@ -25,11 +25,7 @@ impl Default for DiscoveryConfig {
     }
 }
 
-pub fn run_search(
-    dataset: &Dataset,
-    library: &FeatureLibrary,
-    cfg: &DiscoveryConfig,
-) -> TopK {
+pub fn run_search(dataset: &Dataset, library: &FeatureLibrary, cfg: &DiscoveryConfig) -> TopK {
     let mut rng = Lcg::new(cfg.seed);
     let mut population: Vec<Equation> = (0..cfg.population)
         .map(|_| library.random_equation(&mut rng, cfg.max_terms))
@@ -49,11 +45,12 @@ pub fn run_search(
         for s in &scored {
             topk.update(s.clone());
         }
-        let survivors = scored.iter().take((cfg.population / 2).max(1)).cloned().collect::<Vec<_>>();
-        population = survivors
+        let survivors = scored
             .iter()
-            .map(|s| s.equation.clone())
-            .collect();
+            .take((cfg.population / 2).max(1))
+            .cloned()
+            .collect::<Vec<_>>();
+        population = survivors.iter().map(|s| s.equation.clone()).collect();
         while population.len() < cfg.population {
             let parent = &survivors[rng.gen_range_usize(0, survivors.len() - 1)].equation;
             let child = mutate(parent, library, cfg, &mut rng);
@@ -63,7 +60,12 @@ pub fn run_search(
     topk
 }
 
-fn mutate(eq: &Equation, library: &FeatureLibrary, cfg: &DiscoveryConfig, rng: &mut Lcg) -> Equation {
+fn mutate(
+    eq: &Equation,
+    library: &FeatureLibrary,
+    cfg: &DiscoveryConfig,
+    rng: &mut Lcg,
+) -> Equation {
     let mut terms = eq.terms.clone();
     if terms.is_empty() {
         return library.random_equation(rng, cfg.max_terms);

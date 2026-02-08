@@ -118,7 +118,8 @@ pub(crate) fn run_ensemble(
         let member_dir = out_dir.join(member_dir_name(idx, n));
         fs::create_dir_all(&member_dir)?;
 
-        let (member_ic, system) = sample_perturbed_system(&base_ic, &bounds, sigma_pos, sigma_vel, &mut gauss, idx)?;
+        let (member_ic, system) =
+            sample_perturbed_system(&base_ic, &bounds, sigma_pos, sigma_vel, &mut gauss, idx)?;
         let options = SimOptions { steps, dt };
         let result = crate::simulate_with_cfg(system, &cfg, options);
 
@@ -263,7 +264,7 @@ fn sample_perturbed_system(
 
 #[cfg(test)]
 mod tests {
-    use super::{member_dir_name, run_ensemble, EnsembleManifest};
+    use super::{EnsembleManifest, member_dir_name, run_ensemble};
     use std::fs;
     use std::path::PathBuf;
 
@@ -336,4 +337,3 @@ mod tests {
         let _ = fs::remove_dir_all(&out_dir);
     }
 }
-

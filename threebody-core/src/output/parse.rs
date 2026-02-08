@@ -9,7 +9,10 @@ pub fn parse_header(line: &str) -> Vec<String> {
 }
 
 /// Build a header index map and ensure required columns are present.
-pub fn require_columns(header: &[String], required: &[&str]) -> Result<HashMap<String, usize>, String> {
+pub fn require_columns(
+    header: &[String],
+    required: &[&str],
+) -> Result<HashMap<String, usize>, String> {
     let mut map = HashMap::new();
     for (idx, name) in header.iter().enumerate() {
         map.insert(name.clone(), idx);

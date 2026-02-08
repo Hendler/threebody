@@ -35,7 +35,10 @@ use threebody_discover::{
 mod eval;
 mod predictability;
 
-use eval::{VectorModel, format_vector_model, rollout_metrics, rollout_trace};
+use eval::{
+    SensitivityEval, VectorModel, format_vector_model, rollout_metrics, rollout_trace,
+    sensitivity_eval,
+};
 
 #[derive(Parser)]
 #[command(name = "threebody-cli")]
@@ -352,6 +355,21 @@ enum Commands {
         /// Number of archive equations to pick as MCTS parents per iteration.
         #[arg(long, default_value_t = 2)]
         equation_search_mcts_parents: usize,
+        /// Candidate model family: auto | global | atlas.
+        #[arg(long, default_value = "auto")]
+        model_family: String,
+        /// Factory policy profile (primary interface): research_v1 | research_v2_atlas | legacy.
+        #[arg(long, default_value = "research_v1")]
+        policy: String,
+        /// Claim-gate profile for paper/report language: highbar_v1 | highbar_v2_benchmark_first.
+        #[arg(long, default_value = "highbar_v1")]
+        claim_gate: String,
+        /// Deterministic seed suite for aggregate evidence: deterministic_v1.
+        #[arg(long, default_value = "deterministic_v1")]
+        seed_suite: String,
+        /// Emit aggregate evidence and claim-assessment artifacts for publication/reporting.
+        #[arg(long)]
+        publish_report: bool,
     },
     /// Verify OpenAI-compatible LLM connectivity and JSON validity.
     LlmCheck {
@@ -562,6 +580,11 @@ fn main() -> anyhow::Result<()> {
             equation_search_uct_c,
             equation_search_archive_topk,
             equation_search_mcts_parents,
+            model_family,
+            policy,
+            claim_gate,
+            seed_suite,
+            publish_report,
         } => {
             let solver_settings = DiscoverySolverSettings {
                 solver: parse_discovery_solver(&solver)?,
@@ -581,10 +604,51 @@ fn main() -> anyhow::Result<()> {
                 lasso_max_iter,
                 lasso_tol,
             };
+            let policy = parse_factory_policy(&policy).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown --policy={policy} (expected research_v1|research_v2_atlas|legacy)"
+                )
+            })?;
+            let cli_model_family = parse_model_family(&model_family).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown --model-family={model_family} (expected auto|global|atlas)"
+                )
+            })?;
+            let claim_gate = parse_claim_gate_profile(&claim_gate).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown --claim-gate={claim_gate} (expected highbar_v1|highbar_v2_benchmark_first)"
+                )
+            })?;
+            let seed_suite = parse_seed_suite(&seed_suite).ok_or_else(|| {
+                anyhow::anyhow!("unknown --seed-suite={seed_suite} (expected deterministic_v1)")
+            })?;
+            let resolved_model_family = match cli_model_family {
+                ModelFamilyChoice::Auto => policy.default_model_family(),
+                ModelFamilyChoice::Global => ModelFamily::Global,
+                ModelFamilyChoice::Atlas => ModelFamily::Atlas,
+            };
             let equation_search = EquationSearchSettings {
                 uct_explore_c: equation_search_uct_c.max(0.0),
                 archive_update_topk: equation_search_archive_topk.max(1),
                 mcts_parent_limit: equation_search_mcts_parents.max(1),
+                uncertainty_bonus: if matches!(
+                    policy,
+                    FactoryPolicy::ResearchV1 | FactoryPolicy::ResearchV2Atlas
+                ) {
+                    0.2
+                } else {
+                    0.0
+                },
+            };
+            let policy = FactoryPolicySettings {
+                kind: policy,
+                equation_search,
+                active_ic_disagreement: matches!(
+                    policy,
+                    FactoryPolicy::ResearchV1 | FactoryPolicy::ResearchV2Atlas
+                ),
+                model_family: resolved_model_family,
+                sensitivity_eval: matches!(policy, FactoryPolicy::ResearchV2Atlas),
             };
             run_factory(
                 out_dir,
@@ -609,7 +673,10 @@ fn main() -> anyhow::Result<()> {
                 model,
                 openai_key_file,
                 require_llm,
-                equation_search,
+                policy,
+                claim_gate,
+                seed_suite,
+                publish_report,
             )?;
         }
         Commands::LlmCheck {
@@ -817,7 +884,10 @@ fn run_quickstart(
         llm_model,
         None,
         require_llm,
-        EquationSearchSettings::default(),
+        FactoryPolicySettings::research_v2_atlas(),
+        ClaimGateProfile::highbar_v2_benchmark_first(),
+        SeedSuite::deterministic_v1(),
+        true,
     )?;
 
     // Copy a single novice-friendly artifact to the quickstart root.
@@ -1342,6 +1412,8 @@ fn run_bench_em(
             factory_dir: Some(factory_dir.as_path()),
             benchmark: None,
             incumbent_on_best_run: incumbent_on_best_run.as_ref(),
+            sensitivity: None,
+            strict_holdout: None,
         },
     );
     fs::write(factory_dir.join("evaluation.tex"), eval_tex)?;
@@ -1769,6 +1841,25 @@ fn preset_system(name: &str) -> anyhow::Result<System> {
                 Vec3::new(0.0, 1.0, 0.0),
                 Vec3::new(-0.866_025_403_784_438_6, -0.5, 0.0),
                 Vec3::new(0.866_025_403_784_438_6, -0.5, 0.0),
+            ];
+            Ok(System::new(bodies, State::new(pos, vel)))
+        }
+        "em-three-body" | "em_three_body" => {
+            // Charged three-body preset intended for EM-active runs.
+            let bodies = [
+                Body::new(1.0, 1.0),
+                Body::new(1.0, -1.0),
+                Body::new(0.8, 0.6),
+            ];
+            let pos = [
+                Vec3::new(-0.8, 0.0, 0.2),
+                Vec3::new(0.8, 0.0, -0.2),
+                Vec3::new(0.0, 1.0, 0.0),
+            ];
+            let vel = [
+                Vec3::new(0.0, 1.0, 0.1),
+                Vec3::new(0.0, -1.0, -0.1),
+                Vec3::new(0.0, 0.0, 0.0),
             ];
             Ok(System::new(bodies, State::new(pos, vel)))
         }
@@ -2462,6 +2553,130 @@ fn min_pair_distance(pos: &[Vec3]) -> f64 {
     min
 }
 
+fn evaluate_equation_with_feature_index(
+    eq: &threebody_discover::equation::Equation,
+    feature_index: &std::collections::HashMap<&str, usize>,
+    sample: &[f64],
+) -> f64 {
+    let mut sum = 0.0f64;
+    for term in &eq.terms {
+        if let Some(&idx) = feature_index.get(term.feature.as_str()) {
+            if let Some(value) = sample.get(idx) {
+                sum += term.coeff * value;
+            }
+        }
+    }
+    sum
+}
+
+fn model_disagreement_score(
+    system: &System,
+    cfg: &Config,
+    feature_names: &[String],
+    models: &[VectorModel],
+) -> f64 {
+    if models.len() < 2 {
+        return 0.0;
+    }
+    let feature_index: std::collections::HashMap<&str, usize> = feature_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| (name.as_str(), i))
+        .collect();
+    let mut total = 0.0f64;
+    let mut count = 0usize;
+    for body in 0..3 {
+        let sample = compute_feature_vector(system, body, cfg, feature_names);
+        let mut predicted = Vec::with_capacity(models.len());
+        for model in models {
+            let ax = evaluate_equation_with_feature_index(&model.eq_x, &feature_index, &sample);
+            let ay = evaluate_equation_with_feature_index(&model.eq_y, &feature_index, &sample);
+            let az = evaluate_equation_with_feature_index(&model.eq_z, &feature_index, &sample);
+            predicted.push(Vec3::new(ax, ay, az));
+        }
+        for i in 0..predicted.len() {
+            for j in (i + 1)..predicted.len() {
+                total += (predicted[j] - predicted[i]).norm();
+                count += 1;
+            }
+        }
+    }
+    if count == 0 {
+        0.0
+    } else {
+        total / count as f64
+    }
+}
+
+fn collect_active_ic_models(
+    feature_names: &[String],
+    previous_iteration_elites: &[(String, CandidateMetrics)],
+    archive: &EquationSearchArchive,
+) -> Vec<VectorModel> {
+    let mut models = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (eq_text, _metrics) in previous_iteration_elites.iter().take(4) {
+        let Some(normalized) = normalize_equation_text_for_features(eq_text, feature_names) else {
+            continue;
+        };
+        if !seen.insert(normalized.clone()) {
+            continue;
+        }
+        if let Some(model) = vector_model_from_equation_text(&normalized) {
+            models.push(model);
+        }
+    }
+    for node in top_equation_search_nodes(archive, 6) {
+        let Some(normalized) =
+            normalize_equation_text_for_features(&node.equation_text, feature_names)
+        else {
+            continue;
+        };
+        if !seen.insert(normalized.clone()) {
+            continue;
+        }
+        if let Some(model) = vector_model_from_equation_text(&normalized) {
+            models.push(model);
+        }
+    }
+    models
+}
+
+fn best_active_ic_seed_hint(
+    preset: &str,
+    bounds: &IcBounds,
+    cfg: &Config,
+    feature_names: &[String],
+    models: &[VectorModel],
+    base_seed: u64,
+    num_candidates: usize,
+) -> Option<(u64, f64, InitialConditionSpec)> {
+    if models.len() < 2 || num_candidates == 0 {
+        return None;
+    }
+    let base = initial_conditions_from_preset(preset).ok()?;
+    let mut best: Option<(u64, f64, InitialConditionSpec)> = None;
+    for i in 0..num_candidates {
+        let seed = base_seed.wrapping_add((i as u64 + 1) * 7919);
+        let spec = force_nonplanar_ic(base.clone(), bounds, seed);
+        let Ok(system) = system_from_ic(&spec, bounds) else {
+            continue;
+        };
+        let score = model_disagreement_score(&system, cfg, feature_names, models);
+        if !score.is_finite() {
+            continue;
+        }
+        let replace = match best {
+            Some((_, best_score, _)) => score > best_score,
+            None => true,
+        };
+        if replace {
+            best = Some((seed, score, spec));
+        }
+    }
+    best
+}
+
 struct VectorDataset {
     feature_names: Vec<String>,
     samples: Vec<Vec<f64>>,
@@ -2531,6 +2746,229 @@ fn component_datasets(vec_data: &VectorDataset) -> [Dataset; 3] {
             targets_z,
         ),
     ]
+}
+
+fn run_solver_on_components(
+    solver: DiscoverySolver,
+    current_fitness: FitnessHeuristic,
+    library: &FeatureLibrary,
+    disc_cfg: &DiscoveryConfig,
+    stls_cfg: &StlsConfig,
+    lasso_cfg: &LassoConfig,
+    dataset_x: &Dataset,
+    dataset_y: &Dataset,
+    dataset_z: &Dataset,
+) -> (
+    threebody_discover::TopK,
+    threebody_discover::TopK,
+    threebody_discover::TopK,
+) {
+    match solver {
+        DiscoverySolver::Ga => (
+            run_search(dataset_x, library, disc_cfg),
+            run_search(dataset_y, library, disc_cfg),
+            run_search(dataset_z, library, disc_cfg),
+        ),
+        DiscoverySolver::Stls => (
+            stls_path_search(dataset_x, stls_cfg, current_fitness),
+            stls_path_search(dataset_y, stls_cfg, current_fitness),
+            stls_path_search(dataset_z, stls_cfg, current_fitness),
+        ),
+        DiscoverySolver::Lasso => (
+            lasso_path_search(dataset_x, lasso_cfg, current_fitness),
+            lasso_path_search(dataset_y, lasso_cfg, current_fitness),
+            lasso_path_search(dataset_z, lasso_cfg, current_fitness),
+        ),
+    }
+}
+
+fn atlas_map_feature(feature: &str, close: bool) -> Option<&'static str> {
+    match (feature, close) {
+        ("grav_x", true) => Some("grav_close_x"),
+        ("grav_y", true) => Some("grav_close_y"),
+        ("grav_z", true) => Some("grav_close_z"),
+        ("grav_x", false) => Some("grav_far_x"),
+        ("grav_y", false) => Some("grav_far_y"),
+        ("grav_z", false) => Some("grav_far_z"),
+        ("elec_x", true) => Some("elec_close_x"),
+        ("elec_y", true) => Some("elec_close_y"),
+        ("elec_z", true) => Some("elec_close_z"),
+        ("elec_x", false) => Some("elec_far_x"),
+        ("elec_y", false) => Some("elec_far_y"),
+        ("elec_z", false) => Some("elec_far_z"),
+        ("mag_x", true) => Some("mag_close_x"),
+        ("mag_y", true) => Some("mag_close_y"),
+        ("mag_z", true) => Some("mag_close_z"),
+        ("mag_x", false) => Some("mag_far_x"),
+        ("mag_y", false) => Some("mag_far_y"),
+        ("mag_z", false) => Some("mag_far_z"),
+        ("gate_close", true) => Some("gate_close"),
+        ("gate_far", false) => Some("gate_far"),
+        _ => None,
+    }
+}
+
+fn map_equation_to_atlas_gate(
+    eq: &threebody_discover::Equation,
+    close: bool,
+) -> threebody_discover::Equation {
+    let mut agg: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+    for term in &eq.terms {
+        if !term.coeff.is_finite() {
+            continue;
+        }
+        let Some(mapped) = atlas_map_feature(term.feature.as_str(), close) else {
+            continue;
+        };
+        *agg.entry(mapped.to_string()).or_insert(0.0) += term.coeff;
+    }
+    let terms = agg
+        .into_iter()
+        .filter(|(_feature, coeff)| coeff.abs() > 1e-12)
+        .map(|(feature, coeff)| threebody_discover::equation::Term { feature, coeff })
+        .collect();
+    threebody_discover::Equation { terms }
+}
+
+fn filter_dataset_by_gate(dataset: &Dataset, gate_feature: &str) -> Option<Dataset> {
+    let gate_idx = *dataset.index.get(gate_feature)?;
+    let mut samples = Vec::new();
+    let mut targets = Vec::new();
+    for (sample, target) in dataset.samples.iter().zip(&dataset.targets) {
+        if sample.get(gate_idx).copied().unwrap_or(0.0) > 0.5 {
+            samples.push(sample.clone());
+            targets.push(*target);
+        }
+    }
+    if samples.is_empty() {
+        return None;
+    }
+    Some(Dataset::new(
+        dataset.feature_names.clone(),
+        samples,
+        targets,
+    ))
+}
+
+fn build_atlas_candidates(
+    dataset_x: &Dataset,
+    dataset_y: &Dataset,
+    dataset_z: &Dataset,
+    feature_names: &[String],
+    result: &threebody_core::sim::SimResult,
+    cfg: &Config,
+    regime: &str,
+    rollout_integrator: RolloutIntegrator,
+    topk_close_x: &[threebody_discover::EquationScore],
+    topk_close_y: &[threebody_discover::EquationScore],
+    topk_close_z: &[threebody_discover::EquationScore],
+    topk_far_x: &[threebody_discover::EquationScore],
+    topk_far_y: &[threebody_discover::EquationScore],
+    topk_far_z: &[threebody_discover::EquationScore],
+) -> Vec<CandidateSummary> {
+    let mut out: Vec<CandidateSummary> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    let nx_c = topk_close_x.len().min(2);
+    let ny_c = topk_close_y.len().min(2);
+    let nz_c = topk_close_z.len().min(2);
+    let nx_f = topk_far_x.len().min(2);
+    let ny_f = topk_far_y.len().min(2);
+    let nz_f = topk_far_z.len().min(2);
+
+    for ix_c in 0..nx_c {
+        for iy_c in 0..ny_c {
+            for iz_c in 0..nz_c {
+                for ix_f in 0..nx_f {
+                    for iy_f in 0..ny_f {
+                        for iz_f in 0..nz_f {
+                            let eq_x_close =
+                                map_equation_to_atlas_gate(&topk_close_x[ix_c].equation, true);
+                            let eq_y_close =
+                                map_equation_to_atlas_gate(&topk_close_y[iy_c].equation, true);
+                            let eq_z_close =
+                                map_equation_to_atlas_gate(&topk_close_z[iz_c].equation, true);
+                            let eq_x_far =
+                                map_equation_to_atlas_gate(&topk_far_x[ix_f].equation, false);
+                            let eq_y_far =
+                                map_equation_to_atlas_gate(&topk_far_y[iy_f].equation, false);
+                            let eq_z_far =
+                                map_equation_to_atlas_gate(&topk_far_z[iz_f].equation, false);
+
+                            let merge_axis =
+                                |a: &threebody_discover::Equation,
+                                 b: &threebody_discover::Equation| {
+                                    let mut t = Vec::with_capacity(a.terms.len() + b.terms.len());
+                                    t.extend(a.terms.clone());
+                                    t.extend(b.terms.clone());
+                                    threebody_discover::Equation { terms: t }
+                                };
+                            let model = VectorModel {
+                                eq_x: merge_axis(&eq_x_close, &eq_x_far),
+                                eq_y: merge_axis(&eq_y_close, &eq_y_far),
+                                eq_z: merge_axis(&eq_z_close, &eq_z_far),
+                            };
+                            let equation_text = format_vector_model(&model);
+                            if !seen.insert(equation_text.clone()) {
+                                continue;
+                            }
+                            let mse_x = threebody_discover::equation::score_equation(
+                                &model.eq_x,
+                                dataset_x,
+                            );
+                            let mse_y = threebody_discover::equation::score_equation(
+                                &model.eq_y,
+                                dataset_y,
+                            );
+                            let mse_z = threebody_discover::equation::score_equation(
+                                &model.eq_z,
+                                dataset_z,
+                            );
+                            let mse = (mse_x + mse_y + mse_z) / 3.0;
+                            let complexity = model.eq_x.complexity()
+                                + model.eq_y.complexity()
+                                + model.eq_z.complexity();
+                            let (rmse, divergence_time) = rollout_metrics(
+                                &model,
+                                feature_names,
+                                result,
+                                cfg,
+                                rollout_integrator,
+                            );
+                            let mut flags = Vec::new();
+                            flags.extend(stability_flags_for(&model.eq_x, regime));
+                            flags.extend(stability_flags_for(&model.eq_y, regime));
+                            flags.extend(stability_flags_for(&model.eq_z, regime));
+                            flags.sort();
+                            flags.dedup();
+
+                            out.push(CandidateSummary {
+                                id: out.len(),
+                                equation: model.eq_x.clone(),
+                                equation_text,
+                                metrics: CandidateMetrics {
+                                    mse,
+                                    complexity,
+                                    rollout_rmse: Some(rmse),
+                                    divergence_time,
+                                    stability_flags: flags,
+                                },
+                                notes: vec![
+                                    "source=atlas".to_string(),
+                                    "kind=local_deterministic_formula".to_string(),
+                                    format!(
+                                        "close_ranks=x{ix_c},y{iy_c},z{iz_c};far_ranks=x{ix_f},y{iy_f},z{iz_f}"
+                                    ),
+                                ],
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    out
 }
 
 fn compute_feature_vector(
@@ -2992,6 +3430,7 @@ struct EquationSearchSettings {
     uct_explore_c: f64,
     archive_update_topk: usize,
     mcts_parent_limit: usize,
+    uncertainty_bonus: f64,
 }
 
 impl Default for EquationSearchSettings {
@@ -3000,7 +3439,207 @@ impl Default for EquationSearchSettings {
             uct_explore_c: 0.4,
             archive_update_topk: 12,
             mcts_parent_limit: 2,
+            uncertainty_bonus: 0.2,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+enum FactoryPolicy {
+    Legacy,
+    ResearchV1,
+    ResearchV2Atlas,
+}
+
+impl FactoryPolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            FactoryPolicy::Legacy => "legacy",
+            FactoryPolicy::ResearchV1 => "research_v1",
+            FactoryPolicy::ResearchV2Atlas => "research_v2_atlas",
+        }
+    }
+
+    fn default_model_family(self) -> ModelFamily {
+        match self {
+            FactoryPolicy::ResearchV2Atlas => ModelFamily::Atlas,
+            FactoryPolicy::Legacy | FactoryPolicy::ResearchV1 => ModelFamily::Global,
+        }
+    }
+}
+
+fn parse_factory_policy(raw: &str) -> Option<FactoryPolicy> {
+    match raw.trim().to_lowercase().as_str() {
+        "legacy" | "default" => Some(FactoryPolicy::Legacy),
+        "research_v1" | "research-v1" | "research" => Some(FactoryPolicy::ResearchV1),
+        "research_v2_atlas" | "research-v2-atlas" | "atlas" | "research_v2" | "research-v2" => {
+            Some(FactoryPolicy::ResearchV2Atlas)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+enum ModelFamily {
+    Global,
+    Atlas,
+}
+
+impl ModelFamily {
+    fn as_str(self) -> &'static str {
+        match self {
+            ModelFamily::Global => "global",
+            ModelFamily::Atlas => "atlas",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModelFamilyChoice {
+    Auto,
+    Global,
+    Atlas,
+}
+
+fn parse_model_family(raw: &str) -> Option<ModelFamilyChoice> {
+    match raw.trim().to_lowercase().as_str() {
+        "auto" | "default" => Some(ModelFamilyChoice::Auto),
+        "global" => Some(ModelFamilyChoice::Global),
+        "atlas" | "local" | "piecewise" => Some(ModelFamilyChoice::Atlas),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FactoryPolicySettings {
+    kind: FactoryPolicy,
+    equation_search: EquationSearchSettings,
+    active_ic_disagreement: bool,
+    model_family: ModelFamily,
+    sensitivity_eval: bool,
+}
+
+impl FactoryPolicySettings {
+    fn research_v2_atlas() -> Self {
+        Self {
+            kind: FactoryPolicy::ResearchV2Atlas,
+            equation_search: EquationSearchSettings::default(),
+            active_ic_disagreement: true,
+            model_family: ModelFamily::Atlas,
+            sensitivity_eval: true,
+        }
+    }
+
+    fn as_effective_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.kind.as_str(),
+            "active_ic_disagreement": self.active_ic_disagreement,
+            "model_family": self.model_family.as_str(),
+            "sensitivity_eval": self.sensitivity_eval,
+            "equation_search": {
+                "uct_explore_c": self.equation_search.uct_explore_c,
+                "archive_update_topk": self.equation_search.archive_update_topk,
+                "mcts_parent_limit": self.equation_search.mcts_parent_limit,
+                "uncertainty_bonus": self.equation_search.uncertainty_bonus,
+            }
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+enum ClaimGateKind {
+    HighbarV1,
+    HighbarV2BenchmarkFirst,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+struct ClaimGateProfile {
+    kind: ClaimGateKind,
+    min_relative_improvement: f64,
+    min_cases: usize,
+    bootstrap_resamples: usize,
+    bootstrap_ci: f64,
+    benchmark_required: bool,
+    benchmark_nonregression_tolerance: f64,
+}
+
+impl ClaimGateProfile {
+    fn highbar_v1() -> Self {
+        Self {
+            kind: ClaimGateKind::HighbarV1,
+            min_relative_improvement: 0.05,
+            min_cases: 10,
+            bootstrap_resamples: 2000,
+            bootstrap_ci: 0.95,
+            benchmark_required: false,
+            benchmark_nonregression_tolerance: 0.0,
+        }
+    }
+
+    fn highbar_v2_benchmark_first() -> Self {
+        Self {
+            kind: ClaimGateKind::HighbarV2BenchmarkFirst,
+            min_relative_improvement: 0.05,
+            min_cases: 10,
+            bootstrap_resamples: 4000,
+            bootstrap_ci: 0.95,
+            benchmark_required: true,
+            benchmark_nonregression_tolerance: 0.02,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self.kind {
+            ClaimGateKind::HighbarV1 => "highbar_v1",
+            ClaimGateKind::HighbarV2BenchmarkFirst => "highbar_v2_benchmark_first",
+        }
+    }
+}
+
+fn parse_claim_gate_profile(raw: &str) -> Option<ClaimGateProfile> {
+    match raw.trim().to_lowercase().as_str() {
+        "highbar_v1" | "highbar-v1" | "highbar" => Some(ClaimGateProfile::highbar_v1()),
+        "highbar_v2_benchmark_first"
+        | "highbar-v2-benchmark-first"
+        | "benchmark_first"
+        | "benchmark-first"
+        | "highbar_v2"
+        | "highbar-v2" => Some(ClaimGateProfile::highbar_v2_benchmark_first()),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+enum SeedSuite {
+    DeterministicV1,
+}
+
+impl SeedSuite {
+    fn deterministic_v1() -> Self {
+        SeedSuite::DeterministicV1
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            SeedSuite::DeterministicV1 => "deterministic_v1",
+        }
+    }
+
+    fn seeds(self) -> &'static [u64] {
+        match self {
+            SeedSuite::DeterministicV1 => &[
+                101, 211, 307, 401, 503, 601, 709, 809, 907, 1009, 1103, 1201,
+            ],
+        }
+    }
+}
+
+fn parse_seed_suite(raw: &str) -> Option<SeedSuite> {
+    match raw.trim().to_lowercase().as_str() {
+        "deterministic_v1" | "deterministic-v1" | "deterministic" | "default" => {
+            Some(SeedSuite::DeterministicV1)
+        }
+        _ => None,
     }
 }
 
@@ -3227,9 +3866,28 @@ fn run_factory(
     model: String,
     openai_key_file: Option<PathBuf>,
     require_llm: bool,
-    equation_search: EquationSearchSettings,
+    policy: FactoryPolicySettings,
+    claim_gate: ClaimGateProfile,
+    seed_suite: SeedSuite,
+    publish_report: bool,
 ) -> anyhow::Result<()> {
     fs::create_dir_all(&out_dir)?;
+    let equation_search = policy.equation_search;
+    let policy_effective = serde_json::json!({
+        "version": "v2",
+        "policy": policy.as_effective_json(),
+        "claim_gate": claim_gate,
+        "seed_suite": {
+            "name": seed_suite.as_str(),
+            "cases": seed_suite.seeds().len(),
+            "seeds": seed_suite.seeds(),
+        },
+        "publish_report": publish_report,
+    });
+    fs::write(
+        out_dir.join("policy_effective.json"),
+        serde_json::to_string_pretty(&policy_effective)?,
+    )?;
     let mut next_ic: Option<InitialConditionSpec> = None;
     let mut next_manual_equation_text: Option<String> = None;
     let llm_mode = parse_llm_mode(&llm_mode)?;
@@ -3261,6 +3919,17 @@ fn run_factory(
         }
         kind
     };
+    if matches!(policy.model_family, ModelFamily::Atlas)
+        && !matches!(current_library, FeatureLibraryKind::ExtendedPhysics)
+    {
+        if feature_library_pinned {
+            eprintln!(
+                "warning: --model-family atlas requires gated features; overriding --feature-library={} to extended",
+                feature_library_trimmed
+            );
+        }
+        current_library = FeatureLibraryKind::ExtendedPhysics;
+    }
     let mut equation_ga_parent: Option<String> =
         incumbent.as_ref().map(|r| r.equation_text.clone());
     let mut previous_iteration_elites: Vec<(String, CandidateMetrics)> = Vec::new();
@@ -3297,6 +3966,33 @@ fn run_factory(
             "gravity_only"
         };
         let ic_bounds = default_ic_bounds();
+        let pre_ic_feature_names = match current_library {
+            FeatureLibraryKind::DefaultPhysics => FeatureLibrary::default_physics().features,
+            FeatureLibraryKind::ExtendedPhysics => FeatureLibrary::extended_physics().features,
+            FeatureLibraryKind::EmFieldsLorentz => FeatureLibrary::em_fields_lorentz().features,
+        };
+        let active_ic_models = if policy.active_ic_disagreement {
+            collect_active_ic_models(
+                &pre_ic_feature_names,
+                &previous_iteration_elites,
+                &equation_search_archive,
+            )
+        } else {
+            Vec::new()
+        };
+        let active_ic_hint = if policy.active_ic_disagreement {
+            best_active_ic_seed_hint(
+                &preset,
+                &ic_bounds,
+                &cfg,
+                &pre_ic_feature_names,
+                &active_ic_models,
+                seed.wrapping_add(iter as u64 * 1_000_003),
+                8,
+            )
+        } else {
+            None
+        };
         let mut ic_notes = vec![
             "avoid close encounters".to_string(),
             "prefer bounded motion".to_string(),
@@ -3326,7 +4022,8 @@ fn run_factory(
             );
         }
         if !equation_search_archive.nodes.is_empty() {
-            ic_notes.push("EQUATION_SEARCH_ARCHIVE_TOP (historically strong equations):".to_string());
+            ic_notes
+                .push("EQUATION_SEARCH_ARCHIVE_TOP (historically strong equations):".to_string());
             for (rank, node) in top_equation_search_nodes(&equation_search_archive, 3)
                 .iter()
                 .enumerate()
@@ -3344,6 +4041,31 @@ fn run_factory(
                 "IC_GOAL: also generate conditions that can separate current contenders from these archive leaders."
                     .to_string(),
             );
+        }
+        if policy.active_ic_disagreement && active_ic_models.len() >= 2 {
+            ic_notes.push(format!(
+                "IC_ACTIVE_DISAGREEMENT=true models={}",
+                active_ic_models.len()
+            ));
+            if let Some((seed_hint, score_hint, _)) = active_ic_hint.as_ref() {
+                ic_notes.push(format!(
+                    "IC_ACTIVE_SEED_HINT={} disagreement_score={:.6e}",
+                    seed_hint, score_hint
+                ));
+                ic_notes.push(
+                    "IC_GOAL: prefer initial conditions that maximize disagreement among top equations."
+                        .to_string(),
+                );
+            }
+        }
+        if llm_client.is_none() && next_ic.is_none() {
+            if let Some((_seed_hint, _score_hint, spec)) = active_ic_hint.clone() {
+                next_ic = Some(spec);
+                ic_notes.push(
+                    "IC_ACTIVE_DISAGREEMENT_APPLIED=local_seeded_candidate (llm unavailable)"
+                        .to_string(),
+                );
+            }
         }
 
         #[derive(serde::Serialize)]
@@ -3608,23 +4330,17 @@ fn run_factory(
             tol: current_solver.lasso_tol,
             normalize: current_solver.normalize,
         };
-        let (topk_x, topk_y, topk_z) = match current_solver.solver {
-            DiscoverySolver::Ga => (
-                run_search(&dataset_x, &library, &disc_cfg),
-                run_search(&dataset_y, &library, &disc_cfg),
-                run_search(&dataset_z, &library, &disc_cfg),
-            ),
-            DiscoverySolver::Stls => (
-                stls_path_search(&dataset_x, &stls_cfg, current_fitness),
-                stls_path_search(&dataset_y, &stls_cfg, current_fitness),
-                stls_path_search(&dataset_z, &stls_cfg, current_fitness),
-            ),
-            DiscoverySolver::Lasso => (
-                lasso_path_search(&dataset_x, &lasso_cfg, current_fitness),
-                lasso_path_search(&dataset_y, &lasso_cfg, current_fitness),
-                lasso_path_search(&dataset_z, &lasso_cfg, current_fitness),
-            ),
-        };
+        let (topk_x, topk_y, topk_z) = run_solver_on_components(
+            current_solver.solver,
+            current_fitness,
+            &library,
+            &disc_cfg,
+            &stls_cfg,
+            &lasso_cfg,
+            &dataset_x,
+            &dataset_y,
+            &dataset_z,
+        );
         let mut vector_candidates = build_vector_candidates(
             &topk_x.entries,
             &topk_y.entries,
@@ -3635,6 +4351,69 @@ fn run_factory(
             regime,
             current_rollout,
         );
+        let mut atlas_candidate_count = 0usize;
+        if matches!(policy.model_family, ModelFamily::Atlas) {
+            let close_x = filter_dataset_by_gate(&dataset_x, "gate_close");
+            let close_y = filter_dataset_by_gate(&dataset_y, "gate_close");
+            let close_z = filter_dataset_by_gate(&dataset_z, "gate_close");
+            let far_x = filter_dataset_by_gate(&dataset_x, "gate_far");
+            let far_y = filter_dataset_by_gate(&dataset_y, "gate_far");
+            let far_z = filter_dataset_by_gate(&dataset_z, "gate_far");
+            if let (
+                Some(dataset_close_x),
+                Some(dataset_close_y),
+                Some(dataset_close_z),
+                Some(dataset_far_x),
+                Some(dataset_far_y),
+                Some(dataset_far_z),
+            ) = (close_x, close_y, close_z, far_x, far_y, far_z)
+            {
+                let (topk_close_x, topk_close_y, topk_close_z) = run_solver_on_components(
+                    current_solver.solver,
+                    current_fitness,
+                    &library,
+                    &disc_cfg,
+                    &stls_cfg,
+                    &lasso_cfg,
+                    &dataset_close_x,
+                    &dataset_close_y,
+                    &dataset_close_z,
+                );
+                let (topk_far_x, topk_far_y, topk_far_z) = run_solver_on_components(
+                    current_solver.solver,
+                    current_fitness,
+                    &library,
+                    &disc_cfg,
+                    &stls_cfg,
+                    &lasso_cfg,
+                    &dataset_far_x,
+                    &dataset_far_y,
+                    &dataset_far_z,
+                );
+                let mut atlas = build_atlas_candidates(
+                    &dataset_x,
+                    &dataset_y,
+                    &dataset_z,
+                    &vector_data.feature_names,
+                    &result,
+                    &cfg,
+                    regime,
+                    current_rollout,
+                    &topk_close_x.entries,
+                    &topk_close_y.entries,
+                    &topk_close_z.entries,
+                    &topk_far_x.entries,
+                    &topk_far_y.entries,
+                    &topk_far_z.entries,
+                );
+                atlas_candidate_count = atlas.len();
+                vector_candidates.append(&mut atlas);
+            } else {
+                eprintln!(
+                    "atlas model requested but gate_close/gate_far subsets were unavailable; falling back to global candidates"
+                );
+            }
+        }
 
         if let Some(eq_text) = next_manual_equation_text.take() {
             append_manual_vector_candidate_from_equation_text(
@@ -3683,6 +4462,7 @@ fn run_factory(
                 &seen,
                 equation_search.mcts_parent_limit,
                 equation_search.uct_explore_c,
+                equation_search.uncertainty_bonus,
             ) {
                 mcts_parent_labels.push(format!(
                     "{}={}",
@@ -3691,9 +4471,11 @@ fn run_factory(
                 ));
                 parents.push((parent_kind, parent_eq));
             }
-            let mut parent_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut parent_seen: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             parents.retain(|(_kind, eq)| {
-                let Some(norm) = normalize_equation_text_for_features(eq, &vector_data.feature_names)
+                let Some(norm) =
+                    normalize_equation_text_for_features(eq, &vector_data.feature_names)
                 else {
                     return false;
                 };
@@ -3849,10 +4631,26 @@ fn run_factory(
         ));
         judge_input
             .notes
-            .push(format!(
-                "equation_search_policy=mcts_uct(c={})",
-                equation_search.uct_explore_c
-            ));
+            .push(format!("factory_policy={}", policy.kind.as_str()));
+        judge_input
+            .notes
+            .push(format!("model_family={}", policy.model_family.as_str()));
+        judge_input
+            .notes
+            .push(format!("atlas_candidates={atlas_candidate_count}"));
+        judge_input
+            .notes
+            .push(format!("sensitivity_eval={}", policy.sensitivity_eval));
+        judge_input
+            .notes
+            .push(format!("claim_gate={}", claim_gate.as_str()));
+        judge_input
+            .notes
+            .push(format!("seed_suite={}", seed_suite.as_str()));
+        judge_input.notes.push(format!(
+            "equation_search_policy=mcts_uct(c={})",
+            equation_search.uct_explore_c
+        ));
         judge_input.notes.push(format!(
             "equation_search_archive_nodes={}",
             equation_search_archive.nodes.len()
@@ -3860,6 +4658,10 @@ fn run_factory(
         judge_input.notes.push(format!(
             "equation_search_archive_total_updates={}",
             equation_search_archive.total_updates
+        ));
+        judge_input.notes.push(format!(
+            "equation_search_uncertainty_bonus={}",
+            equation_search.uncertainty_bonus
         ));
         if !mcts_parent_labels.is_empty() {
             judge_input.notes.push(format!(
@@ -3944,6 +4746,7 @@ fn run_factory(
             &vector_candidates,
             &vector_data.feature_names,
             iter + 1,
+            seed + iter as u64,
             equation_search.archive_update_topk,
         );
         save_equation_search_archive(&equation_search_archive_path, &equation_search_archive)?;
@@ -3997,12 +4800,17 @@ fn run_factory(
             "vector_candidates": vector_candidates,
             "grid_top3": grid_topk,
             "equation_search": {
+                "factory_policy": policy.kind.as_str(),
+                "model_family": policy.model_family.as_str(),
+                "atlas_candidate_count": atlas_candidate_count,
                 "policy": format!("mcts_uct(c={})", equation_search.uct_explore_c),
                 "archive_nodes": equation_search_archive.nodes.len(),
                 "archive_total_updates": equation_search_archive.total_updates,
                 "mcts_parent_labels": mcts_parent_labels.clone(),
                 "archive_update_topk": equation_search.archive_update_topk,
                 "mcts_parent_limit": equation_search.mcts_parent_limit,
+                "uncertainty_bonus": equation_search.uncertainty_bonus,
+                "active_ic_disagreement": policy.active_ic_disagreement,
             },
         }))?;
         fs::write(&discovery_out, discovery_json)?;
@@ -4025,6 +4833,8 @@ fn run_factory(
             llm_model: Option<String>,
             fitness_heuristic: String,
             rollout_integrator: String,
+            model_family: String,
+            atlas_candidate_count: usize,
             rollout_trace: Option<String>,
         }
 
@@ -4049,6 +4859,8 @@ fn run_factory(
             },
             fitness_heuristic: current_fitness.as_str().to_string(),
             rollout_integrator: rollout_integrator_label(current_rollout).to_string(),
+            model_family: policy.model_family.as_str().to_string(),
+            atlas_candidate_count,
             rollout_trace: if trace_written {
                 Some("rollout_trace.json".to_string())
             } else {
@@ -4065,6 +4877,11 @@ fn run_factory(
             "- Feature library: {}\n",
             feature_library_kind_label(current_library)
         ));
+        md.push_str(&format!(
+            "- Model family: {}\n",
+            policy.model_family.as_str()
+        ));
+        md.push_str(&format!("- Atlas candidates: {}\n", atlas_candidate_count));
         md.push_str(&format!("- Steps: {}\n", sim_summary.steps));
         md.push_str(&format!("- Energy drift: {:?}\n", sim_summary.energy_drift));
         md.push_str(&format!(
@@ -4100,9 +4917,18 @@ fn run_factory(
             md.push_str(&format!("Ranking: {:?}\n", j.ranking));
         }
         md.push_str("\n## Equation Search\n");
+        md.push_str(&format!("- factory_policy: {}\n", policy.kind.as_str()));
         md.push_str(&format!(
             "- policy: mcts_uct(c={})\n",
             equation_search.uct_explore_c
+        ));
+        md.push_str(&format!(
+            "- active_ic_disagreement: {}\n",
+            policy.active_ic_disagreement
+        ));
+        md.push_str(&format!(
+            "- uncertainty_bonus: {}\n",
+            equation_search.uncertainty_bonus
         ));
         md.push_str(&format!(
             "- archive_nodes: {}\n",
@@ -4288,6 +5114,12 @@ fn run_factory(
     eval_notes.push(format!("auto={}", auto));
     eval_notes.push(format!("feature_library={}", feature_library_trimmed));
     eval_notes.push(format!("llm_mode={}", llm_mode_label(llm_mode)));
+    eval_notes.push(format!("factory_policy={}", policy.kind.as_str()));
+    eval_notes.push(format!("model_family={}", policy.model_family.as_str()));
+    eval_notes.push(format!("sensitivity_eval={}", policy.sensitivity_eval));
+    eval_notes.push(format!("claim_gate={}", claim_gate.as_str()));
+    eval_notes.push(format!("seed_suite={}", seed_suite.as_str()));
+    eval_notes.push(format!("publish_report={}", publish_report));
     eval_notes.push(format!(
         "equation_search_policy=mcts_uct(c={})",
         equation_search.uct_explore_c
@@ -4299,6 +5131,10 @@ fn run_factory(
     eval_notes.push(format!(
         "equation_search_mcts_parents={}",
         equation_search.mcts_parent_limit
+    ));
+    eval_notes.push(format!(
+        "equation_search_uncertainty_bonus={}",
+        equation_search.uncertainty_bonus
     ));
     eval_notes.push(format!(
         "equation_search_archive_nodes={}",
@@ -4375,15 +5211,98 @@ fn run_factory(
         }))
     })()?;
 
-    let benchmark_eval: Option<BenchmarkEvalV1> = current_best
-        .as_ref()
-        .and_then(|best| compute_benchmark_eval_v1(out_dir.as_path(), best, incumbent_bucket).ok());
+    let benchmark_eval: Option<BenchmarkEvalV1> = current_best.as_ref().and_then(|best| {
+        compute_benchmark_eval_v1(out_dir.as_path(), best, incumbent_bucket.clone()).ok()
+    });
     if let Some(b) = benchmark_eval.as_ref() {
         let _ = fs::write(
             out_dir.join("benchmark_eval.json"),
             serde_json::to_string_pretty(b)?,
         );
     }
+    let prior_benchmark_eval: Option<BenchmarkEvalV1> =
+        load_prior_benchmark_eval(prior_best.as_ref());
+    if let Some(pb) = prior_benchmark_eval.as_ref() {
+        let _ = fs::write(
+            out_dir.join("prior_benchmark_eval.json"),
+            serde_json::to_string_pretty(pb)?,
+        );
+    }
+    let sensitivity_summary: Option<SensitivitySummaryV1> = if policy.sensitivity_eval {
+        current_best
+            .as_ref()
+            .and_then(|best| compute_sensitivity_summary_v1(out_dir.as_path(), best).ok())
+    } else {
+        None
+    };
+    if let Some(s) = sensitivity_summary.as_ref() {
+        let _ = fs::write(
+            out_dir.join("sensitivity_eval.json"),
+            serde_json::to_string_pretty(s)?,
+        );
+    }
+    let (evaluation_aggregate, claim_assessment, strict_holdout_report) = if publish_report {
+        match (current_best.as_ref(), best_ic.as_ref()) {
+            (Some(best), Some(ic)) => {
+                match compute_seed_suite_aggregate_v1(
+                    out_dir.as_path(),
+                    best,
+                    prior_best.as_ref(),
+                    ic,
+                    seed_suite,
+                    claim_gate,
+                    incumbent_bucket,
+                ) {
+                    Ok(aggregate) => {
+                        let claim = assess_claim_v1(
+                            &aggregate,
+                            claim_gate,
+                            benchmark_eval.as_ref(),
+                            prior_benchmark_eval.as_ref(),
+                        );
+                        let strict = build_strict_holdout_report_v1(
+                            claim_gate,
+                            &claim,
+                            benchmark_eval.as_ref(),
+                            prior_benchmark_eval.as_ref(),
+                            sensitivity_summary.as_ref(),
+                        );
+                        fs::write(
+                            out_dir.join("evaluation_aggregate.json"),
+                            serde_json::to_string_pretty(&aggregate)?,
+                        )?;
+                        fs::write(
+                            out_dir.join("claim_assessment.json"),
+                            serde_json::to_string_pretty(&claim)?,
+                        )?;
+                        fs::write(
+                            out_dir.join("paper_summary.md"),
+                            render_paper_summary_md(&aggregate, &claim, policy),
+                        )?;
+                        fs::write(
+                            out_dir.join("strict_holdout_report.json"),
+                            serde_json::to_string_pretty(&strict)?,
+                        )?;
+                        (Some(aggregate), Some(claim), Some(strict))
+                    }
+                    Err(err) => {
+                        let msg = format!("failed to compute aggregate evidence artifacts: {err}");
+                        eprintln!("{msg}");
+                        let _ = fs::write(out_dir.join("evaluation_aggregate_error.txt"), msg);
+                        (None, None, None)
+                    }
+                }
+            }
+            _ => {
+                let msg = "publish_report requested but best candidate or best-run initial conditions were unavailable; aggregate evidence skipped".to_string();
+                eprintln!("{msg}");
+                let _ = fs::write(out_dir.join("evaluation_aggregate_error.txt"), msg);
+                (None, None, None)
+            }
+        }
+    } else {
+        (None, None, None)
+    };
 
     #[derive(serde::Serialize)]
     struct HistoryAttempt {
@@ -4468,7 +5387,7 @@ fn run_factory(
     let eval_prompt_path = out_dir.join("evaluation_prompt.txt");
     let eval_md_path = out_dir.join("evaluation.md");
     let eval_llm_md_path = out_dir.join("evaluation_llm.md");
-    let exec_md = render_executive_summary_md(
+    let mut exec_md = render_executive_summary_md(
         &eval_input,
         current_best.as_ref(),
         prior_best.as_ref(),
@@ -4476,6 +5395,97 @@ fn run_factory(
         incumbent_on_best_run.as_ref(),
         benchmark_eval.as_ref(),
     );
+    if let (Some(aggregate), Some(claim)) =
+        (evaluation_aggregate.as_ref(), claim_assessment.as_ref())
+    {
+        exec_md.push_str("\n## Aggregate Evidence Gate\n");
+        exec_md.push_str(&format!("- seed_suite={}\n", aggregate.suite_id));
+        exec_md.push_str(&format!("- claim_gate={}\n", claim.claim_gate));
+        exec_md.push_str(&format!("- claim_status={}\n", claim.status.as_str()));
+        exec_md.push_str(&format!("- n_cases={}\n", claim.n_cases));
+        exec_md.push_str(&format!(
+            "- median_relative_improvement={}\n",
+            format_opt_f64(claim.relative_improvement_median)
+        ));
+        exec_md.push_str(&format!(
+            "- bootstrap_ci_95=[{}, {}]\n",
+            format_opt_f64(claim.bootstrap_ci_low),
+            format_opt_f64(claim.bootstrap_ci_high)
+        ));
+        exec_md.push_str(&format!(
+            "- high_bar_rule=rel>={:.3}, n_cases>={}, ci_low>0\n",
+            claim.min_relative_improvement, claim.min_cases
+        ));
+        exec_md.push_str(&format!(
+            "- benchmark_required={}\n",
+            claim.benchmark_required
+        ));
+        exec_md.push_str(&format!(
+            "- benchmark_passed={}\n",
+            claim
+                .benchmark_passed
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".to_string())
+        ));
+        exec_md.push_str(&format!(
+            "- benchmark_relative_improvement={}\n",
+            format_opt_f64(claim.benchmark_relative_improvement)
+        ));
+        exec_md.push_str(&format!(
+            "- strict_holdout_passed={}\n",
+            claim.strict_holdout_passed
+        ));
+    }
+    if let Some(strict) = strict_holdout_report.as_ref() {
+        exec_md.push_str("\n## Strict Holdout Report\n");
+        exec_md.push_str(&format!(
+            "- strict_holdout_passed={}\n",
+            strict.strict_holdout_passed
+        ));
+        exec_md.push_str(&format!(
+            "- benchmark_passed={}\n",
+            strict
+                .benchmark_passed
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".to_string())
+        ));
+        exec_md.push_str(&format!(
+            "- benchmark_rmse_mean_current={}\n",
+            format_opt_f64(strict.benchmark_rmse_mean_current)
+        ));
+        exec_md.push_str(&format!(
+            "- benchmark_rmse_mean_prior={}\n",
+            format_opt_f64(strict.benchmark_rmse_mean_prior)
+        ));
+        exec_md.push_str(&format!(
+            "- benchmark_relative_improvement={}\n",
+            format_opt_f64(strict.benchmark_relative_improvement)
+        ));
+    }
+    if let Some(sens) = sensitivity_summary.as_ref() {
+        exec_md.push_str("\n## Sensitivity Equation Diagnostics\n");
+        exec_md.push_str(&format!("- horizon_t={:.6}\n", sens.horizon_t));
+        exec_md.push_str(&format!(
+            "- ftle_observed={}\n",
+            format_opt_f64(sens.ftle_observed)
+        ));
+        exec_md.push_str(&format!(
+            "- ftle_linearized={}\n",
+            format_opt_f64(sens.ftle_linearized)
+        ));
+        exec_md.push_str(&format!(
+            "- relative_error_median={}\n",
+            format_opt_f64(sens.relative_error_median)
+        ));
+        exec_md.push_str(&format!(
+            "- relative_error_p90={}\n",
+            format_opt_f64(sens.relative_error_p90)
+        ));
+        exec_md.push_str(&format!(
+            "- relative_error_max={}\n",
+            format_opt_f64(sens.relative_error_max)
+        ));
+    }
 
     let mut raw_md = String::new();
     let prompt_text: String;
@@ -4525,6 +5535,8 @@ fn run_factory(
             factory_dir: Some(out_dir.as_path()),
             benchmark: benchmark_eval.as_ref(),
             incumbent_on_best_run: incumbent_on_best_run.as_ref(),
+            sensitivity: sensitivity_summary.as_ref(),
+            strict_holdout: strict_holdout_report.as_ref(),
         },
     );
     fs::write(&eval_tex_path, eval_tex)?;
@@ -4861,6 +5873,567 @@ fn compute_benchmark_eval_v1(
     })
 }
 
+fn load_prior_benchmark_eval(prior_best: Option<&PriorAttemptBest>) -> Option<BenchmarkEvalV1> {
+    let prior = prior_best?;
+    let factory_dir = prior.eval_input_path.parent()?;
+    let raw = fs::read_to_string(factory_dir.join("benchmark_eval.json")).ok()?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn compute_sensitivity_summary_v1(
+    factory_dir: &std::path::Path,
+    best: &BestFactoryCandidate,
+) -> anyhow::Result<SensitivitySummaryV1> {
+    let run_dir = factory_dir.join(&best.run_id);
+    let oracle = load_oracle_run_from_dir(&run_dir)?;
+    let model = vector_model_from_equation_text(&best.candidate.equation_text)
+        .ok_or_else(|| anyhow::anyhow!("failed to parse equation for sensitivity evaluation"))?;
+    let feature_names = feature_names_for_equation_text(&best.candidate.equation_text);
+    let rollout_integrator = benchmark_rollout_integrator_for_regime(&best.regime);
+    let sens: SensitivityEval = sensitivity_eval(
+        &model,
+        &feature_names,
+        &oracle.result,
+        &oracle.cfg,
+        rollout_integrator,
+        1e-6,
+        1e-6,
+    );
+    Ok(SensitivitySummaryV1 {
+        version: "v1".to_string(),
+        regime: best.regime.clone(),
+        rollout_integrator: rollout_integrator_label(rollout_integrator).to_string(),
+        candidate_equation_text: best.candidate.equation_text.clone(),
+        perturbation_scale: sens.perturbation_scale,
+        jacobian_eps: sens.jacobian_eps,
+        horizon_t: sens.horizon_t,
+        steps: sens.steps,
+        ftle_observed: sens.ftle_observed,
+        ftle_linearized: sens.ftle_linearized,
+        relative_error_median: sens.relative_error_median,
+        relative_error_p90: sens.relative_error_p90,
+        relative_error_max: sens.relative_error_max,
+        final_observed_norm: sens.final_observed_norm,
+        final_linearized_norm: sens.final_linearized_norm,
+        notes: vec![
+            "method=tangent_linear_fd_jacobian".to_string(),
+            "state_dim=18".to_string(),
+            "perturbation=body0_pos_x".to_string(),
+        ],
+    })
+}
+
+fn evaluate_benchmark_gate(
+    claim_gate: ClaimGateProfile,
+    benchmark_eval: Option<&BenchmarkEvalV1>,
+    prior_benchmark_eval: Option<&BenchmarkEvalV1>,
+) -> (
+    Option<bool>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Vec<String>,
+) {
+    let mut notes = Vec::new();
+    if !claim_gate.benchmark_required {
+        return (None, None, None, None, notes);
+    }
+    let Some(curr) = benchmark_eval else {
+        notes.push("benchmark_required_but_missing".to_string());
+        return (Some(false), None, None, None, notes);
+    };
+    let curr_rmse = curr.aggregate.rmse_mean;
+    let curr_rmse_max = curr.aggregate.rmse_max;
+    if curr.aggregate.cases < 3 {
+        notes.push(format!(
+            "benchmark_cases_too_small: {} < 3",
+            curr.aggregate.cases
+        ));
+        return (Some(false), None, curr_rmse, None, notes);
+    }
+    let Some(curr_mean) = curr_rmse.filter(|v| v.is_finite()) else {
+        notes.push("benchmark_rmse_mean_missing_or_nonfinite".to_string());
+        return (Some(false), None, curr_rmse, None, notes);
+    };
+    if curr_rmse_max.filter(|v| v.is_finite()).is_none() {
+        notes.push("benchmark_rmse_max_missing_or_nonfinite".to_string());
+        return (Some(false), None, curr_rmse, None, notes);
+    }
+
+    let mut prior_rmse_mean: Option<f64> = None;
+    if let Some(prior) = prior_benchmark_eval {
+        if prior.aggregate.suite_id == curr.aggregate.suite_id
+            && prior.aggregate.rollout_integrator == curr.aggregate.rollout_integrator
+        {
+            prior_rmse_mean = prior.aggregate.rmse_mean.filter(|v| v.is_finite());
+        } else {
+            notes.push("prior_benchmark_suite_mismatch_ignored".to_string());
+        }
+    }
+    if let Some(prior_mean) = prior_rmse_mean {
+        if prior_mean > 0.0 {
+            let rel = (prior_mean - curr_mean) / prior_mean;
+            let pass = rel >= -claim_gate.benchmark_nonregression_tolerance;
+            if !pass {
+                notes.push(format!(
+                    "benchmark_regression: rel_improvement={rel:.6} < -tolerance={:.6}",
+                    claim_gate.benchmark_nonregression_tolerance
+                ));
+            }
+            return (Some(pass), Some(rel), curr_rmse, Some(prior_mean), notes);
+        }
+        notes.push("prior_benchmark_rmse_nonpositive_ignored".to_string());
+    } else {
+        notes.push("prior_benchmark_unavailable_nonregression_not_checked".to_string());
+    }
+
+    (Some(true), None, curr_rmse, prior_rmse_mean, notes)
+}
+
+fn build_strict_holdout_report_v1(
+    claim_gate: ClaimGateProfile,
+    claim: &ClaimAssessmentV1,
+    benchmark_eval: Option<&BenchmarkEvalV1>,
+    prior_benchmark_eval: Option<&BenchmarkEvalV1>,
+    sensitivity: Option<&SensitivitySummaryV1>,
+) -> StrictHoldoutReportV1 {
+    let (benchmark_passed, benchmark_rel, benchmark_rmse_current, benchmark_rmse_prior, mut notes) =
+        evaluate_benchmark_gate(claim_gate, benchmark_eval, prior_benchmark_eval);
+    notes.extend(claim.notes.clone());
+    if let Some(s) = sensitivity {
+        if let Some(rel_med) = s.relative_error_median {
+            if rel_med > 0.5 {
+                notes.push(format!(
+                    "sensitivity_linearization_error_high: relative_error_median={rel_med:.6}"
+                ));
+            }
+        }
+    } else {
+        notes.push("sensitivity_summary_missing".to_string());
+    }
+
+    let benchmark_ok = benchmark_passed.unwrap_or(true);
+    let strict_passed = claim.high_bar_passed && benchmark_ok;
+    StrictHoldoutReportV1 {
+        version: "v1".to_string(),
+        claim_gate: claim_gate.as_str().to_string(),
+        benchmark_required: claim_gate.benchmark_required,
+        benchmark_passed,
+        benchmark_relative_improvement: benchmark_rel,
+        benchmark_rmse_mean_current: benchmark_rmse_current,
+        benchmark_rmse_mean_prior: benchmark_rmse_prior,
+        seed_suite_relative_improvement_median: claim.relative_improvement_median,
+        seed_suite_ci_low: claim.bootstrap_ci_low,
+        seed_suite_ci_high: claim.bootstrap_ci_high,
+        high_bar_passed_seed_suite: claim.high_bar_passed,
+        strict_holdout_passed: strict_passed,
+        sensitivity_relative_error_median: sensitivity.and_then(|s| s.relative_error_median),
+        sensitivity_ftle_observed: sensitivity.and_then(|s| s.ftle_observed),
+        notes,
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct SeedSuiteCaseEval {
+    seed: u64,
+    rollout_rmse_current: Option<f64>,
+    rollout_rmse_prior: Option<f64>,
+    relative_improvement: Option<f64>,
+    terminated_early: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct EvaluationAggregateV1 {
+    version: String,
+    suite_id: String,
+    claim_gate: String,
+    bucket: BucketKey,
+    regime: String,
+    cases: Vec<SeedSuiteCaseEval>,
+    rmse_current_median: Option<f64>,
+    rmse_prior_median: Option<f64>,
+    relative_improvement_median: Option<f64>,
+    relative_improvement_mean: Option<f64>,
+    bootstrap_ci_low: Option<f64>,
+    bootstrap_ci_high: Option<f64>,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ClaimStatus {
+    ConfirmedImprovement,
+    DirectionalTrend,
+    NoImprovement,
+}
+
+impl ClaimStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            ClaimStatus::ConfirmedImprovement => "confirmed_improvement",
+            ClaimStatus::DirectionalTrend => "directional_trend",
+            ClaimStatus::NoImprovement => "no_improvement",
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct ClaimAssessmentV1 {
+    version: String,
+    status: ClaimStatus,
+    claim_gate: String,
+    min_relative_improvement: f64,
+    min_cases: usize,
+    benchmark_required: bool,
+    benchmark_passed: Option<bool>,
+    benchmark_relative_improvement: Option<f64>,
+    relative_improvement_median: Option<f64>,
+    bootstrap_ci_low: Option<f64>,
+    bootstrap_ci_high: Option<f64>,
+    n_cases: usize,
+    high_bar_passed: bool,
+    strict_holdout_passed: bool,
+    notes: Vec<String>,
+}
+
+fn median_f64(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let mut v = values.to_vec();
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = v.len();
+    if n % 2 == 1 {
+        v.get(n / 2).copied()
+    } else {
+        Some((v[n / 2 - 1] + v[n / 2]) * 0.5)
+    }
+}
+
+fn mean_f64(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<f64>() / values.len() as f64)
+}
+
+fn bootstrap_ci_for_median(
+    values: &[f64],
+    ci: f64,
+    resamples: usize,
+    seed: u64,
+) -> Option<(f64, f64)> {
+    if values.is_empty() || resamples == 0 {
+        return None;
+    }
+    let mut rng = threebody_discover::ga::Lcg::new(seed);
+    let n = values.len();
+    let mut sample_medians = Vec::with_capacity(resamples);
+    for _ in 0..resamples {
+        let mut sample = Vec::with_capacity(n);
+        for _ in 0..n {
+            // Lcg::gen_range_usize upper-bound semantics are not guaranteed here; modulo keeps indices in-range.
+            let idx = rng.gen_range_usize(0, n) % n;
+            sample.push(values[idx]);
+        }
+        if let Some(m) = median_f64(&sample) {
+            sample_medians.push(m);
+        }
+    }
+    if sample_medians.is_empty() {
+        return None;
+    }
+    sample_medians.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let alpha = (1.0 - ci).clamp(0.0, 1.0) * 0.5;
+    let lo_idx = ((sample_medians.len() as f64 - 1.0) * alpha).round() as usize;
+    let hi_idx = ((sample_medians.len() as f64 - 1.0) * (1.0 - alpha)).round() as usize;
+    Some((sample_medians[lo_idx], sample_medians[hi_idx]))
+}
+
+fn jitter_ic_for_seed(
+    base: &InitialConditionSpec,
+    bounds: &IcBounds,
+    seed: u64,
+) -> Option<InitialConditionSpec> {
+    let mut spec = base.clone();
+    let mut rng = threebody_discover::ga::Lcg::new(seed);
+    let pos_jitter = 0.03;
+    let vel_jitter = 0.01;
+    for body in &mut spec.bodies {
+        for axis in 0..3 {
+            body.pos[axis] = (body.pos[axis] + rng.gen_range_f64(-pos_jitter, pos_jitter))
+                .clamp(bounds.pos_min, bounds.pos_max);
+            body.vel[axis] = (body.vel[axis] + rng.gen_range_f64(-vel_jitter, vel_jitter))
+                .clamp(bounds.vel_min, bounds.vel_max);
+        }
+    }
+    spec = force_nonplanar_ic(spec, bounds, seed);
+    system_from_ic(&spec, bounds).ok()?;
+    Some(spec)
+}
+
+fn compute_seed_suite_aggregate_v1(
+    factory_dir: &std::path::Path,
+    best: &BestFactoryCandidate,
+    prior_best: Option<&PriorAttemptBest>,
+    base_ic: &InitialConditionSpec,
+    seed_suite: SeedSuite,
+    claim_gate: ClaimGateProfile,
+    bucket: BucketKey,
+) -> anyhow::Result<EvaluationAggregateV1> {
+    let suite_id = seed_suite.as_str().to_string();
+    let bounds = default_ic_bounds();
+    let run_dir = factory_dir.join(&best.run_id);
+    let cfg_json = fs::read_to_string(run_dir.join("config.json"))?;
+    let mut cfg: Config = serde_json::from_str(&cfg_json)?;
+    if matches!(cfg.integrator.kind, IntegratorKind::Rk45) && cfg.integrator.adaptive {
+        cfg.integrator.max_rejects = cfg.integrator.max_rejects.max(64);
+    }
+    cfg.validate().map_err(anyhow::Error::msg)?;
+
+    let current_model = vector_model_from_equation_text(&best.candidate.equation_text)
+        .ok_or_else(|| anyhow::anyhow!("failed to parse current best equation"))?;
+    let current_features = feature_names_for_equation_text(&best.candidate.equation_text);
+
+    let prior_model = prior_best.and_then(|p| {
+        vector_model_from_equation_text(&p.best.candidate.equation_text).map(|m| {
+            (
+                m,
+                feature_names_for_equation_text(&p.best.candidate.equation_text),
+            )
+        })
+    });
+
+    let mut notes = Vec::new();
+    if prior_model.is_none() {
+        notes.push("prior_model_unavailable_for_seed_suite_baseline".to_string());
+    }
+
+    let rollout_integrator = benchmark_rollout_integrator_for_regime(&best.regime);
+    let mut cases = Vec::new();
+    let mut current_vals = Vec::new();
+    let mut prior_vals = Vec::new();
+    let mut relative_vals = Vec::new();
+
+    for &seed in seed_suite.seeds() {
+        let Some(ic_spec) = jitter_ic_for_seed(base_ic, &bounds, seed) else {
+            cases.push(SeedSuiteCaseEval {
+                seed,
+                rollout_rmse_current: None,
+                rollout_rmse_prior: None,
+                relative_improvement: None,
+                terminated_early: true,
+            });
+            continue;
+        };
+        let system = system_from_ic(&ic_spec, &bounds)?;
+        let result = simulate_with_cfg(
+            system,
+            &cfg,
+            SimOptions {
+                steps: bucket.steps,
+                dt: bucket.dt,
+            },
+        );
+        let usable = !result.terminated_early && result.steps.len() == bucket.steps + 1;
+        if !usable {
+            cases.push(SeedSuiteCaseEval {
+                seed,
+                rollout_rmse_current: None,
+                rollout_rmse_prior: None,
+                relative_improvement: None,
+                terminated_early: result.terminated_early,
+            });
+            continue;
+        }
+        let (rmse_current, _div_current) = rollout_metrics(
+            &current_model,
+            &current_features,
+            &result,
+            &cfg,
+            rollout_integrator,
+        );
+        let rmse_prior = prior_model.as_ref().map(|(model, features)| {
+            let (rmse, _div) = rollout_metrics(model, features, &result, &cfg, rollout_integrator);
+            rmse
+        });
+        let relative_improvement = rmse_prior.and_then(|prior| {
+            (prior.is_finite() && rmse_current.is_finite() && prior > 0.0)
+                .then_some((prior - rmse_current) / prior)
+        });
+        if rmse_current.is_finite() {
+            current_vals.push(rmse_current);
+        }
+        if let Some(v) = rmse_prior.filter(|v| v.is_finite()) {
+            prior_vals.push(v);
+        }
+        if let Some(v) = relative_improvement.filter(|v| v.is_finite()) {
+            relative_vals.push(v);
+        }
+        cases.push(SeedSuiteCaseEval {
+            seed,
+            rollout_rmse_current: Some(rmse_current),
+            rollout_rmse_prior: rmse_prior,
+            relative_improvement,
+            terminated_early: false,
+        });
+    }
+
+    let ci = bootstrap_ci_for_median(
+        &relative_vals,
+        claim_gate.bootstrap_ci,
+        claim_gate.bootstrap_resamples,
+        99173,
+    );
+    Ok(EvaluationAggregateV1 {
+        version: "v1".to_string(),
+        suite_id,
+        claim_gate: claim_gate.as_str().to_string(),
+        bucket,
+        regime: best.regime.clone(),
+        cases,
+        rmse_current_median: median_f64(&current_vals),
+        rmse_prior_median: median_f64(&prior_vals),
+        relative_improvement_median: median_f64(&relative_vals),
+        relative_improvement_mean: mean_f64(&relative_vals),
+        bootstrap_ci_low: ci.map(|(lo, _)| lo),
+        bootstrap_ci_high: ci.map(|(_, hi)| hi),
+        notes,
+    })
+}
+
+fn assess_claim_v1(
+    aggregate: &EvaluationAggregateV1,
+    claim_gate: ClaimGateProfile,
+    benchmark_eval: Option<&BenchmarkEvalV1>,
+    prior_benchmark_eval: Option<&BenchmarkEvalV1>,
+) -> ClaimAssessmentV1 {
+    let mut notes = Vec::new();
+    notes.extend(aggregate.notes.clone());
+    let n_cases = aggregate
+        .cases
+        .iter()
+        .filter(|c| c.relative_improvement.is_some())
+        .count();
+    let rel = aggregate.relative_improvement_median;
+    let ci_lo = aggregate.bootstrap_ci_low;
+    let ci_hi = aggregate.bootstrap_ci_high;
+    let (benchmark_passed, benchmark_rel, _benchmark_curr, _benchmark_prior, benchmark_notes) =
+        evaluate_benchmark_gate(claim_gate, benchmark_eval, prior_benchmark_eval);
+    notes.extend(benchmark_notes);
+    let benchmark_ok = benchmark_passed.unwrap_or(true);
+
+    let high_bar_seed = match (rel, ci_lo) {
+        (Some(r), Some(lo)) => {
+            n_cases >= claim_gate.min_cases && r >= claim_gate.min_relative_improvement && lo > 0.0
+        }
+        _ => false,
+    };
+    let high_bar_passed = high_bar_seed && benchmark_ok;
+
+    let status = if high_bar_passed {
+        ClaimStatus::ConfirmedImprovement
+    } else if benchmark_ok && matches!((rel, ci_hi), (Some(r), Some(hi)) if r > 0.0 && hi > 0.0) {
+        if n_cases < claim_gate.min_cases {
+            notes.push(format!(
+                "directional_only: cases={} < required={}",
+                n_cases, claim_gate.min_cases
+            ));
+        }
+        ClaimStatus::DirectionalTrend
+    } else {
+        ClaimStatus::NoImprovement
+    };
+
+    if n_cases < claim_gate.min_cases {
+        notes.push(format!(
+            "insufficient_cases_for_highbar: {} < {}",
+            n_cases, claim_gate.min_cases
+        ));
+    }
+    if claim_gate.benchmark_required && !benchmark_ok {
+        notes.push("benchmark_first_gate_failed".to_string());
+    }
+
+    ClaimAssessmentV1 {
+        version: "v1".to_string(),
+        status,
+        claim_gate: claim_gate.as_str().to_string(),
+        min_relative_improvement: claim_gate.min_relative_improvement,
+        min_cases: claim_gate.min_cases,
+        benchmark_required: claim_gate.benchmark_required,
+        benchmark_passed,
+        benchmark_relative_improvement: benchmark_rel,
+        relative_improvement_median: rel,
+        bootstrap_ci_low: ci_lo,
+        bootstrap_ci_high: ci_hi,
+        n_cases,
+        high_bar_passed,
+        strict_holdout_passed: high_bar_passed,
+        notes,
+    }
+}
+
+fn render_paper_summary_md(
+    aggregate: &EvaluationAggregateV1,
+    claim: &ClaimAssessmentV1,
+    policy: FactoryPolicySettings,
+) -> String {
+    let mut md = String::new();
+    md.push_str("# Paper Summary\n\n");
+    md.push_str(&format!("- factory_policy: {}\n", policy.kind.as_str()));
+    md.push_str(&format!("- seed_suite: {}\n", aggregate.suite_id));
+    md.push_str(&format!("- claim_gate: {}\n", claim.claim_gate));
+    md.push_str(&format!("- claim_status: {}\n", claim.status.as_str()));
+    md.push_str(&format!(
+        "- median_rmse_current: {}\n",
+        format_opt_f64(aggregate.rmse_current_median)
+    ));
+    md.push_str(&format!(
+        "- median_rmse_prior: {}\n",
+        format_opt_f64(aggregate.rmse_prior_median)
+    ));
+    md.push_str(&format!(
+        "- median_relative_improvement: {}\n",
+        format_opt_f64(claim.relative_improvement_median)
+    ));
+    md.push_str(&format!(
+        "- bootstrap_ci_95: [{}, {}]\n",
+        format_opt_f64(claim.bootstrap_ci_low),
+        format_opt_f64(claim.bootstrap_ci_high)
+    ));
+    md.push_str(&format!(
+        "- high_bar: rel>={:.3}, n_cases>={}, ci_low>0\n",
+        claim.min_relative_improvement, claim.min_cases
+    ));
+    md.push_str(&format!(
+        "- benchmark_required: {}\n",
+        claim.benchmark_required
+    ));
+    md.push_str(&format!(
+        "- benchmark_passed: {}\n",
+        claim
+            .benchmark_passed
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "n/a".to_string())
+    ));
+    md.push_str(&format!(
+        "- benchmark_relative_improvement: {}\n",
+        format_opt_f64(claim.benchmark_relative_improvement)
+    ));
+    md.push_str(&format!(
+        "- strict_holdout_passed: {}\n",
+        claim.strict_holdout_passed
+    ));
+    if !claim.notes.is_empty() {
+        md.push_str("\n## Notes\n");
+        for note in &claim.notes {
+            md.push_str(&format!("- {}\n", note));
+        }
+    }
+    md
+}
+
 #[derive(Clone, Debug)]
 struct BestFactoryCandidate {
     run_id: String,
@@ -4966,10 +6539,16 @@ struct EquationSearchNode {
     visits: usize,
     mean_score: f64,
     best_score: f64,
+    #[serde(default)]
+    score_m2: f64,
+    #[serde(default)]
+    score_stddev: f64,
     last_seen_iter: usize,
     improvements: usize,
     descriptor: EquationDescriptor,
     source_counts: std::collections::BTreeMap<String, usize>,
+    #[serde(default)]
+    seed_counts: std::collections::BTreeMap<u64, usize>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -5039,8 +6618,7 @@ fn load_equation_search_archive(path: &std::path::Path) -> EquationSearchArchive
     if archive.version != EQUATION_SEARCH_ARCHIVE_VERSION {
         eprintln!(
             "equation search archive version mismatch (found {}, expected {}), continuing with defaults where needed",
-            archive.version,
-            EQUATION_SEARCH_ARCHIVE_VERSION
+            archive.version, EQUATION_SEARCH_ARCHIVE_VERSION
         );
         archive.version = EQUATION_SEARCH_ARCHIVE_VERSION.to_string();
     }
@@ -5060,6 +6638,7 @@ fn update_equation_search_archive(
     candidates: &[CandidateSummary],
     feature_names: &[String],
     iteration: usize,
+    seed_bucket: u64,
     max_candidates: usize,
 ) {
     let mut ordered = candidates.iter().collect::<Vec<_>>();
@@ -5074,8 +6653,9 @@ fn update_equation_search_archive(
         if !score.is_finite() {
             continue;
         }
-        let normalized = normalize_equation_text_for_features(&candidate.equation_text, feature_names)
-            .unwrap_or_else(|| candidate.equation_text.clone());
+        let normalized =
+            normalize_equation_text_for_features(&candidate.equation_text, feature_names)
+                .unwrap_or_else(|| candidate.equation_text.clone());
         let descriptor = EquationDescriptor::from_equation_text(&normalized);
         let source = source_from_notes(&candidate.notes);
         archive.total_updates += 1;
@@ -5086,8 +6666,17 @@ fn update_equation_search_archive(
             .find(|node| node.equation_text == normalized)
         {
             let prior_best = node.best_score;
+            let prior_mean = node.mean_score;
             node.visits += 1;
             node.mean_score += (score - node.mean_score) / node.visits as f64;
+            let delta = score - prior_mean;
+            let delta2 = score - node.mean_score;
+            node.score_m2 += delta * delta2;
+            node.score_stddev = if node.visits > 1 {
+                (node.score_m2 / (node.visits as f64 - 1.0)).sqrt()
+            } else {
+                0.0
+            };
             if score + 1e-12 < prior_best {
                 node.best_score = score;
                 node.improvements += 1;
@@ -5095,18 +6684,24 @@ fn update_equation_search_archive(
             node.last_seen_iter = iteration;
             node.descriptor = descriptor;
             *node.source_counts.entry(source).or_insert(0) += 1;
+            *node.seed_counts.entry(seed_bucket).or_insert(0) += 1;
         } else {
             let mut source_counts = std::collections::BTreeMap::new();
             source_counts.insert(source, 1);
+            let mut seed_counts = std::collections::BTreeMap::new();
+            seed_counts.insert(seed_bucket, 1);
             archive.nodes.push(EquationSearchNode {
                 equation_text: normalized,
                 visits: 1,
                 mean_score: score,
                 best_score: score,
+                score_m2: 0.0,
+                score_stddev: 0.0,
                 last_seen_iter: iteration,
                 improvements: 0,
                 descriptor,
                 source_counts,
+                seed_counts,
             });
         }
     }
@@ -5127,13 +6722,19 @@ fn update_equation_search_archive(
     }
 }
 
-fn mcts_uct_score(node: &EquationSearchNode, total_visits: usize, explore_c: f64) -> f64 {
+fn mcts_uct_score(
+    node: &EquationSearchNode,
+    total_visits: usize,
+    explore_c: f64,
+    uncertainty_bonus: f64,
+) -> f64 {
     if !node.best_score.is_finite() {
         return f64::NEG_INFINITY;
     }
     let exploit = 1.0 / (1.0 + node.best_score.max(0.0));
     let explore = ((total_visits.max(1) as f64).ln() / (node.visits as f64 + 1.0)).sqrt();
-    exploit + explore_c * explore
+    let uncertainty = node.score_stddev / (1.0 + node.mean_score.max(0.0));
+    exploit + explore_c * explore + uncertainty_bonus.max(0.0) * uncertainty
 }
 
 fn archive_select_parents_mcts(
@@ -5142,17 +6743,19 @@ fn archive_select_parents_mcts(
     seen: &std::collections::HashSet<String>,
     max_parents: usize,
     explore_c: f64,
+    uncertainty_bonus: f64,
 ) -> Vec<(String, String)> {
     let total_visits = archive.nodes.iter().map(|n| n.visits.max(1)).sum::<usize>();
     let mut scored = Vec::new();
     for node in &archive.nodes {
-        let Some(norm) = normalize_equation_text_for_features(&node.equation_text, feature_names) else {
+        let Some(norm) = normalize_equation_text_for_features(&node.equation_text, feature_names)
+        else {
             continue;
         };
         if seen.contains(&norm) {
             continue;
         }
-        let uct = mcts_uct_score(node, total_visits, explore_c);
+        let uct = mcts_uct_score(node, total_visits, explore_c, uncertainty_bonus);
         if uct.is_finite() {
             scored.push((uct, norm));
         }
@@ -5169,7 +6772,10 @@ fn archive_select_parents_mcts(
         .collect()
 }
 
-fn top_equation_search_nodes(archive: &EquationSearchArchive, k: usize) -> Vec<&EquationSearchNode> {
+fn top_equation_search_nodes(
+    archive: &EquationSearchArchive,
+    k: usize,
+) -> Vec<&EquationSearchNode> {
     archive.nodes.iter().take(k).collect()
 }
 
@@ -5193,6 +6799,10 @@ fn render_equation_search_report_md(
         "- mcts_parent_limit: {}\n",
         settings.mcts_parent_limit
     ));
+    md.push_str(&format!(
+        "- uncertainty_bonus: {}\n",
+        settings.uncertainty_bonus
+    ));
     md.push_str(&format!("- total_updates: {}\n", archive.total_updates));
     md.push_str(&format!("- node_count: {}\n", archive.nodes.len()));
     md.push_str("\n## Top Equations\n");
@@ -5211,11 +6821,13 @@ fn render_equation_search_report_md(
                 .join(",")
         };
         md.push_str(&format!(
-            "{}. best_score={:.6e}, mean_score={:.6e}, visits={}, improvements={}, last_iter={}, descriptor={}, sources={}\n",
+            "{}. best_score={:.6e}, mean_score={:.6e}, std_score={:.6e}, visits={}, seed_coverage={}, improvements={}, last_iter={}, descriptor={}, sources={}\n",
             rank + 1,
             node.best_score,
             node.mean_score,
+            node.score_stddev,
             node.visits,
+            node.seed_counts.len(),
             node.improvements,
             node.last_seen_iter,
             node.descriptor.short_label(),
@@ -5437,6 +7049,45 @@ struct BenchmarkEvalV1 {
     candidate: BenchmarkCandidateRef,
     cases: Vec<BenchmarkCaseEval>,
     aggregate: BenchmarkAggregate,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+struct SensitivitySummaryV1 {
+    version: String,
+    regime: String,
+    rollout_integrator: String,
+    candidate_equation_text: String,
+    perturbation_scale: f64,
+    jacobian_eps: f64,
+    horizon_t: f64,
+    steps: usize,
+    ftle_observed: Option<f64>,
+    ftle_linearized: Option<f64>,
+    relative_error_median: Option<f64>,
+    relative_error_p90: Option<f64>,
+    relative_error_max: Option<f64>,
+    final_observed_norm: f64,
+    final_linearized_norm: f64,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+struct StrictHoldoutReportV1 {
+    version: String,
+    claim_gate: String,
+    benchmark_required: bool,
+    benchmark_passed: Option<bool>,
+    benchmark_relative_improvement: Option<f64>,
+    benchmark_rmse_mean_current: Option<f64>,
+    benchmark_rmse_mean_prior: Option<f64>,
+    seed_suite_relative_improvement_median: Option<f64>,
+    seed_suite_ci_low: Option<f64>,
+    seed_suite_ci_high: Option<f64>,
+    high_bar_passed_seed_suite: bool,
+    strict_holdout_passed: bool,
+    sensitivity_relative_error_median: Option<f64>,
+    sensitivity_ftle_observed: Option<f64>,
     notes: Vec<String>,
 }
 
@@ -6842,6 +8493,10 @@ struct EvaluationTexOptions<'a> {
     benchmark: Option<&'a BenchmarkEvalV1>,
     /// Optional apples-to-apples re-score of the prior best equation on this run's oracle.
     incumbent_on_best_run: Option<&'a IncumbentEvalOnBestRun>,
+    /// Optional sensitivity-equation summary on the current best candidate.
+    sensitivity: Option<&'a SensitivitySummaryV1>,
+    /// Optional strict holdout report combining seed-suite + benchmark-first gate.
+    strict_holdout: Option<&'a StrictHoldoutReportV1>,
 }
 
 fn render_expanded_math_tex(equation_text: &str) -> String {
@@ -7196,6 +8851,24 @@ fn render_evaluation_tex(
             &factory_dir.join("benchmark_eval.json"),
             6000,
         );
+        append_log_excerpt_tex(
+            &mut tex,
+            "prior_benchmark_eval.json (prior-run held-out suite, if available)",
+            &factory_dir.join("prior_benchmark_eval.json"),
+            6000,
+        );
+        append_log_excerpt_tex(
+            &mut tex,
+            "strict_holdout_report.json (benchmark-first claim gate decision)",
+            &factory_dir.join("strict_holdout_report.json"),
+            4000,
+        );
+        append_log_excerpt_tex(
+            &mut tex,
+            "sensitivity_eval.json (tangent linear sensitivity summary)",
+            &factory_dir.join("sensitivity_eval.json"),
+            6000,
+        );
 
         if let Some(best) = current_best {
             let run_dir = factory_dir.join(&best.run_id);
@@ -7298,6 +8971,9 @@ fn render_evaluation_tex(
         for name in [
             "evaluation_history.json",
             "benchmark_eval.json",
+            "prior_benchmark_eval.json",
+            "strict_holdout_report.json",
+            "sensitivity_eval.json",
             "evaluation_llm.md",
             "evaluation_prompt.txt",
             "evaluation_error.txt",
@@ -7412,6 +9088,42 @@ fn render_evaluation_tex(
         }
         tex.push_str("\\bottomrule\n");
         tex.push_str("\\end{tabular}\n\n");
+    }
+
+    if let Some(sens) = opts.sensitivity {
+        tex.push_str("\\subsection*{Sensitivity Equation Diagnostics}\n");
+        tex.push_str("Linearized tangent dynamics check (\\(\\dot{\\delta x}=J_f(x)\\delta x\\)) evaluated on the discovered model.\\\\\n");
+        tex.push_str(&format!(
+            "horizon\\_t={:.6}, steps={}, perturbation\\_scale={:.2e}, jacobian\\_eps={:.2e}.\\\\\n",
+            sens.horizon_t, sens.steps, sens.perturbation_scale, sens.jacobian_eps
+        ));
+        tex.push_str(&format!(
+            "ftle\\_observed={}, ftle\\_linearized={}, rel\\_error\\_median={}, rel\\_error\\_p90={}, rel\\_error\\_max={}.\\\\\n\n",
+            format_opt_f64(sens.ftle_observed),
+            format_opt_f64(sens.ftle_linearized),
+            format_opt_f64(sens.relative_error_median),
+            format_opt_f64(sens.relative_error_p90),
+            format_opt_f64(sens.relative_error_max),
+        ));
+    }
+
+    if let Some(strict) = opts.strict_holdout {
+        tex.push_str("\\subsection*{Strict Holdout Gate (Benchmark-First)}\n");
+        tex.push_str(&format!(
+            "strict\\_holdout\\_passed=\\texttt{{{}}}, benchmark\\_required=\\texttt{{{}}}, benchmark\\_passed=\\texttt{{{}}}.\\\\\n",
+            strict.strict_holdout_passed,
+            strict.benchmark_required,
+            strict
+                .benchmark_passed
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "n/a".to_string())
+        ));
+        tex.push_str(&format!(
+            "benchmark\\_rmse\\_mean\\_current={}, benchmark\\_rmse\\_mean\\_prior={}, benchmark\\_relative\\_improvement={}.\\\\\n\n",
+            format_opt_f64(strict.benchmark_rmse_mean_current),
+            format_opt_f64(strict.benchmark_rmse_mean_prior),
+            format_opt_f64(strict.benchmark_relative_improvement)
+        ));
     }
 
     tex.push_str("\\end{document}\n");
@@ -7748,6 +9460,16 @@ mod tests {
         let forced = force_nonplanar_ic(planar, &bounds, 123);
         assert!(!ic_is_nearly_planar(&forced));
         assert!(forced.notes.contains("forced_nonplanar_z=true"));
+    }
+
+    #[test]
+    fn em_three_body_preset_has_nonzero_charges() {
+        let ic = initial_conditions_from_preset("em-three-body").unwrap();
+        assert_eq!(ic.bodies.len(), 3);
+        assert!(
+            ic.bodies.iter().any(|b| b.charge.abs() > 0.0),
+            "expected charged bodies in em-three-body preset"
+        );
     }
 
     #[test]
@@ -8442,6 +10164,8 @@ mod tests {
                 factory_dir: Some(root.as_path()),
                 benchmark: None,
                 incumbent_on_best_run: None,
+                sensitivity: None,
+                strict_holdout: None,
             },
         );
         for marker in [
@@ -8475,6 +10199,64 @@ mod tests {
         assert!(norm.contains("grav_x"));
         assert!(norm.contains("grav_y"));
         assert!(!norm.contains("foo_x"));
+    }
+
+    #[test]
+    fn parse_factory_policy_and_aliases() {
+        assert_eq!(
+            parse_factory_policy("research_v1"),
+            Some(FactoryPolicy::ResearchV1)
+        );
+        assert_eq!(
+            parse_factory_policy("research"),
+            Some(FactoryPolicy::ResearchV1)
+        );
+        assert_eq!(
+            parse_factory_policy("research_v2_atlas"),
+            Some(FactoryPolicy::ResearchV2Atlas)
+        );
+        assert_eq!(
+            parse_factory_policy("atlas"),
+            Some(FactoryPolicy::ResearchV2Atlas)
+        );
+        assert_eq!(parse_factory_policy("legacy"), Some(FactoryPolicy::Legacy));
+        assert_eq!(parse_factory_policy("unknown"), None);
+    }
+
+    #[test]
+    fn parse_claim_gate_and_seed_suite_aliases() {
+        let gate = parse_claim_gate_profile("highbar").expect("claim gate");
+        assert_eq!(gate.as_str(), "highbar_v1");
+        assert_eq!(gate.min_cases, 10);
+        let gate2 = parse_claim_gate_profile("benchmark_first").expect("claim gate v2");
+        assert_eq!(gate2.as_str(), "highbar_v2_benchmark_first");
+        assert!(gate2.benchmark_required);
+        assert!(parse_claim_gate_profile("unknown").is_none());
+
+        assert_eq!(
+            parse_seed_suite("deterministic_v1"),
+            Some(SeedSuite::DeterministicV1)
+        );
+        assert_eq!(
+            parse_seed_suite("default"),
+            Some(SeedSuite::DeterministicV1)
+        );
+        assert_eq!(parse_seed_suite("unknown"), None);
+    }
+
+    #[test]
+    fn parse_model_family_aliases() {
+        assert_eq!(parse_model_family("auto"), Some(ModelFamilyChoice::Auto));
+        assert_eq!(
+            parse_model_family("global"),
+            Some(ModelFamilyChoice::Global)
+        );
+        assert_eq!(parse_model_family("atlas"), Some(ModelFamilyChoice::Atlas));
+        assert_eq!(
+            parse_model_family("piecewise"),
+            Some(ModelFamilyChoice::Atlas)
+        );
+        assert_eq!(parse_model_family("unknown"), None);
     }
 
     #[test]
@@ -8534,6 +10316,7 @@ mod tests {
             &[mk_candidate(0.6, 1.0, "grid")],
             &feature_names,
             1,
+            101,
             8,
         );
         assert_eq!(archive.total_updates, 1);
@@ -8547,6 +10330,7 @@ mod tests {
             &[mk_candidate(0.2, 0.5, "equation_ga")],
             &feature_names,
             2,
+            211,
             8,
         );
         assert_eq!(archive.total_updates, 2);
@@ -8558,8 +10342,12 @@ mod tests {
         assert!(node.best_score < first_best);
         assert!(node.mean_score.is_finite());
         assert!(node.mean_score >= node.best_score);
+        assert!(node.score_stddev.is_finite());
+        assert!(node.score_stddev > 0.0);
         assert_eq!(node.source_counts.get("grid"), Some(&1));
         assert_eq!(node.source_counts.get("equation_ga"), Some(&1));
+        assert_eq!(node.seed_counts.get(&101), Some(&1));
+        assert_eq!(node.seed_counts.get(&211), Some(&1));
     }
 
     #[test]
@@ -8573,10 +10361,13 @@ mod tests {
             visits,
             mean_score: best_score + 0.05,
             best_score,
+            score_m2: 0.0,
+            score_stddev: 0.0,
             last_seen_iter: 1,
             improvements: 0,
             descriptor: EquationDescriptor::from_equation_text(eq),
             source_counts: std::collections::BTreeMap::from([("seed".to_string(), 1)]),
+            seed_counts: std::collections::BTreeMap::from([(7, 1)]),
         };
         let archive = EquationSearchArchive {
             version: EQUATION_SEARCH_ARCHIVE_VERSION.to_string(),
@@ -8592,7 +10383,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         seen.insert(seen_eq_b.clone());
 
-        let selected = archive_select_parents_mcts(&archive, &feature_names, &seen, 2, 0.7);
+        let selected = archive_select_parents_mcts(&archive, &feature_names, &seen, 2, 0.7, 0.0);
         assert!(selected.len() <= 2);
         assert!(!selected.iter().any(|(_kind, eq)| eq == &seen_eq_b));
         if !selected.is_empty() {
@@ -8611,11 +10402,12 @@ mod tests {
             .nodes
             .iter()
             .filter_map(|node| {
-                let norm = normalize_equation_text_for_features(&node.equation_text, &feature_names)?;
+                let norm =
+                    normalize_equation_text_for_features(&node.equation_text, &feature_names)?;
                 if seen.contains(&norm) {
                     None
                 } else {
-                    Some((mcts_uct_score(node, total_visits, 0.7), norm))
+                    Some((mcts_uct_score(node, total_visits, 0.7, 0.0), norm))
                 }
             })
             .collect::<Vec<_>>();
@@ -8630,6 +10422,133 @@ mod tests {
             .map(|(_kind, eq)| eq)
             .collect::<Vec<_>>();
         assert_eq!(selected_eqs, expected_eqs);
+    }
+
+    #[test]
+    fn mcts_uct_score_includes_uncertainty_bonus() {
+        let stable = EquationSearchNode {
+            equation_text: "ax=+1.000000*grav_x ; ay=+1.000000*grav_y ; az=+1.000000*grav_z"
+                .to_string(),
+            visits: 5,
+            mean_score: 0.3,
+            best_score: 0.2,
+            score_m2: 0.0,
+            score_stddev: 0.01,
+            last_seen_iter: 1,
+            improvements: 0,
+            descriptor: EquationDescriptor::from_equation_text(
+                "ax=+1.000000*grav_x ; ay=+1.000000*grav_y ; az=+1.000000*grav_z",
+            ),
+            source_counts: std::collections::BTreeMap::from([("grid".to_string(), 1)]),
+            seed_counts: std::collections::BTreeMap::from([(1, 1)]),
+        };
+        let uncertain = EquationSearchNode {
+            score_stddev: 0.5,
+            ..stable.clone()
+        };
+        let total_visits = 20;
+        let stable_no_bonus = mcts_uct_score(&stable, total_visits, 0.4, 0.0);
+        let uncertain_no_bonus = mcts_uct_score(&uncertain, total_visits, 0.4, 0.0);
+        assert!(
+            (stable_no_bonus - uncertain_no_bonus).abs() < 1e-12,
+            "without uncertainty bonus they should be tied"
+        );
+        let stable_with_bonus = mcts_uct_score(&stable, total_visits, 0.4, 0.5);
+        let uncertain_with_bonus = mcts_uct_score(&uncertain, total_visits, 0.4, 0.5);
+        assert!(
+            uncertain_with_bonus > stable_with_bonus,
+            "uncertainty bonus should prefer higher estimated variance"
+        );
+    }
+
+    #[test]
+    fn assess_claim_v1_classifies_gate_statuses() {
+        let gate = ClaimGateProfile::highbar_v1();
+        let mk_aggregate =
+            |rel: f64, ci_low: f64, ci_high: f64, n_cases: usize| EvaluationAggregateV1 {
+                version: "v1".to_string(),
+                suite_id: "deterministic_v1".to_string(),
+                claim_gate: gate.as_str().to_string(),
+                bucket: BucketKey {
+                    steps: 200,
+                    dt: 0.01,
+                },
+                regime: "gravity_only".to_string(),
+                cases: (0..n_cases)
+                    .map(|k| SeedSuiteCaseEval {
+                        seed: 100 + k as u64,
+                        rollout_rmse_current: Some(0.09),
+                        rollout_rmse_prior: Some(0.1),
+                        relative_improvement: Some(rel),
+                        terminated_early: false,
+                    })
+                    .collect(),
+                rmse_current_median: Some(0.09),
+                rmse_prior_median: Some(0.1),
+                relative_improvement_median: Some(rel),
+                relative_improvement_mean: Some(rel),
+                bootstrap_ci_low: Some(ci_low),
+                bootstrap_ci_high: Some(ci_high),
+                notes: vec![],
+            };
+
+        let confirmed = assess_claim_v1(&mk_aggregate(0.08, 0.01, 0.12, 12), gate, None, None);
+        assert_eq!(confirmed.status, ClaimStatus::ConfirmedImprovement);
+        assert!(confirmed.high_bar_passed);
+
+        let directional = assess_claim_v1(&mk_aggregate(0.02, -0.03, 0.06, 12), gate, None, None);
+        assert_eq!(directional.status, ClaimStatus::DirectionalTrend);
+        assert!(!directional.high_bar_passed);
+
+        let none = assess_claim_v1(&mk_aggregate(-0.01, -0.04, -0.001, 12), gate, None, None);
+        assert_eq!(none.status, ClaimStatus::NoImprovement);
+        assert!(!none.high_bar_passed);
+    }
+
+    #[test]
+    fn assess_claim_v1_benchmark_first_requires_benchmark_artifact() {
+        let gate = ClaimGateProfile::highbar_v2_benchmark_first();
+        let aggregate = EvaluationAggregateV1 {
+            version: "v1".to_string(),
+            suite_id: "deterministic_v1".to_string(),
+            claim_gate: gate.as_str().to_string(),
+            bucket: BucketKey {
+                steps: 200,
+                dt: 0.01,
+            },
+            regime: "gravity_only".to_string(),
+            cases: (0..12)
+                .map(|k| SeedSuiteCaseEval {
+                    seed: 100 + k as u64,
+                    rollout_rmse_current: Some(0.09),
+                    rollout_rmse_prior: Some(0.1),
+                    relative_improvement: Some(0.08),
+                    terminated_early: false,
+                })
+                .collect(),
+            rmse_current_median: Some(0.09),
+            rmse_prior_median: Some(0.1),
+            relative_improvement_median: Some(0.08),
+            relative_improvement_mean: Some(0.08),
+            bootstrap_ci_low: Some(0.01),
+            bootstrap_ci_high: Some(0.1),
+            notes: vec![],
+        };
+        let claim = assess_claim_v1(&aggregate, gate, None, None);
+        assert_eq!(claim.status, ClaimStatus::NoImprovement);
+        assert_eq!(claim.benchmark_passed, Some(false));
+        assert!(!claim.strict_holdout_passed);
+    }
+
+    #[test]
+    fn bootstrap_ci_for_median_handles_12_value_suite_without_oob() {
+        let values = [
+            -0.05, -0.03, -0.02, -0.01, 0.0, 0.01, 0.02, 0.025, 0.03, 0.04, 0.05, 0.06,
+        ];
+        let ci = bootstrap_ci_for_median(&values, 0.95, 2000, 12345).expect("bootstrap ci");
+        assert!(ci.0.is_finite());
+        assert!(ci.1.is_finite());
+        assert!(ci.0 <= ci.1);
     }
 
     fn mk_eval_input_with_notes(

@@ -108,7 +108,8 @@ pub fn build_sidecar(
 }
 
 pub fn write_sidecar<W: Write>(mut writer: W, sidecar: &Sidecar) -> io::Result<()> {
-    let json = serde_json::to_string_pretty(sidecar).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let json = serde_json::to_string_pretty(sidecar)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     writer.write_all(json.as_bytes())
 }
 
@@ -120,17 +121,21 @@ fn hash_header(header: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_sidecar, hash_header, Sidecar};
+    use super::{Sidecar, build_sidecar, hash_header};
     use crate::config::Config;
+    use crate::diagnostics::Diagnostics;
+    use crate::math::vec3::Vec3;
+    use crate::regime::RegimeDiagnostics;
     use crate::sim::{EncounterEvent, SimResult, SimStats, SimStep};
     use crate::state::{Body, State, System};
-    use crate::math::vec3::Vec3;
-    use crate::diagnostics::Diagnostics;
-    use crate::regime::RegimeDiagnostics;
 
     fn dummy_result() -> SimResult {
         let system = System::new(
-            [Body::new(1.0, 0.0), Body::new(0.0, 0.0), Body::new(0.0, 0.0)],
+            [
+                Body::new(1.0, 0.0),
+                Body::new(0.0, 0.0),
+                Body::new(0.0, 0.0),
+            ],
             State::new([Vec3::zero(); 3], [Vec3::zero(); 3]),
         );
         let step = SimStep {
@@ -201,7 +206,8 @@ mod tests {
             },
             "initial_state": null
         });
-        let decoded: Sidecar = serde_json::from_value(legacy).expect("should decode legacy sidecar");
+        let decoded: Sidecar =
+            serde_json::from_value(legacy).expect("should decode legacy sidecar");
         assert!(decoded.requested_steps.is_none());
         assert!(decoded.requested_dt.is_none());
         assert!(!decoded.terminated_early);

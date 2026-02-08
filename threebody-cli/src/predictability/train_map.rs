@@ -3,9 +3,9 @@ use std::io::{self, BufRead};
 use std::path::PathBuf;
 
 use serde::Serialize;
-use threebody_discover::equation::{score_equation, Equation, EquationScore, FitnessHeuristic};
-use threebody_discover::sparse::{stls_path_search, StlsConfig};
 use threebody_discover::Dataset;
+use threebody_discover::equation::{Equation, EquationScore, FitnessHeuristic, score_equation};
+use threebody_discover::sparse::{StlsConfig, stls_path_search};
 
 use super::extract::EncounterRecord;
 use super::features::{PairId, PairMetrics};
@@ -155,7 +155,9 @@ fn pair_key(pair: PairId) -> String {
     format!("{}{}", pair.i, pair.j)
 }
 
-fn build_dataset_rows(records: &[EncounterRecord]) -> (Vec<String>, Vec<Vec<f64>>, Vec<f64>, Vec<f64>) {
+fn build_dataset_rows(
+    records: &[EncounterRecord],
+) -> (Vec<String>, Vec<Vec<f64>>, Vec<f64>, Vec<f64>) {
     let pairs = [PairId::new(0, 1), PairId::new(0, 2), PairId::new(1, 2)];
     let mut feature_names = Vec::new();
     feature_names.push("const".to_string());
@@ -187,7 +189,11 @@ fn build_dataset_rows(records: &[EncounterRecord]) -> (Vec<String>, Vec<Vec<f64>
         row.push(d);
         row.push(inv_d);
         row.push(inv_d2);
-        row.push(if r.labels.event_pair_equals_pre_energy_pair { 1.0 } else { 0.0 });
+        row.push(if r.labels.event_pair_equals_pre_energy_pair {
+            1.0
+        } else {
+            0.0
+        });
 
         for p in &pairs {
             let Some(m) = find_pair_metrics(&r.pre.pairs, *p) else {

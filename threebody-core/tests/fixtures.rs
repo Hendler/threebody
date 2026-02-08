@@ -3,8 +3,8 @@ mod tolerances;
 use std::fs;
 
 use threebody_core::config::{Config, IntegratorKind};
-use threebody_core::integrators::leapfrog::Leapfrog;
 use threebody_core::integrators::Integrator;
+use threebody_core::integrators::leapfrog::Leapfrog;
 use threebody_core::math::vec3::Vec3;
 use threebody_core::state::{Body, State, System};
 
@@ -20,8 +20,16 @@ fn gravity_only_fixture_matches_expected() {
     let cfg: Config = serde_json::from_str(&cfg_json).unwrap();
     assert_eq!(cfg.integrator.kind, IntegratorKind::Leapfrog);
 
-    let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(0.0, 0.0)];
-    let pos = [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::zero()];
+    let bodies = [
+        Body::new(1.0, 0.0),
+        Body::new(1.0, 0.0),
+        Body::new(0.0, 0.0),
+    ];
+    let pos = [
+        Vec3::new(-1.0, 0.0, 0.0),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::zero(),
+    ];
     let vel = [Vec3::zero(); 3];
     let system = System::new(bodies, State::new(pos, vel));
 

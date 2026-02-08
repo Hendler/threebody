@@ -10,7 +10,7 @@ use threebody_core::state::Body;
 
 use crate::predictability::PREDICTABILITY_VERSION;
 
-use super::features::{all_pair_metrics, energy_pair, min_pair, PairId, PairMetrics};
+use super::features::{PairId, PairMetrics, all_pair_metrics, energy_pair, min_pair};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Snapshot {
@@ -85,9 +85,9 @@ pub(crate) fn run_extract(
     let cfg = sidecar.config;
     cfg.validate().map_err(anyhow::Error::msg)?;
 
-    let init = sidecar
-        .initial_state
-        .ok_or_else(|| anyhow::anyhow!("sidecar missing initial_state; rerun simulate to regenerate"))?;
+    let init = sidecar.initial_state.ok_or_else(|| {
+        anyhow::anyhow!("sidecar missing initial_state; rerun simulate to regenerate")
+    })?;
     let mut bodies = [Body::new(0.0, 0.0); 3];
     for i in 0..3 {
         bodies[i] = Body::new(init.mass[i], init.charge[i]);
@@ -115,11 +115,7 @@ pub(crate) fn run_extract(
     };
     fs::write(&summary_out, serde_json::to_string_pretty(&summary)?)?;
 
-    eprintln!(
-        "wrote {} events to {}",
-        encounters.len(),
-        out.display()
-    );
+    eprintln!("wrote {} events to {}", encounters.len(), out.display());
     eprintln!("summary: {}", summary_out.display());
     Ok(())
 }
@@ -182,20 +178,13 @@ fn extract_encounters(
         let event_pair_equals_pre_energy_pair = event_pair == pre_energy_pair;
         let event_pair_equals_post_energy_pair = event_pair == post_energy_pair;
 
-        let pre_event_pair = pre
-            .pairs
-            .iter()
-            .find(|p| p.pair == event_pair)
-            .cloned();
-        let post_event_pair = post
-            .pairs
-            .iter()
-            .find(|p| p.pair == event_pair)
-            .cloned();
-        let delta_event_pair_specific_energy = match (pre_event_pair.as_ref(), post_event_pair.as_ref()) {
-            (Some(a), Some(b)) => b.specific_energy - a.specific_energy,
-            _ => 0.0,
-        };
+        let pre_event_pair = pre.pairs.iter().find(|p| p.pair == event_pair).cloned();
+        let post_event_pair = post.pairs.iter().find(|p| p.pair == event_pair).cloned();
+        let delta_event_pair_specific_energy =
+            match (pre_event_pair.as_ref(), post_event_pair.as_ref()) {
+                (Some(a), Some(b)) => b.specific_energy - a.specific_energy,
+                _ => 0.0,
+            };
         let delta_event_pair_h = match (pre_event_pair.as_ref(), post_event_pair.as_ref()) {
             (Some(a), Some(b)) => b.h - a.h,
             _ => 0.0,
@@ -259,7 +248,12 @@ fn local_minima_indices(values: &[f64]) -> Vec<usize> {
     indices
 }
 
-fn window_indices(times: &[f64], center_idx: usize, pre_window: f64, post_window: f64) -> Option<(usize, usize)> {
+fn window_indices(
+    times: &[f64],
+    center_idx: usize,
+    pre_window: f64,
+    post_window: f64,
+) -> Option<(usize, usize)> {
     if times.is_empty() || center_idx >= times.len() {
         return None;
     }
@@ -298,8 +292,8 @@ fn window_indices(times: &[f64], center_idx: usize, pre_window: f64, post_window
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_encounters, local_minima_indices, window_indices};
     use super::super::features::PairId;
+    use super::{extract_encounters, local_minima_indices, window_indices};
     use threebody_core::config::Config;
     use threebody_core::diagnostics::Diagnostics;
     use threebody_core::math::vec3::Vec3;
@@ -353,7 +347,11 @@ mod tests {
     #[test]
     fn extract_encounters_finds_single_event_and_features() {
         let cfg = Config::default();
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(1.0, 0.0)];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(1.0, 0.0),
+            Body::new(1.0, 0.0),
+        ];
 
         // Construct a trajectory where pair (0,1) distance dips at step 5.
         let d: Vec<f64> = vec![2.0, 1.5, 1.0, 0.6, 0.4, 0.3, 0.4, 0.6, 1.0, 1.5, 2.0];

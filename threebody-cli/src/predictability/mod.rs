@@ -157,7 +157,8 @@ pub fn run(cmd: PredictabilityCommand) -> anyhow::Result<()> {
             no_em,
             no_gravity,
         } => ensemble::run_ensemble(
-            config, ic, out_dir, n, sigma_pos, sigma_vel, seed, steps, dt, mode, em, no_em, no_gravity,
+            config, ic, out_dir, n, sigma_pos, sigma_vel, seed, steps, dt, mode, em, no_em,
+            no_gravity,
         ),
         PredictabilityCommand::Detect {
             ensemble_dir,
@@ -166,7 +167,13 @@ pub fn run(cmd: PredictabilityCommand) -> anyhow::Result<()> {
             min_mode_frac,
             window,
         } => detect::run_detect(ensemble_dir, out, summary_out, min_mode_frac, window),
-        PredictabilityCommand::TrainMap { encounters, out, seed } => train_map::run_train_map(encounters, out, seed),
-        PredictabilityCommand::Forecast { .. } => anyhow::bail!("predictability forecast not implemented yet"),
+        PredictabilityCommand::TrainMap {
+            encounters,
+            out,
+            seed,
+        } => train_map::run_train_map(encounters, out, seed),
+        PredictabilityCommand::Forecast { .. } => {
+            anyhow::bail!("predictability forecast not implemented yet")
+        }
     }
 }

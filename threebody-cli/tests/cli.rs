@@ -1,11 +1,15 @@
 use std::process::Command;
 use std::{env, fs};
 
-fn start_openai_chat_stub() -> Option<(std::net::SocketAddr, std::thread::JoinHandle<()>, std::sync::Arc<std::sync::atomic::AtomicBool>)> {
+fn start_openai_chat_stub() -> Option<(
+    std::net::SocketAddr,
+    std::thread::JoinHandle<()>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+)> {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
     use std::time::Duration;
 
@@ -134,7 +138,9 @@ fn start_openai_chat_stub() -> Option<(std::net::SocketAddr, std::thread::JoinHa
             respond(stream, ic_json);
         } else if prompt.contains("academic reviewer evaluating candidate equations") {
             respond(stream, judge_json);
-        } else if prompt.contains("writing a short evaluation of an automated equation-discovery run") {
+        } else if prompt
+            .contains("writing a short evaluation of an automated equation-discovery run")
+        {
             respond(stream, eval_md);
         } else {
             respond(stream, "{}");
@@ -146,9 +152,7 @@ fn start_openai_chat_stub() -> Option<(std::net::SocketAddr, std::thread::JoinHa
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => return None,
         Err(err) => panic!("bind stub server: {err}"),
     };
-    listener
-        .set_nonblocking(true)
-        .expect("set nonblocking");
+    listener.set_nonblocking(true).expect("set nonblocking");
     let addr = listener.local_addr().expect("local addr");
     let running = Arc::new(AtomicBool::new(true));
     let running_thread = running.clone();
@@ -366,10 +370,7 @@ fn factory_runs_once_with_mock_llm() {
 #[test]
 fn factory_injects_equation_ga_candidates_and_uses_elite_equations_for_ic_notes() {
     let exe = env!("CARGO_BIN_EXE_threebody-cli");
-    let tmp_dir = env::temp_dir().join(format!(
-        "threebody_factory_eq_ga_{}",
-        std::process::id()
-    ));
+    let tmp_dir = env::temp_dir().join(format!("threebody_factory_eq_ga_{}", std::process::id()));
     if tmp_dir.exists() {
         let _ = fs::remove_dir_all(&tmp_dir);
     }
@@ -415,22 +416,28 @@ fn factory_injects_equation_ga_candidates_and_uses_elite_equations_for_ic_notes(
         "expected elite-equation notes in IC request"
     );
 
-    let discovery = fs::read_to_string(tmp_dir.join("run_002").join("discovery.json")).expect("discovery.json");
+    let discovery =
+        fs::read_to_string(tmp_dir.join("run_002").join("discovery.json")).expect("discovery.json");
     let discovery_v: serde_json::Value = serde_json::from_str(&discovery).unwrap();
     let vector_candidates = discovery_v
         .get("vector_candidates")
         .and_then(|v| v.as_array())
         .expect("vector_candidates array");
     let has_mutant = vector_candidates.iter().any(|c| {
-        c.get("notes").and_then(|v| v.as_array()).map_or(false, |arr| {
-            arr.iter().any(|n| {
-                n.as_str()
-                    .unwrap_or_default()
-                    .contains("kind=equation_ga_mutant")
+        c.get("notes")
+            .and_then(|v| v.as_array())
+            .map_or(false, |arr| {
+                arr.iter().any(|n| {
+                    n.as_str()
+                        .unwrap_or_default()
+                        .contains("kind=equation_ga_mutant")
+                })
             })
-        })
     });
-    assert!(has_mutant, "expected at least one equation_ga_mutant candidate");
+    assert!(
+        has_mutant,
+        "expected at least one equation_ga_mutant candidate"
+    );
 
     let _ = fs::remove_dir_all(&tmp_dir);
 }
@@ -446,7 +453,16 @@ fn conflicting_em_flags_fail() {
 
     let output = Command::new(exe)
         .current_dir(&tmp_dir)
-        .args(["simulate", "--em", "--no-em", "--steps", "1", "--dt", "0.01", "--dry-run"])
+        .args([
+            "simulate",
+            "--em",
+            "--no-em",
+            "--steps",
+            "1",
+            "--dt",
+            "0.01",
+            "--dry-run",
+        ])
         .output()
         .expect("run conflicting flags");
 
@@ -601,8 +617,19 @@ fn bench_em_writes_suite_and_results() {
 
     assert!(out_dir.join("RESULTS.md").exists());
     assert!(out_dir.join("suite.json").exists());
-    assert!(out_dir.join("factory").join("evaluation_input.json").exists());
-    assert!(out_dir.join("factory").join("run_001").join("report.md").exists());
+    assert!(
+        out_dir
+            .join("factory")
+            .join("evaluation_input.json")
+            .exists()
+    );
+    assert!(
+        out_dir
+            .join("factory")
+            .join("run_001")
+            .join("report.md")
+            .exists()
+    );
 }
 
 #[test]
@@ -637,7 +664,7 @@ fn quickstart_command_runs() {
     assert!(factory_dir.join("evaluation.md").exists());
     assert!(factory_dir.join("evaluation.tex").exists());
     assert!(factory_dir.join("evaluation_history.json").exists());
- }
+}
 
 #[test]
 fn quickstart_command_runs_with_require_llm_against_stub() {
@@ -645,7 +672,9 @@ fn quickstart_command_runs_with_require_llm_against_stub() {
     use std::sync::atomic::Ordering;
 
     let Some((addr, handle, running)) = start_openai_chat_stub() else {
-        eprintln!("skipping require-llm stub test (loopback sockets not permitted in this environment)");
+        eprintln!(
+            "skipping require-llm stub test (loopback sockets not permitted in this environment)"
+        );
         return;
     };
 

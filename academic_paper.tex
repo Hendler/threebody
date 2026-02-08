@@ -27,6 +27,10 @@ We propose a two-system approach:
 
 This paper describes the architecture, numerical methods, and discovery methodology, and it explicitly lists modeling assumptions and unresolved issues.
 
+\subsection*{Reader guide (physicists and novice readers)}
+For physicists: Sections 2--3 define the implemented force model and numerical/discovery pipeline precisely enough to audit assumptions, approximations, and reproducibility artifacts.
+For novice readers: the workflow is ``simulate first, then discover'' --- we generate trusted trajectories with a strict simulator, ask sparse regression/search to propose simple equations, and only keep equations that roll out accurately on new tests.
+
 \section{Simulator (``Oracle'') Design}
 \subsection{State, coordinate choices, and invariants}
 The simulator evolves three bodies indexed by $i \in \{1,2,3\}$ with:
@@ -204,15 +208,17 @@ For each candidate equation $e$, we define a scalar score
 \begin{equation*}
 s(e)=\mathrm{RMSE}_{\mathrm{rollout}}(e)+0.1\log(1+\mathrm{MSE}(e))+10^{-3}\,\mathrm{complexity}(e).
 \end{equation*}
-Each iteration updates an archive with the top-$K$ candidates (default $K=12$), storing per-equation visit count $n(e)$, mean score $\bar{s}(e)$, and best score $s^\star(e)$.
+Each iteration updates an archive with the top-$K$ candidates (default $K=12$), storing per-equation visit count $n(e)$, mean score $\bar{s}(e)$, best score $s^\star(e)$, score dispersion estimate $\hat{\sigma}(e)$, and seed-coverage counts.
 
 Archive parent selection uses a UCT-like priority
 \begin{equation*}
-u(e)=\frac{1}{1+s^\star(e)}+c\sqrt{\frac{\log(1+N)}{1+n(e)}},
+u(e)=\frac{1}{1+s^\star(e)}+c\sqrt{\frac{\log(1+N)}{1+n(e)}}+\beta\frac{\hat{\sigma}(e)}{1+\bar{s}(e)},
 \end{equation*}
-where $N$ is the archive total visit count and $c$ is an exploration constant (default $c=0.4$). The top-$M$ archive parents (default $M=2$) are injected into the equation-mutation pool each iteration after normalization and deduplication.
+where $N$ is the archive total visit count, $c$ is an exploration constant (default $c=0.4$), and $\beta$ is an uncertainty bonus (default $\beta=0.2$ under the \texttt{research\_v1} policy). The top-$M$ archive parents (default $M=2$) are injected into the equation-mutation pool each iteration after normalization and deduplication.
 
-This adds explicit search memory and reproducible artifacts (\texttt{equation\_search\_archive.json}, \texttt{equation\_search\_report.md}) without changing the primary selection criterion (numeric rollout metrics).
+We also added an active initial-condition heuristic: when multiple top equations exist, we score candidate IC seeds by disagreement among their predicted $t=0$ accelerations and preferentially sample higher-disagreement seeds. This improves equation discrimination pressure without changing the final numeric ranking rule.
+
+This adds explicit search memory and reproducible artifacts (\texttt{equation\_search\_archive.json}, \texttt{equation\_search\_report.md}, \texttt{policy\_effective.json}) without changing the primary selection criterion (numeric rollout metrics).
 
 \subsection{What counts as ``predicts well''}
 Pointwise acceleration fit is not sufficient. We evaluate:
@@ -251,6 +257,7 @@ The systems are controlled by CLI:
 The factory loop operationalizes a scientific workflow: (1) propose initial conditions, (2) simulate, (3) discover equations, (4) judge results under a fixed rubric, and (5) decide whether to continue. The LLM assists only in steps (1) and (4), and all artifacts (config, initial conditions, prompts, responses, metrics) are saved per iteration to ensure reproducibility and auditability.
 At the end of a run, we additionally render reproducible evaluation artifacts (Markdown and LaTeX) that record the best discovered equations (exact text), the best-run initial conditions, and a best-vs-history comparison over prior local attempts. We also save machine-readable numeric evidence: per-iteration rollout error curves (\texttt{rollout\_trace.json}) and a fixed held-out benchmark report (\texttt{benchmark\_eval.json}). The global best-results ledger is also updated to capture the current incumbent per simulation bucket.
 The LaTeX evaluation is designed for quick human review: it ends with a compact end-of-run summary and an evidence appendix that embeds small, truncated excerpts from key logs (deterministic executive summary plus optional LLM narrative), with footnotes pointing to the corresponding raw artifact files.
+When \texttt{publish\_report} is enabled, we additionally compute a deterministic seed-suite aggregate (\texttt{evaluation\_aggregate.json}), a conservative claim classifier (\texttt{claim\_assessment.json}), and a paper-ready concise summary (\texttt{paper\_summary.md}). The claim gate currently uses a high bar (\texttt{highbar\_v1}): minimum relative-improvement threshold, minimum usable case count, and bootstrap confidence-interval checks before allowing ``confirmed improvement'' language.
 
 \subsection{Robust I/O design}
 We explicitly fixed a key fragility: rigid CSV schemas break as output evolves. We therefore parse by header name and extract only needed columns for any given task. This enables rapid iteration.
@@ -283,11 +290,73 @@ We ran a controlled local sweep (8 factory iterations, STLS, \texttt{three-body}
 \end{itemize}
 Cross-seed verification (two additional seeds) showed no measurable predictive advantage between prior defaults and tuned settings; best and mean rollout RMSE were numerically identical in those checks. Therefore, we treat the current change as a search-efficiency and reporting improvement, not evidence of a robust accuracy breakthrough.
 
+\subsection{Current status of the claim gate}
+In a one-iteration smoke run of the updated pipeline (\texttt{publish\_report=true}), the generated claim artifact reported \texttt{claim\_status=no\_improvement} with \texttt{n\_cases=0}, because no comparable prior model was available for relative-improvement computation. This is expected behavior: the gate intentionally refuses strong claims when baseline evidence is missing or insufficient.
+
+\subsection{Claim-gated legacy vs.\ research comparison (matrix run)}
+On February 8, 2026, we ran a 5-case paired matrix with clean buckets (3 factory iterations per run, STLS, LLM off, deterministic 12-seed claim suite). For each case, we first ran \texttt{legacy}, then \texttt{research\_v1} with the same seed and bucket.
+
+\begin{center}
+\begin{tabular}{lrrrrr}
+\hline
+case & seed & steps & RMSE$_\text{legacy}$ & RMSE$_\text{research}$ & $\Delta$ (research-prior) \\
+\hline
+1 & 5151 & 180 & $1.0141\times 10^{-2}$ & $1.0141\times 10^{-2}$ & $0.0$ \\
+2 & 6161 & 181 & $1.2134\times 10^{-2}$ & $1.2134\times 10^{-2}$ & $0.0$ \\
+3 & 7171 & 182 & $2.0797\times 10^{-2}$ & $2.0797\times 10^{-2}$ & $0.0$ \\
+4 & 8181 & 183 & $1.1167\times 10^{-2}$ & $1.1355\times 10^{-2}$ & $1.8847\times 10^{-4}$ \\
+5 & 9191 & 184 & $1.1744\times 10^{-2}$ & $1.1744\times 10^{-2}$ & $\approx 0$ \\
+\hline
+\end{tabular}
+\end{center}
+
+Aggregate outcomes:
+\begin{itemize}
+\item Mean $\Delta$ (research-prior) $=3.77\times 10^{-5}$, median $\Delta=0$.
+\item 4/5 cases were exactly equal within floating-point tolerance; 1/5 was slightly worse.
+\item Claim gate output was \texttt{no\_improvement} in 5/5 cases, with 0/5 high-bar passes.
+\item In all 5 cases, the top equation text selected by \texttt{research\_v1} matched the prior baseline equation.
+\end{itemize}
+
+For physicists: this suggests that, in these gravity-only deterministic settings, the current policy-level exploration knobs did not change the dominant sparse support selected by the solver.
+
+In plain language for novice readers: in this test matrix, the newer search policy did not beat the older one. The system correctly reported that as ``no improvement'' instead of overstating progress.
+
+\subsection{EM-active paired matrix (new run)}
+To test a genuinely EM-active setting, on February 8, 2026 we ran a second 5-case paired matrix with \texttt{--em}, a charged preset (\texttt{em-three-body}), and the EM-oriented feature library (\texttt{em\_fields}); each pair again used identical seed and bucket, with \texttt{legacy} first and \texttt{research\_v1} second.
+
+The mean EM-to-gravity acceleration ratio on the research best runs was $1.605$ (range $[1.603,1.607]$), so these trajectories were not gravity-dominated.
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\hline
+case & seed & $\Delta$ RMSE (research-prior) & $\Delta$ benchmark RMSE & claim status \\
+\hline
+1 & 2301 & $0.0$ & $0.0$ & no\_improvement \\
+2 & 2401 & $-1.528\times 10^{-2}$ & $+5.001\times 10^{-1}$ & directional\_trend \\
+3 & 2501 & $\approx 0$ & $0.0$ & no\_improvement \\
+4 & 2601 & $-8.013\times 10^{-4}$ & $0.0$ & no\_improvement \\
+5 & 2701 & $0.0$ & $0.0$ & no\_improvement \\
+\hline
+\end{tabular}
+\end{center}
+
+Aggregate outcomes:
+\begin{itemize}
+\item Mean $\Delta$ RMSE (research-prior) $=-3.22\times 10^{-3}$, median $\Delta \approx 0$.
+\item Mean $\Delta$ benchmark RMSE $=+1.00\times 10^{-1}$, median $\Delta=0$.
+\item Claim gate output: 4/5 \texttt{no\_improvement}, 1/5 \texttt{directional\_trend}, and 0/5 high-bar passes.
+\end{itemize}
+
+For physicists: one case improved within-run rollout RMSE but degraded on the held-out EM benchmark, indicating local fit gains without robust cross-regime generalization.
+In plain language for novice readers: even when EM effects are strong, the new policy did not consistently predict better than the old one, so we should not claim a breakthrough yet.
+
 \subsection{What we can claim}
 \begin{itemize}
 \item The simulator provides consistent numerical solutions to the implemented equations with user-controlled accuracy (RK45 mode).
 \item The discovery engine can identify compact, interpretable approximations within structured libraries and validate them by rollout.
 \item The archive-guided search reliably preserves, ranks, and reuses high-quality equation structures across iterations.
+\item The claim-gated reporting pipeline is conservative in practice: when improvements are absent or unproven, it emits \texttt{no\_improvement} rather than optimistic language.
 \end{itemize}
 
 \subsection{What we cannot honestly claim (yet)}
@@ -324,6 +393,8 @@ We interpret ``novel'' as compact approximations that outperform naive baselines
 \item Implement regime partitioning (``atlas of models''): train multiple sparse models with a lightweight regime classifier.
 \item Extend discovery to probabilistic forecasts for chaotic regimes.
 \item Run statistically powered multi-seed hyperparameter studies for archive/UCT settings before claiming accuracy gains.
+\item Calibrate uncertainty-aware UCT ($\beta$ term) and active-IC disagreement heuristics with larger suites; compare against simpler bandit baselines and pure random IC sampling.
+\item Replace single-threshold claim gates with preregistered sequential testing and explicit multiple-comparison control across policy sweeps.
 \item Extend the LLM judge rubric and experiment-planning prompts (ablation suggestions, regime partitioning), while keeping numeric scoring primary.
 \end{itemize}
 
@@ -391,7 +462,10 @@ S. Mikkola and S. J. Aarseth, ``An implementation of N-body chain regularization
 \begin{itemize}
 \item CSV parsing must be header-based to remain stable as columns evolve.
 \item Discovery expands vector bases into x/y/z component features and estimates sparse linear combinations via STLS/LASSO sparse regression (with an optional GA baseline).
-\item Factory now persists equation-search state (\texttt{equation\_search\_archive.json}) and emits a compact archive report (\texttt{equation\_search\_report.md}) for auditability.
+\item Factory now includes a charged preset (\texttt{em-three-body}) so EM-enabled policy comparisons can be run without external IC injection.
+\item Factory now persists equation-search state (\texttt{equation\_search\_archive.json}), uncertainty-aware ranking metadata, and a compact archive report (\texttt{equation\_search\_report.md}) for auditability.
+\item Factory policy/gating metadata is explicit (\texttt{policy\_effective.json}); optional publication artifacts include \texttt{evaluation\_aggregate.json}, \texttt{claim\_assessment.json}, and \texttt{paper\_summary.md}.
+\item Bootstrap CI computation for the claim gate now uses index-safe resampling and is covered by a regression test to prevent out-of-bounds failures on 12-case suites.
 \end{itemize}
 
 \end{document}

@@ -40,11 +40,7 @@ impl Vec3 {
 
     pub fn normalized(self) -> Option<Self> {
         let n = self.norm();
-        if n == 0.0 {
-            None
-        } else {
-            Some(self / n)
-        }
+        if n == 0.0 { None } else { Some(self / n) }
     }
 
     pub fn approx_eq(self, other: Self, rel: f64, abs: f64) -> bool {

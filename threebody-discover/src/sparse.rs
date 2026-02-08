@@ -1,5 +1,5 @@
-use crate::equation::{score_equation_with, Equation, EquationScore, FitnessHeuristic, Term, TopK};
 use crate::Dataset;
+use crate::equation::{Equation, EquationScore, FitnessHeuristic, Term, TopK, score_equation_with};
 
 #[derive(Clone, Debug)]
 pub struct StlsConfig {
@@ -89,7 +89,11 @@ pub fn stls_path_search(_dataset: &Dataset, _cfg: &StlsConfig, _fitness: Fitness
     topk
 }
 
-pub fn lasso_path_search(_dataset: &Dataset, _cfg: &LassoConfig, _fitness: FitnessHeuristic) -> TopK {
+pub fn lasso_path_search(
+    _dataset: &Dataset,
+    _cfg: &LassoConfig,
+    _fitness: FitnessHeuristic,
+) -> TopK {
     let p = _dataset.feature_names.len();
     let mut topk = TopK::new(3);
     if p == 0 || _dataset.samples.is_empty() {
@@ -264,8 +268,14 @@ fn stls_fit_beta(
 
 fn auto_stls_thresholds(dataset: &Dataset, scales: &[f64], ridge_lambda: f64) -> Vec<f64> {
     let p = scales.len();
-    let beta0 = ridge_solve_scaled(&dataset.samples, &dataset.targets, scales, None, ridge_lambda)
-        .unwrap_or_else(|| vec![0.0; p]);
+    let beta0 = ridge_solve_scaled(
+        &dataset.samples,
+        &dataset.targets,
+        scales,
+        None,
+        ridge_lambda,
+    )
+    .unwrap_or_else(|| vec![0.0; p]);
     let mut bmax = 0.0f64;
     for &v in &beta0 {
         bmax = bmax.max(v.abs());
@@ -554,7 +564,10 @@ fn equation_from_coeffs(coeffs: &[f64], feature_names: &[String]) -> Equation {
 fn push_candidate(topk: &mut TopK, coeffs: &[f64], dataset: &Dataset, fitness: FitnessHeuristic) {
     let eq = equation_from_coeffs(coeffs, &dataset.feature_names);
     let score = score_equation_with(&eq, dataset, fitness);
-    topk.update(EquationScore { equation: eq, score });
+    topk.update(EquationScore {
+        equation: eq,
+        score,
+    });
 }
 
 #[cfg(test)]
@@ -684,7 +697,8 @@ mod tests {
         let scales = vec![1.0; p];
         let mut prev_nnz = usize::MAX;
         for &alpha in &[0.0, 0.5, 1.5, 2.5] {
-            let beta = lasso_fit_beta(&samples, &targets, &scales, alpha, 100, 1e-12, None).expect("solve");
+            let beta = lasso_fit_beta(&samples, &targets, &scales, alpha, 100, 1e-12, None)
+                .expect("solve");
             let nnz = beta.iter().filter(|&&v| v.abs() > 1e-9).count();
             assert!(nnz <= prev_nnz);
             prev_nnz = nnz;

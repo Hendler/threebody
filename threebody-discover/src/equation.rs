@@ -134,7 +134,8 @@ impl TopK {
 
     pub fn update(&mut self, candidate: EquationScore) {
         self.entries.push(candidate);
-        self.entries.sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
+        self.entries
+            .sort_by(|a, b| a.score.partial_cmp(&b.score).unwrap());
         if self.entries.len() > self.k {
             self.entries.truncate(self.k);
         }
@@ -157,13 +158,16 @@ mod tests {
             vec![5.0],
         );
         let eq = Equation {
-            terms: vec![Term {
-                feature: "x".to_string(),
-                coeff: 1.0,
-            }, Term {
-                feature: "y".to_string(),
-                coeff: 2.0,
-            }],
+            terms: vec![
+                Term {
+                    feature: "x".to_string(),
+                    coeff: 1.0,
+                },
+                Term {
+                    feature: "y".to_string(),
+                    coeff: 2.0,
+                },
+            ],
         };
         let pred = eq.predict(&dataset, &dataset.samples[0]);
         assert!((pred - 5.0).abs() < 1e-12);
@@ -195,8 +199,14 @@ mod tests {
         );
         let eq = Equation {
             terms: vec![
-                Term { feature: "x".to_string(), coeff: 1.0 },
-                Term { feature: "y".to_string(), coeff: 2.0 },
+                Term {
+                    feature: "x".to_string(),
+                    coeff: 1.0,
+                },
+                Term {
+                    feature: "y".to_string(),
+                    coeff: 2.0,
+                },
             ],
         };
         let mse = score_equation_with(&eq, &dataset, FitnessHeuristic::Mse);

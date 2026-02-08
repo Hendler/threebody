@@ -207,7 +207,10 @@ impl Config {
             && matches!(self.integrator.kind, IntegratorKind::Leapfrog)
             && !self.allow_leapfrog_with_em
         {
-            warnings.push("leapfrog with EM enabled may violate structure; consider Boris or RK45".to_string());
+            warnings.push(
+                "leapfrog with EM enabled may violate structure; consider Boris or RK45"
+                    .to_string(),
+            );
         }
         warnings
     }

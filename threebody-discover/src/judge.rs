@@ -154,7 +154,10 @@ pub struct BodyInit {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InitialConditionSpec {
     pub bodies: Vec<BodyInit>,
-    #[serde(default = "default_true", deserialize_with = "deserialize_bool_or_default")]
+    #[serde(
+        default = "default_true",
+        deserialize_with = "deserialize_bool_or_default"
+    )]
     pub barycentric: bool,
     #[serde(default, deserialize_with = "deserialize_string_or_json_default")]
     pub notes: String,
@@ -365,7 +368,9 @@ where
     }
 }
 
-fn deserialize_opt_equation_text_or_object<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+fn deserialize_opt_equation_text_or_object<'de, D>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -418,7 +423,9 @@ where
     }
 }
 
-fn deserialize_opt_ic_or_none<'de, D>(deserializer: D) -> Result<Option<InitialConditionSpec>, D::Error>
+fn deserialize_opt_ic_or_none<'de, D>(
+    deserializer: D,
+) -> Result<Option<InitialConditionSpec>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -430,7 +437,9 @@ where
     };
     match v {
         serde_json::Value::Null => Ok(None),
-        serde_json::Value::Object(_) => serde_json::from_value(v).map(Some).map_err(de::Error::custom),
+        serde_json::Value::Object(_) => serde_json::from_value(v)
+            .map(Some)
+            .map_err(de::Error::custom),
         _ => Ok(None),
     }
 }
@@ -668,7 +677,9 @@ impl JudgeResponse {
         }
         if let Some(ic) = self.recommendations.next_initial_conditions.as_ref() {
             if ic.bodies.len() != 3 {
-                return Err("invalid next_initial_conditions (expected exactly 3 bodies)".to_string());
+                return Err(
+                    "invalid next_initial_conditions (expected exactly 3 bodies)".to_string(),
+                );
             }
         }
         Ok(())
@@ -713,9 +724,15 @@ pub fn build_ic_prompt(request: &IcRequest) -> String {
 
 pub fn build_judge_prompt(input: &JudgeInput) -> String {
     let mut prompt = String::new();
-    prompt.push_str("You are an academic reviewer evaluating candidate equations for a dynamical system.\n");
-    prompt.push_str("Your role is advisory and supplemental. The primary numeric ranking is based on MSE.\n");
-    prompt.push_str("Use ONLY the evidence provided. If evidence is missing, score low and note uncertainty.\n");
+    prompt.push_str(
+        "You are an academic reviewer evaluating candidate equations for a dynamical system.\n",
+    );
+    prompt.push_str(
+        "Your role is advisory and supplemental. The primary numeric ranking is based on MSE.\n",
+    );
+    prompt.push_str(
+        "Use ONLY the evidence provided. If evidence is missing, score low and note uncertainty.\n",
+    );
     prompt.push_str("Return JSON only. Do not include Markdown or extra text.\n\n");
 
     prompt.push_str("Rubric (0-5 for each component):\n");
@@ -955,8 +972,12 @@ pub fn build_factory_evaluation_prompt(input: &FactoryEvaluationInput) -> String
 
     prompt.push_str("Explain these metrics clearly:\n");
     prompt.push_str("- mse: training fit error (lower is better)\n");
-    prompt.push_str("- rollout_rmse: forward-simulation error vs the oracle trajectory (lower is better)\n");
-    prompt.push_str("- divergence_time: time until the learned model noticeably diverges (higher is better)\n");
+    prompt.push_str(
+        "- rollout_rmse: forward-simulation error vs the oracle trajectory (lower is better)\n",
+    );
+    prompt.push_str(
+        "- divergence_time: time until the learned model noticeably diverges (higher is better)\n",
+    );
     prompt.push_str("- complexity: rough proxy for equation length (lower is simpler)\n\n");
 
     prompt.push_str("Required sections (use these headings):\n");
@@ -1222,17 +1243,30 @@ mod tests {
         let resp: JudgeResponse = serde_json::from_str(json).expect("should deserialize");
         assert!(resp.scores[0].rationale.contains("ok"));
         assert!(resp.scores[0].flags.len() >= 1);
-        assert_eq!(resp.recommendations.next_rollout_integrator.as_deref(), Some("leapfrog"));
-        assert_eq!(resp.recommendations.next_ga_heuristic.as_deref(), Some("mse"));
-        assert_eq!(resp.recommendations.next_discovery_solver.as_deref(), Some("stls"));
-        assert_eq!(resp.recommendations.next_feature_library.as_deref(), Some("default"));
+        assert_eq!(
+            resp.recommendations.next_rollout_integrator.as_deref(),
+            Some("leapfrog")
+        );
+        assert_eq!(
+            resp.recommendations.next_ga_heuristic.as_deref(),
+            Some("mse")
+        );
+        assert_eq!(
+            resp.recommendations.next_discovery_solver.as_deref(),
+            Some("stls")
+        );
+        assert_eq!(
+            resp.recommendations.next_feature_library.as_deref(),
+            Some("default")
+        );
         assert_eq!(resp.recommendations.next_normalize, Some(true));
-        assert!(resp
-            .recommendations
-            .next_manual_equation_text
-            .as_ref()
-            .unwrap()
-            .contains("ax="));
+        assert!(
+            resp.recommendations
+                .next_manual_equation_text
+                .as_ref()
+                .unwrap()
+                .contains("ax=")
+        );
         assert!(!resp.recommendations.next_search_directions.is_empty());
         assert!(!resp.recommendations.notes.is_empty());
         assert!(!resp.summary.is_empty());
@@ -1257,7 +1291,10 @@ mod tests {
 "#;
         let resp: JudgeResponse = serde_json::from_str(json).expect("should deserialize");
         assert!(resp.recommendations.next_initial_conditions.is_none());
-        assert_eq!(resp.recommendations.next_rollout_integrator.as_deref(), Some("euler"));
+        assert_eq!(
+            resp.recommendations.next_rollout_integrator.as_deref(),
+            Some("euler")
+        );
         assert_eq!(resp.recommendations.next_normalize, None);
     }
 

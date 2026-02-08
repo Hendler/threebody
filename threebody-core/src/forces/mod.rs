@@ -1,7 +1,7 @@
 //! Force models and aggregate computation.
 
-pub mod gravity;
 pub mod em;
+pub mod gravity;
 pub mod potentials;
 
 use crate::math::vec3::Vec3;
@@ -130,7 +130,11 @@ impl PairCache {
                 inv_r3[i][j] = ir3;
             }
         }
-        Self { r_ij, inv_r, inv_r3 }
+        Self {
+            r_ij,
+            inv_r,
+            inv_r3,
+        }
     }
 }
 
@@ -138,7 +142,11 @@ fn softened_inv_r_and_r3(r2: f64, epsilon: f64) -> (f64, f64) {
     if r2 == 0.0 {
         return (0.0, 0.0);
     }
-    let soft2 = if epsilon == 0.0 { r2 } else { r2 + epsilon * epsilon };
+    let soft2 = if epsilon == 0.0 {
+        r2
+    } else {
+        r2 + epsilon * epsilon
+    };
     let r = soft2.sqrt();
     let inv_r = 1.0 / r;
     let inv_r3 = inv_r * inv_r * inv_r;
@@ -147,19 +155,27 @@ fn softened_inv_r_and_r3(r2: f64, epsilon: f64) -> (f64, f64) {
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_accel, compute_fields, ForceConfig};
+    use super::{ForceConfig, compute_accel, compute_fields};
     use crate::forces::{em::em_accel, gravity::gravity_accel};
     use crate::math::vec3::Vec3;
     use crate::state::{Body, State, System};
 
     fn base_system() -> System {
-        let bodies = [Body::new(2.0, 1.0), Body::new(3.0, -1.0), Body::new(1.0, 2.0)];
+        let bodies = [
+            Body::new(2.0, 1.0),
+            Body::new(3.0, -1.0),
+            Body::new(1.0, 2.0),
+        ];
         let pos = [
             Vec3::new(-1.0, 0.0, 0.0),
             Vec3::new(1.0, 0.0, 0.0),
             Vec3::new(0.0, 1.0, 0.0),
         ];
-        let vel = [Vec3::new(0.1, 0.0, 0.0), Vec3::new(0.0, 0.2, 0.0), Vec3::zero()];
+        let vel = [
+            Vec3::new(0.1, 0.0, 0.0),
+            Vec3::new(0.0, 0.2, 0.0),
+            Vec3::zero(),
+        ];
         System::new(bodies, State::new(pos, vel))
     }
 

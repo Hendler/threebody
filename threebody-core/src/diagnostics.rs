@@ -1,5 +1,5 @@
-use crate::math::vec3::Vec3;
 use crate::config::Config;
+use crate::math::vec3::Vec3;
 use crate::state::System;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -59,7 +59,8 @@ pub fn energy_proxy(system: &System, cfg: &Config) -> f64 {
                 continue;
             }
             if cfg.enable_gravity {
-                grav_pot += -cfg.constants.g * system.bodies[i].mass * system.bodies[j].mass * inv_r;
+                grav_pot +=
+                    -cfg.constants.g * system.bodies[i].mass * system.bodies[j].mass * inv_r;
             }
             if cfg.enable_em {
                 elec_pot +=
@@ -75,7 +76,11 @@ fn softened_inv_r(r2: f64, epsilon: f64) -> f64 {
     if r2 == 0.0 {
         return 0.0;
     }
-    let soft2 = if epsilon == 0.0 { r2 } else { r2 + epsilon * epsilon };
+    let soft2 = if epsilon == 0.0 {
+        r2
+    } else {
+        r2 + epsilon * epsilon
+    };
     1.0 / soft2.sqrt()
 }
 
@@ -88,8 +93,16 @@ mod tests {
 
     #[test]
     fn energy_proxy_matches_manual_static() {
-        let bodies = [Body::new(2.0, 1.0), Body::new(3.0, -2.0), Body::new(0.0, 0.0)];
-        let pos = [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::zero()];
+        let bodies = [
+            Body::new(2.0, 1.0),
+            Body::new(3.0, -2.0),
+            Body::new(0.0, 0.0),
+        ];
+        let pos = [
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::zero(),
+        ];
         let vel = [Vec3::zero(); 3];
         let system = System::new(bodies, State::new(pos, vel));
         let mut cfg = Config::default();
@@ -108,9 +121,17 @@ mod tests {
 
     #[test]
     fn linear_momentum_zero_for_balanced_velocities() {
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(0.0, 0.0)];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(1.0, 0.0),
+            Body::new(0.0, 0.0),
+        ];
         let pos = [Vec3::zero(); 3];
-        let vel = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(-1.0, 0.0, 0.0), Vec3::zero()];
+        let vel = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::zero(),
+        ];
         let system = System::new(bodies, State::new(pos, vel));
         let p = linear_momentum(&system);
         assert!(p.approx_eq(Vec3::zero(), 1e-12, 1e-12));
@@ -118,8 +139,16 @@ mod tests {
 
     #[test]
     fn energy_proxy_respects_force_toggles() {
-        let bodies = [Body::new(2.0, 1.0), Body::new(3.0, -2.0), Body::new(0.0, 0.0)];
-        let pos = [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::zero()];
+        let bodies = [
+            Body::new(2.0, 1.0),
+            Body::new(3.0, -2.0),
+            Body::new(0.0, 0.0),
+        ];
+        let pos = [
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::zero(),
+        ];
         let vel = [Vec3::zero(); 3];
         let system = System::new(bodies, State::new(pos, vel));
 
