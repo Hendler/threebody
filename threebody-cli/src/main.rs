@@ -2860,49 +2860,216 @@ fn run_solver_on_components(
     }
 }
 
-fn atlas_map_feature(feature: &str, close: bool, mode: AtlasGateMode) -> Option<&'static str> {
-    match (mode, feature, close) {
-        (AtlasGateMode::Binary, "grav_x", true) => Some("grav_close_x"),
-        (AtlasGateMode::Binary, "grav_y", true) => Some("grav_close_y"),
-        (AtlasGateMode::Binary, "grav_z", true) => Some("grav_close_z"),
-        (AtlasGateMode::Binary, "grav_x", false) => Some("grav_far_x"),
-        (AtlasGateMode::Binary, "grav_y", false) => Some("grav_far_y"),
-        (AtlasGateMode::Binary, "grav_z", false) => Some("grav_far_z"),
-        (AtlasGateMode::Binary, "elec_x", true) => Some("elec_close_x"),
-        (AtlasGateMode::Binary, "elec_y", true) => Some("elec_close_y"),
-        (AtlasGateMode::Binary, "elec_z", true) => Some("elec_close_z"),
-        (AtlasGateMode::Binary, "elec_x", false) => Some("elec_far_x"),
-        (AtlasGateMode::Binary, "elec_y", false) => Some("elec_far_y"),
-        (AtlasGateMode::Binary, "elec_z", false) => Some("elec_far_z"),
-        (AtlasGateMode::Binary, "mag_x", true) => Some("mag_close_x"),
-        (AtlasGateMode::Binary, "mag_y", true) => Some("mag_close_y"),
-        (AtlasGateMode::Binary, "mag_z", true) => Some("mag_close_z"),
-        (AtlasGateMode::Binary, "mag_x", false) => Some("mag_far_x"),
-        (AtlasGateMode::Binary, "mag_y", false) => Some("mag_far_y"),
-        (AtlasGateMode::Binary, "mag_z", false) => Some("mag_far_z"),
-        (AtlasGateMode::Binary, "gate_close", true) => Some("gate_close"),
-        (AtlasGateMode::Binary, "gate_far", false) => Some("gate_far"),
-        (AtlasGateMode::Smooth, "grav_x", true) => Some("grav_sclose_x"),
-        (AtlasGateMode::Smooth, "grav_y", true) => Some("grav_sclose_y"),
-        (AtlasGateMode::Smooth, "grav_z", true) => Some("grav_sclose_z"),
-        (AtlasGateMode::Smooth, "grav_x", false) => Some("grav_sfar_x"),
-        (AtlasGateMode::Smooth, "grav_y", false) => Some("grav_sfar_y"),
-        (AtlasGateMode::Smooth, "grav_z", false) => Some("grav_sfar_z"),
-        (AtlasGateMode::Smooth, "elec_x", true) => Some("elec_sclose_x"),
-        (AtlasGateMode::Smooth, "elec_y", true) => Some("elec_sclose_y"),
-        (AtlasGateMode::Smooth, "elec_z", true) => Some("elec_sclose_z"),
-        (AtlasGateMode::Smooth, "elec_x", false) => Some("elec_sfar_x"),
-        (AtlasGateMode::Smooth, "elec_y", false) => Some("elec_sfar_y"),
-        (AtlasGateMode::Smooth, "elec_z", false) => Some("elec_sfar_z"),
-        (AtlasGateMode::Smooth, "mag_x", true) => Some("mag_sclose_x"),
-        (AtlasGateMode::Smooth, "mag_y", true) => Some("mag_sclose_y"),
-        (AtlasGateMode::Smooth, "mag_z", true) => Some("mag_sclose_z"),
-        (AtlasGateMode::Smooth, "mag_x", false) => Some("mag_sfar_x"),
-        (AtlasGateMode::Smooth, "mag_y", false) => Some("mag_sfar_y"),
-        (AtlasGateMode::Smooth, "mag_z", false) => Some("mag_sfar_z"),
-        (AtlasGateMode::Smooth, "gate_smooth_close", true) => Some("gate_smooth_close"),
-        (AtlasGateMode::Smooth, "gate_smooth_far", false) => Some("gate_smooth_far"),
-        _ => None,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AtlasGateVariant {
+    Primary,
+    Inner,
+    Outer,
+}
+
+impl AtlasGateVariant {
+    fn as_str(self) -> &'static str {
+        match self {
+            AtlasGateVariant::Primary => "primary",
+            AtlasGateVariant::Inner => "inner",
+            AtlasGateVariant::Outer => "outer",
+        }
+    }
+}
+
+fn atlas_gate_variants(mode: AtlasGateMode) -> &'static [AtlasGateVariant] {
+    const PRIMARY_ONLY: [AtlasGateVariant; 1] = [AtlasGateVariant::Primary];
+    const SMOOTH_MULTI: [AtlasGateVariant; 3] = [
+        AtlasGateVariant::Primary,
+        AtlasGateVariant::Inner,
+        AtlasGateVariant::Outer,
+    ];
+    match mode {
+        AtlasGateMode::Binary => &PRIMARY_ONLY,
+        AtlasGateMode::Smooth => &SMOOTH_MULTI,
+    }
+}
+
+fn atlas_gate_feature_pair(
+    mode: AtlasGateMode,
+    variant: AtlasGateVariant,
+) -> Option<(&'static str, &'static str)> {
+    match (mode, variant) {
+        (AtlasGateMode::Binary, AtlasGateVariant::Primary) => Some(("gate_close", "gate_far")),
+        (AtlasGateMode::Binary, _) => None,
+        (AtlasGateMode::Smooth, AtlasGateVariant::Primary) => {
+            Some(("gate_smooth_close", "gate_smooth_far"))
+        }
+        (AtlasGateMode::Smooth, AtlasGateVariant::Inner) => {
+            Some(("gate_smooth_close_inner", "gate_smooth_far_inner"))
+        }
+        (AtlasGateMode::Smooth, AtlasGateVariant::Outer) => {
+            Some(("gate_smooth_close_outer", "gate_smooth_far_outer"))
+        }
+    }
+}
+
+fn atlas_map_feature(
+    feature: &str,
+    close: bool,
+    mode: AtlasGateMode,
+    variant: AtlasGateVariant,
+) -> Option<String> {
+    match mode {
+        AtlasGateMode::Binary => {
+            if !matches!(variant, AtlasGateVariant::Primary) {
+                return None;
+            }
+            match feature {
+                "grav_x" => Some(if close {
+                    "grav_close_x".to_string()
+                } else {
+                    "grav_far_x".to_string()
+                }),
+                "grav_y" => Some(if close {
+                    "grav_close_y".to_string()
+                } else {
+                    "grav_far_y".to_string()
+                }),
+                "grav_z" => Some(if close {
+                    "grav_close_z".to_string()
+                } else {
+                    "grav_far_z".to_string()
+                }),
+                "elec_x" => Some(if close {
+                    "elec_close_x".to_string()
+                } else {
+                    "elec_far_x".to_string()
+                }),
+                "elec_y" => Some(if close {
+                    "elec_close_y".to_string()
+                } else {
+                    "elec_far_y".to_string()
+                }),
+                "elec_z" => Some(if close {
+                    "elec_close_z".to_string()
+                } else {
+                    "elec_far_z".to_string()
+                }),
+                "mag_x" => Some(if close {
+                    "mag_close_x".to_string()
+                } else {
+                    "mag_far_x".to_string()
+                }),
+                "mag_y" => Some(if close {
+                    "mag_close_y".to_string()
+                } else {
+                    "mag_far_y".to_string()
+                }),
+                "mag_z" => Some(if close {
+                    "mag_close_z".to_string()
+                } else {
+                    "mag_far_z".to_string()
+                }),
+                _ if feature.starts_with("gate_") => Some(if close {
+                    "gate_close".to_string()
+                } else {
+                    "gate_far".to_string()
+                }),
+                _ => None,
+            }
+        }
+        AtlasGateMode::Smooth => {
+            let (
+                grav_close,
+                grav_far,
+                elec_close,
+                elec_far,
+                mag_close,
+                mag_far,
+                gate_close,
+                gate_far,
+            ) = match variant {
+                AtlasGateVariant::Primary => (
+                    "grav_sclose",
+                    "grav_sfar",
+                    "elec_sclose",
+                    "elec_sfar",
+                    "mag_sclose",
+                    "mag_sfar",
+                    "gate_smooth_close",
+                    "gate_smooth_far",
+                ),
+                AtlasGateVariant::Inner => (
+                    "grav_sclose_inner",
+                    "grav_sfar_inner",
+                    "elec_sclose_inner",
+                    "elec_sfar_inner",
+                    "mag_sclose_inner",
+                    "mag_sfar_inner",
+                    "gate_smooth_close_inner",
+                    "gate_smooth_far_inner",
+                ),
+                AtlasGateVariant::Outer => (
+                    "grav_sclose_outer",
+                    "grav_sfar_outer",
+                    "elec_sclose_outer",
+                    "elec_sfar_outer",
+                    "mag_sclose_outer",
+                    "mag_sfar_outer",
+                    "gate_smooth_close_outer",
+                    "gate_smooth_far_outer",
+                ),
+            };
+            match feature {
+                "grav_x" => Some(if close {
+                    format!("{grav_close}_x")
+                } else {
+                    format!("{grav_far}_x")
+                }),
+                "grav_y" => Some(if close {
+                    format!("{grav_close}_y")
+                } else {
+                    format!("{grav_far}_y")
+                }),
+                "grav_z" => Some(if close {
+                    format!("{grav_close}_z")
+                } else {
+                    format!("{grav_far}_z")
+                }),
+                "elec_x" => Some(if close {
+                    format!("{elec_close}_x")
+                } else {
+                    format!("{elec_far}_x")
+                }),
+                "elec_y" => Some(if close {
+                    format!("{elec_close}_y")
+                } else {
+                    format!("{elec_far}_y")
+                }),
+                "elec_z" => Some(if close {
+                    format!("{elec_close}_z")
+                } else {
+                    format!("{elec_far}_z")
+                }),
+                "mag_x" => Some(if close {
+                    format!("{mag_close}_x")
+                } else {
+                    format!("{mag_far}_x")
+                }),
+                "mag_y" => Some(if close {
+                    format!("{mag_close}_y")
+                } else {
+                    format!("{mag_far}_y")
+                }),
+                "mag_z" => Some(if close {
+                    format!("{mag_close}_z")
+                } else {
+                    format!("{mag_far}_z")
+                }),
+                _ if feature.starts_with("gate_") => Some(if close {
+                    gate_close.to_string()
+                } else {
+                    gate_far.to_string()
+                }),
+                _ => None,
+            }
+        }
     }
 }
 
@@ -2910,16 +3077,17 @@ fn map_equation_to_atlas_gate(
     eq: &threebody_discover::Equation,
     close: bool,
     mode: AtlasGateMode,
+    variant: AtlasGateVariant,
 ) -> threebody_discover::Equation {
     let mut agg: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
     for term in &eq.terms {
         if !term.coeff.is_finite() {
             continue;
         }
-        let Some(mapped) = atlas_map_feature(term.feature.as_str(), close, mode) else {
+        let Some(mapped) = atlas_map_feature(term.feature.as_str(), close, mode, variant) else {
             continue;
         };
-        *agg.entry(mapped.to_string()).or_insert(0.0) += term.coeff;
+        *agg.entry(mapped).or_insert(0.0) += term.coeff;
     }
     let terms = agg
         .into_iter()
@@ -2929,12 +3097,16 @@ fn map_equation_to_atlas_gate(
     threebody_discover::Equation { terms }
 }
 
-fn filter_dataset_by_gate(dataset: &Dataset, gate_feature: &str) -> Option<Dataset> {
+fn filter_dataset_by_gate_threshold(
+    dataset: &Dataset,
+    gate_feature: &str,
+    threshold: f64,
+) -> Option<Dataset> {
     let gate_idx = *dataset.index.get(gate_feature)?;
     let mut samples = Vec::new();
     let mut targets = Vec::new();
     for (sample, target) in dataset.samples.iter().zip(&dataset.targets) {
-        if sample.get(gate_idx).copied().unwrap_or(0.0) > 0.5 {
+        if sample.get(gate_idx).copied().unwrap_or(0.0) > threshold {
             samples.push(sample.clone());
             targets.push(*target);
         }
@@ -2965,6 +3137,7 @@ fn build_atlas_candidates(
     topk_far_y: &[threebody_discover::EquationScore],
     topk_far_z: &[threebody_discover::EquationScore],
     mode: AtlasGateMode,
+    variant: AtlasGateVariant,
 ) -> Vec<CandidateSummary> {
     let mut out: Vec<CandidateSummary> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2986,23 +3159,38 @@ fn build_atlas_candidates(
                                 &topk_close_x[ix_c].equation,
                                 true,
                                 mode,
+                                variant,
                             );
                             let eq_y_close = map_equation_to_atlas_gate(
                                 &topk_close_y[iy_c].equation,
                                 true,
                                 mode,
+                                variant,
                             );
                             let eq_z_close = map_equation_to_atlas_gate(
                                 &topk_close_z[iz_c].equation,
                                 true,
                                 mode,
+                                variant,
                             );
-                            let eq_x_far =
-                                map_equation_to_atlas_gate(&topk_far_x[ix_f].equation, false, mode);
-                            let eq_y_far =
-                                map_equation_to_atlas_gate(&topk_far_y[iy_f].equation, false, mode);
-                            let eq_z_far =
-                                map_equation_to_atlas_gate(&topk_far_z[iz_f].equation, false, mode);
+                            let eq_x_far = map_equation_to_atlas_gate(
+                                &topk_far_x[ix_f].equation,
+                                false,
+                                mode,
+                                variant,
+                            );
+                            let eq_y_far = map_equation_to_atlas_gate(
+                                &topk_far_y[iy_f].equation,
+                                false,
+                                mode,
+                                variant,
+                            );
+                            let eq_z_far = map_equation_to_atlas_gate(
+                                &topk_far_z[iz_f].equation,
+                                false,
+                                mode,
+                                variant,
+                            );
 
                             let merge_axis =
                                 |a: &threebody_discover::Equation,
@@ -3065,6 +3253,7 @@ fn build_atlas_candidates(
                                 notes: vec![
                                     "source=atlas".to_string(),
                                     "kind=local_deterministic_formula".to_string(),
+                                    format!("atlas_variant={}", variant.as_str()),
                                     format!(
                                         "close_ranks=x{ix_c},y{iy_c},z{iz_c};far_ranks=x{ix_f},y{iy_f},z{iz_f}"
                                     ),
@@ -3111,6 +3300,197 @@ fn current_gate_params() -> GateParams {
         .read()
         .map(|g| *g)
         .unwrap_or_else(|_| GateParams::default())
+}
+
+fn smooth_sigmoid(z: f64) -> f64 {
+    let z = z.clamp(-40.0, 40.0);
+    1.0 / (1.0 + (-z).exp())
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct GateGeometryCandidateScoreV1 {
+    r0: f64,
+    width: f64,
+    objective: f64,
+    close_weight_mean: f64,
+    balance_score: f64,
+    contrast_score: f64,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct GateGeometryReportV1 {
+    version: String,
+    method: String,
+    base_r0: f64,
+    base_width: f64,
+    selected_r0: f64,
+    selected_width: f64,
+    selected_objective: f64,
+    min_pair_q05: f64,
+    min_pair_q25: f64,
+    min_pair_q50: f64,
+    min_pair_q75: f64,
+    min_pair_q95: f64,
+    candidates: Vec<GateGeometryCandidateScoreV1>,
+}
+
+impl GateGeometryReportV1 {
+    fn fixed(base: GateParams) -> Self {
+        Self {
+            version: "v1".to_string(),
+            method: "fixed_cli".to_string(),
+            base_r0: base.r0,
+            base_width: base.width,
+            selected_r0: base.r0,
+            selected_width: base.width,
+            selected_objective: 0.0,
+            min_pair_q05: base.r0,
+            min_pair_q25: base.r0,
+            min_pair_q50: base.r0,
+            min_pair_q75: base.r0,
+            min_pair_q95: base.r0,
+            candidates: Vec::new(),
+        }
+    }
+
+    fn selected_params(&self) -> GateParams {
+        GateParams {
+            r0: self.selected_r0,
+            width: self.selected_width,
+        }
+    }
+}
+
+fn quantile_sorted(values: &[f64], q: f64) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    let q = q.clamp(0.0, 1.0);
+    let pos = q * (values.len() as f64 - 1.0);
+    let lo = pos.floor() as usize;
+    let hi = pos.ceil() as usize;
+    if lo == hi {
+        return values.get(lo).copied();
+    }
+    let w = pos - lo as f64;
+    Some(values[lo] * (1.0 - w) + values[hi] * w)
+}
+
+fn auto_tune_smooth_gate_params(
+    result: &threebody_core::sim::SimResult,
+    base: GateParams,
+) -> Option<GateGeometryReportV1> {
+    let mut min_pairs: Vec<f64> = result
+        .steps
+        .iter()
+        .map(|s| s.regime.min_pair_dist)
+        .filter(|v| v.is_finite())
+        .collect();
+    if min_pairs.len() < 8 {
+        return None;
+    }
+    min_pairs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+
+    let q05 = quantile_sorted(&min_pairs, 0.05)?;
+    let q25 = quantile_sorted(&min_pairs, 0.25)?;
+    let q50 = quantile_sorted(&min_pairs, 0.50)?;
+    let q75 = quantile_sorted(&min_pairs, 0.75)?;
+    let q95 = quantile_sorted(&min_pairs, 0.95)?;
+    let span = (q95 - q05).abs().max(1e-3);
+
+    let acc_proxy: Vec<f64> = result
+        .steps
+        .iter()
+        .map(|s| s.regime.max_accel.abs())
+        .collect();
+    if acc_proxy.len() != min_pairs.len() {
+        return None;
+    }
+
+    let mut r0_candidates = vec![q25, q50, q75, base.r0];
+    r0_candidates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    r0_candidates.dedup_by(|a, b| (*a - *b).abs() <= 1e-9);
+
+    let mut width_candidates = vec![
+        base.width.abs().max(1e-3),
+        (span * 0.06).max(1e-3),
+        (span * 0.10).max(1e-3),
+        (span * 0.18).max(1e-3),
+    ];
+    width_candidates.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    width_candidates.dedup_by(|a, b| (*a - *b).abs() <= 1e-9);
+
+    let mut scored = Vec::new();
+    let mut best: Option<GateGeometryCandidateScoreV1> = None;
+    for r0 in r0_candidates {
+        for width in &width_candidates {
+            let width = width.max(1e-6);
+            let mut w_close = 0.0f64;
+            let mut w_far = 0.0f64;
+            let mut close_acc = 0.0f64;
+            let mut far_acc = 0.0f64;
+            for (r, a) in min_pairs.iter().zip(&acc_proxy) {
+                let g = smooth_sigmoid((r0 - *r) / width);
+                w_close += g;
+                w_far += 1.0 - g;
+                close_acc += g * a;
+                far_acc += (1.0 - g) * a;
+            }
+            if w_close <= 1e-9 || w_far <= 1e-9 {
+                continue;
+            }
+            let close_frac = (w_close / min_pairs.len() as f64).clamp(0.0, 1.0);
+            let close_mean_acc = close_acc / w_close;
+            let far_mean_acc = far_acc / w_far;
+            let balance_score = (1.0 - ((close_frac - 0.5).abs() / 0.5)).clamp(0.0, 1.0);
+            let contrast_score = ((close_mean_acc - far_mean_acc).abs()
+                / (close_mean_acc + far_mean_acc + 1e-9))
+                .clamp(0.0, 1.0);
+            let objective = 0.65 * balance_score + 0.35 * contrast_score;
+            let row = GateGeometryCandidateScoreV1 {
+                r0,
+                width,
+                objective,
+                close_weight_mean: close_frac,
+                balance_score,
+                contrast_score,
+            };
+            let replace = match best.as_ref() {
+                Some(curr) => row.objective > curr.objective,
+                None => true,
+            };
+            if replace {
+                best = Some(row.clone());
+            }
+            scored.push(row);
+        }
+    }
+    let best = best?;
+    scored.sort_by(|a, b| {
+        b.objective
+            .partial_cmp(&a.objective)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Some(GateGeometryReportV1 {
+        version: "v1".to_string(),
+        method: "auto_balance_contrast_v1".to_string(),
+        base_r0: base.r0,
+        base_width: base.width,
+        selected_r0: best.r0,
+        selected_width: best.width,
+        selected_objective: best.objective,
+        min_pair_q05: q05,
+        min_pair_q25: q25,
+        min_pair_q50: q50,
+        min_pair_q75: q75,
+        min_pair_q95: q95,
+        candidates: scored,
+    })
+}
+
+fn load_gate_geometry_report(factory_dir: &std::path::Path) -> Option<GateGeometryReportV1> {
+    let raw = fs::read_to_string(factory_dir.join("gate_geometry.json")).ok()?;
+    serde_json::from_str(&raw).ok()
 }
 
 fn compute_feature_vector(
@@ -3219,12 +3599,16 @@ fn compute_feature_vector(
     let lorentz_vxb = mag * cfg.constants.mu_0;
     let gate_params = current_gate_params();
     let r_gate = gate_params.r0;
-    let gate_close = (min_pair_distance(&system.state.pos) < r_gate) as u8 as f64;
+    let min_pair = min_pair_distance(&system.state.pos);
+    let gate_close = (min_pair < r_gate) as u8 as f64;
     let gate_far = 1.0 - gate_close;
     let smooth_w = gate_params.width.abs().max(1e-6);
-    let z = ((r_gate - min_pair_distance(&system.state.pos)) / smooth_w).clamp(-40.0, 40.0);
-    let gate_smooth_close = 1.0 / (1.0 + (-z).exp());
+    let gate_smooth_close = smooth_sigmoid((r_gate - min_pair) / smooth_w);
     let gate_smooth_far = 1.0 - gate_smooth_close;
+    let gate_smooth_close_inner = smooth_sigmoid(((r_gate - smooth_w) - min_pair) / smooth_w);
+    let gate_smooth_far_inner = 1.0 - gate_smooth_close_inner;
+    let gate_smooth_close_outer = smooth_sigmoid(((r_gate + smooth_w) - min_pair) / smooth_w);
+    let gate_smooth_far_outer = 1.0 - gate_smooth_close_outer;
 
     let grav_close = grav * gate_close;
     let grav_far = grav * gate_far;
@@ -3234,10 +3618,22 @@ fn compute_feature_vector(
     let mag_far = mag * gate_far;
     let grav_sclose = grav * gate_smooth_close;
     let grav_sfar = grav * gate_smooth_far;
+    let grav_sclose_inner = grav * gate_smooth_close_inner;
+    let grav_sfar_inner = grav * gate_smooth_far_inner;
+    let grav_sclose_outer = grav * gate_smooth_close_outer;
+    let grav_sfar_outer = grav * gate_smooth_far_outer;
     let elec_sclose = elec * gate_smooth_close;
     let elec_sfar = elec * gate_smooth_far;
+    let elec_sclose_inner = elec * gate_smooth_close_inner;
+    let elec_sfar_inner = elec * gate_smooth_far_inner;
+    let elec_sclose_outer = elec * gate_smooth_close_outer;
+    let elec_sfar_outer = elec * gate_smooth_far_outer;
     let mag_sclose = mag * gate_smooth_close;
     let mag_sfar = mag * gate_smooth_far;
+    let mag_sclose_inner = mag * gate_smooth_close_inner;
+    let mag_sfar_inner = mag * gate_smooth_far_inner;
+    let mag_sclose_outer = mag * gate_smooth_close_outer;
+    let mag_sfar_outer = mag * gate_smooth_far_outer;
 
     let c2 = 100.0;
     let pn1_scale = ((vi.norm_sq() + local_phi_no_g) / c2).max(0.0);
@@ -3294,6 +3690,10 @@ fn compute_feature_vector(
             "gate_far" => gate_far,
             "gate_smooth_close" => gate_smooth_close,
             "gate_smooth_far" => gate_smooth_far,
+            "gate_smooth_close_inner" => gate_smooth_close_inner,
+            "gate_smooth_far_inner" => gate_smooth_far_inner,
+            "gate_smooth_close_outer" => gate_smooth_close_outer,
+            "gate_smooth_far_outer" => gate_smooth_far_outer,
             "grav_close_x" => grav_close.x,
             "grav_close_y" => grav_close.y,
             "grav_close_z" => grav_close.z,
@@ -3306,6 +3706,18 @@ fn compute_feature_vector(
             "grav_sfar_x" => grav_sfar.x,
             "grav_sfar_y" => grav_sfar.y,
             "grav_sfar_z" => grav_sfar.z,
+            "grav_sclose_inner_x" => grav_sclose_inner.x,
+            "grav_sclose_inner_y" => grav_sclose_inner.y,
+            "grav_sclose_inner_z" => grav_sclose_inner.z,
+            "grav_sfar_inner_x" => grav_sfar_inner.x,
+            "grav_sfar_inner_y" => grav_sfar_inner.y,
+            "grav_sfar_inner_z" => grav_sfar_inner.z,
+            "grav_sclose_outer_x" => grav_sclose_outer.x,
+            "grav_sclose_outer_y" => grav_sclose_outer.y,
+            "grav_sclose_outer_z" => grav_sclose_outer.z,
+            "grav_sfar_outer_x" => grav_sfar_outer.x,
+            "grav_sfar_outer_y" => grav_sfar_outer.y,
+            "grav_sfar_outer_z" => grav_sfar_outer.z,
             "elec_close_x" => elec_close.x,
             "elec_close_y" => elec_close.y,
             "elec_close_z" => elec_close.z,
@@ -3318,6 +3730,18 @@ fn compute_feature_vector(
             "elec_sfar_x" => elec_sfar.x,
             "elec_sfar_y" => elec_sfar.y,
             "elec_sfar_z" => elec_sfar.z,
+            "elec_sclose_inner_x" => elec_sclose_inner.x,
+            "elec_sclose_inner_y" => elec_sclose_inner.y,
+            "elec_sclose_inner_z" => elec_sclose_inner.z,
+            "elec_sfar_inner_x" => elec_sfar_inner.x,
+            "elec_sfar_inner_y" => elec_sfar_inner.y,
+            "elec_sfar_inner_z" => elec_sfar_inner.z,
+            "elec_sclose_outer_x" => elec_sclose_outer.x,
+            "elec_sclose_outer_y" => elec_sclose_outer.y,
+            "elec_sclose_outer_z" => elec_sclose_outer.z,
+            "elec_sfar_outer_x" => elec_sfar_outer.x,
+            "elec_sfar_outer_y" => elec_sfar_outer.y,
+            "elec_sfar_outer_z" => elec_sfar_outer.z,
             "mag_close_x" => mag_close.x,
             "mag_close_y" => mag_close.y,
             "mag_close_z" => mag_close.z,
@@ -3330,6 +3754,18 @@ fn compute_feature_vector(
             "mag_sfar_x" => mag_sfar.x,
             "mag_sfar_y" => mag_sfar.y,
             "mag_sfar_z" => mag_sfar.z,
+            "mag_sclose_inner_x" => mag_sclose_inner.x,
+            "mag_sclose_inner_y" => mag_sclose_inner.y,
+            "mag_sclose_inner_z" => mag_sclose_inner.z,
+            "mag_sfar_inner_x" => mag_sfar_inner.x,
+            "mag_sfar_inner_y" => mag_sfar_inner.y,
+            "mag_sfar_inner_z" => mag_sfar_inner.z,
+            "mag_sclose_outer_x" => mag_sclose_outer.x,
+            "mag_sclose_outer_y" => mag_sclose_outer.y,
+            "mag_sclose_outer_z" => mag_sclose_outer.z,
+            "mag_sfar_outer_x" => mag_sfar_outer.x,
+            "mag_sfar_outer_y" => mag_sfar_outer.y,
+            "mag_sfar_outer_z" => mag_sfar_outer.z,
             "pn1_grav_x" => pn1_grav.x,
             "pn1_grav_y" => pn1_grav.y,
             "pn1_grav_z" => pn1_grav.z,
@@ -3685,14 +4121,30 @@ fn smooth_gate_feature_names() -> Vec<String> {
     let mut out = vec![
         "gate_smooth_close".to_string(),
         "gate_smooth_far".to_string(),
+        "gate_smooth_close_inner".to_string(),
+        "gate_smooth_far_inner".to_string(),
+        "gate_smooth_close_outer".to_string(),
+        "gate_smooth_far_outer".to_string(),
     ];
     for axis in ["x", "y", "z"] {
         out.push(format!("grav_sclose_{axis}"));
         out.push(format!("grav_sfar_{axis}"));
+        out.push(format!("grav_sclose_inner_{axis}"));
+        out.push(format!("grav_sfar_inner_{axis}"));
+        out.push(format!("grav_sclose_outer_{axis}"));
+        out.push(format!("grav_sfar_outer_{axis}"));
         out.push(format!("elec_sclose_{axis}"));
         out.push(format!("elec_sfar_{axis}"));
+        out.push(format!("elec_sclose_inner_{axis}"));
+        out.push(format!("elec_sfar_inner_{axis}"));
+        out.push(format!("elec_sclose_outer_{axis}"));
+        out.push(format!("elec_sfar_outer_{axis}"));
         out.push(format!("mag_sclose_{axis}"));
         out.push(format!("mag_sfar_{axis}"));
+        out.push(format!("mag_sclose_inner_{axis}"));
+        out.push(format!("mag_sfar_inner_{axis}"));
+        out.push(format!("mag_sclose_outer_{axis}"));
+        out.push(format!("mag_sfar_outer_{axis}"));
     }
     out
 }
@@ -4536,6 +4988,8 @@ fn run_factory(
 ) -> anyhow::Result<()> {
     fs::create_dir_all(&out_dir)?;
     let equation_search = policy.equation_search;
+    let gate_tuning_enabled = matches!(policy.model_family, ModelFamily::Atlas)
+        && matches!(advanced.atlas_gate, AtlasGateMode::Smooth);
     let policy_effective = serde_json::json!({
         "version": "v2",
         "policy": policy.as_effective_json(),
@@ -4550,6 +5004,12 @@ fn run_factory(
             "sens_max_median_error": advanced.sens_max_median_error,
             "feature_families": advanced.feature_families.labels(),
             "selector_policy": advanced.selector_policy.as_str(),
+            "gate_tuning_enabled": gate_tuning_enabled,
+            "gate_tuning_method": if gate_tuning_enabled {
+                "auto_balance_contrast_v1"
+            } else {
+                "fixed_cli"
+            },
         },
         "claim_gate": claim_gate,
         "seed_suite": {
@@ -4563,10 +5023,19 @@ fn run_factory(
         out_dir.join("policy_effective.json"),
         serde_json::to_string_pretty(&policy_effective)?,
     )?;
-    set_gate_params(GateParams {
+    let mut effective_gate_params = GateParams {
         r0: advanced.gate_r0,
         width: advanced.gate_width,
-    });
+    };
+    set_gate_params(effective_gate_params);
+    let mut gate_geometry_report = GateGeometryReportV1::fixed(effective_gate_params);
+    if gate_tuning_enabled {
+        gate_geometry_report.method = "auto_balance_contrast_v1_pending".to_string();
+    }
+    fs::write(
+        out_dir.join("gate_geometry.json"),
+        serde_json::to_string_pretty(&gate_geometry_report)?,
+    )?;
     let mut next_ic: Option<InitialConditionSpec> = None;
     let mut next_manual_equation_text: Option<String> = None;
     let llm_mode = parse_llm_mode(&llm_mode)?;
@@ -4634,6 +5103,7 @@ fn run_factory(
         let run_id = format!("run_{:03}", iter + 1);
         let run_dir = out_dir.join(&run_id);
         fs::create_dir_all(&run_dir)?;
+        set_gate_params(effective_gate_params);
 
         let mut cfg = build_config(config.clone(), &mode, None, em, no_em, no_gravity)?;
         if matches!(cfg.integrator.kind, IntegratorKind::Rk45) && cfg.integrator.adaptive {
@@ -4963,6 +5433,25 @@ fn run_factory(
         let ic_spec = final_ic_spec.ok_or_else(|| anyhow::anyhow!("missing ic_spec"))?;
         let result = final_result.ok_or_else(|| anyhow::anyhow!("missing simulation result"))?;
 
+        if iter == 0 && gate_tuning_enabled {
+            if let Some(tuned) = auto_tune_smooth_gate_params(&result, effective_gate_params) {
+                effective_gate_params = tuned.selected_params();
+                gate_geometry_report = tuned;
+                set_gate_params(effective_gate_params);
+            } else {
+                gate_geometry_report.method =
+                    "auto_balance_contrast_v1_fallback_to_cli".to_string();
+            }
+            fs::write(
+                out_dir.join("gate_geometry.json"),
+                serde_json::to_string_pretty(&gate_geometry_report)?,
+            )?;
+        }
+        fs::write(
+            run_dir.join("gate_geometry.json"),
+            serde_json::to_string_pretty(&gate_geometry_report)?,
+        )?;
+
         fs::write(
             run_dir.join("sim_attempts.json"),
             serde_json::to_string_pretty(&sim_attempt_logs)?,
@@ -5066,70 +5555,105 @@ fn run_factory(
             }
         }
         let mut atlas_candidate_count = 0usize;
+        let mut atlas_variant_counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
         if matches!(policy.model_family, ModelFamily::Atlas) {
-            let (close_gate_feature, far_gate_feature) = match advanced.atlas_gate {
-                AtlasGateMode::Binary => ("gate_close", "gate_far"),
-                AtlasGateMode::Smooth => ("gate_smooth_close", "gate_smooth_far"),
-            };
-            let close_x = filter_dataset_by_gate(&dataset_x, close_gate_feature);
-            let close_y = filter_dataset_by_gate(&dataset_y, close_gate_feature);
-            let close_z = filter_dataset_by_gate(&dataset_z, close_gate_feature);
-            let far_x = filter_dataset_by_gate(&dataset_x, far_gate_feature);
-            let far_y = filter_dataset_by_gate(&dataset_y, far_gate_feature);
-            let far_z = filter_dataset_by_gate(&dataset_z, far_gate_feature);
-            if let (
-                Some(dataset_close_x),
-                Some(dataset_close_y),
-                Some(dataset_close_z),
-                Some(dataset_far_x),
-                Some(dataset_far_y),
-                Some(dataset_far_z),
-            ) = (close_x, close_y, close_z, far_x, far_y, far_z)
-            {
-                let (topk_close_x, topk_close_y, topk_close_z) = run_solver_on_components(
-                    current_solver.solver,
-                    current_fitness,
-                    &library,
-                    &disc_cfg,
-                    &stls_cfg,
-                    &lasso_cfg,
-                    &dataset_close_x,
-                    &dataset_close_y,
-                    &dataset_close_z,
-                );
-                let (topk_far_x, topk_far_y, topk_far_z) = run_solver_on_components(
-                    current_solver.solver,
-                    current_fitness,
-                    &library,
-                    &disc_cfg,
-                    &stls_cfg,
-                    &lasso_cfg,
-                    &dataset_far_x,
-                    &dataset_far_y,
-                    &dataset_far_z,
-                );
-                let mut atlas = build_atlas_candidates(
+            for &variant in atlas_gate_variants(advanced.atlas_gate) {
+                let Some((close_gate_feature, far_gate_feature)) =
+                    atlas_gate_feature_pair(advanced.atlas_gate, variant)
+                else {
+                    continue;
+                };
+                let gate_threshold = match (advanced.atlas_gate, variant) {
+                    (AtlasGateMode::Smooth, AtlasGateVariant::Primary) => 0.5,
+                    (AtlasGateMode::Smooth, _) => 0.35,
+                    _ => 0.5,
+                };
+                let close_x = filter_dataset_by_gate_threshold(
                     &dataset_x,
-                    &dataset_y,
-                    &dataset_z,
-                    &vector_data.feature_names,
-                    &result,
-                    &cfg,
-                    regime,
-                    current_rollout,
-                    &topk_close_x.entries,
-                    &topk_close_y.entries,
-                    &topk_close_z.entries,
-                    &topk_far_x.entries,
-                    &topk_far_y.entries,
-                    &topk_far_z.entries,
-                    advanced.atlas_gate,
+                    close_gate_feature,
+                    gate_threshold,
                 );
-                atlas_candidate_count = atlas.len();
-                vector_candidates.append(&mut atlas);
-            } else {
+                let close_y = filter_dataset_by_gate_threshold(
+                    &dataset_y,
+                    close_gate_feature,
+                    gate_threshold,
+                );
+                let close_z = filter_dataset_by_gate_threshold(
+                    &dataset_z,
+                    close_gate_feature,
+                    gate_threshold,
+                );
+                let far_x =
+                    filter_dataset_by_gate_threshold(&dataset_x, far_gate_feature, gate_threshold);
+                let far_y =
+                    filter_dataset_by_gate_threshold(&dataset_y, far_gate_feature, gate_threshold);
+                let far_z =
+                    filter_dataset_by_gate_threshold(&dataset_z, far_gate_feature, gate_threshold);
+                if let (
+                    Some(dataset_close_x),
+                    Some(dataset_close_y),
+                    Some(dataset_close_z),
+                    Some(dataset_far_x),
+                    Some(dataset_far_y),
+                    Some(dataset_far_z),
+                ) = (close_x, close_y, close_z, far_x, far_y, far_z)
+                {
+                    let (topk_close_x, topk_close_y, topk_close_z) = run_solver_on_components(
+                        current_solver.solver,
+                        current_fitness,
+                        &library,
+                        &disc_cfg,
+                        &stls_cfg,
+                        &lasso_cfg,
+                        &dataset_close_x,
+                        &dataset_close_y,
+                        &dataset_close_z,
+                    );
+                    let (topk_far_x, topk_far_y, topk_far_z) = run_solver_on_components(
+                        current_solver.solver,
+                        current_fitness,
+                        &library,
+                        &disc_cfg,
+                        &stls_cfg,
+                        &lasso_cfg,
+                        &dataset_far_x,
+                        &dataset_far_y,
+                        &dataset_far_z,
+                    );
+                    let mut atlas = build_atlas_candidates(
+                        &dataset_x,
+                        &dataset_y,
+                        &dataset_z,
+                        &vector_data.feature_names,
+                        &result,
+                        &cfg,
+                        regime,
+                        current_rollout,
+                        &topk_close_x.entries,
+                        &topk_close_y.entries,
+                        &topk_close_z.entries,
+                        &topk_far_x.entries,
+                        &topk_far_y.entries,
+                        &topk_far_z.entries,
+                        advanced.atlas_gate,
+                        variant,
+                    );
+                    atlas_variant_counts.insert(variant.as_str().to_string(), atlas.len());
+                    atlas_candidate_count += atlas.len();
+                    vector_candidates.append(&mut atlas);
+                } else {
+                    selector_trace.push(format!(
+                        "atlas_variant_skip:{} gate={} threshold={:.2}",
+                        variant.as_str(),
+                        close_gate_feature,
+                        gate_threshold
+                    ));
+                }
+            }
+            if atlas_candidate_count == 0 {
                 eprintln!(
-                    "atlas model requested but gate_close/gate_far subsets were unavailable; falling back to global candidates"
+                    "atlas model requested but no gated subset pair had enough samples; falling back to global candidates"
                 );
             }
         }
@@ -5289,11 +5813,31 @@ fn run_factory(
         let mut filtered_candidates: Vec<CandidateSummary> = Vec::new();
         for mut candidate in vector_candidates.into_iter() {
             let mut drop_reasons: Vec<String> = Vec::new();
+            let mut canonicalization_notes: Vec<String> = Vec::new();
             let mut redundancy_flags = Vec::new();
             let mut max_abs_corr = None;
             let mut sensitivity_med = None;
 
-            if let Some(model) = vector_model_from_equation_text(&candidate.equation_text) {
+            if let Some(mut model) = vector_model_from_equation_text(&candidate.equation_text) {
+                canonicalization_notes = canonicalize_model_partition_redundancy(&mut model, 1e-6);
+                if !canonicalization_notes.is_empty() {
+                    refresh_candidate_from_model(
+                        &mut candidate,
+                        &model,
+                        &dataset_x,
+                        &dataset_y,
+                        &dataset_z,
+                        &vector_data.feature_names,
+                        &result,
+                        &cfg,
+                        regime,
+                        current_rollout,
+                    );
+                    candidate.notes.push(format!(
+                        "canonicalization={}",
+                        canonicalization_notes.join(" | ")
+                    ));
+                }
                 redundancy_flags = redundancy_flags_for_model(&model);
                 max_abs_corr = max_abs_feature_corr_for_model(
                     &model,
@@ -5356,6 +5900,7 @@ fn run_factory(
             quality_audit.push(CandidateQualityAudit {
                 candidate_id: candidate.id,
                 equation_text: candidate.equation_text.clone(),
+                canonicalization_notes: canonicalization_notes.clone(),
                 redundancy_flags: redundancy_flags.clone(),
                 max_abs_feature_corr: max_abs_corr,
                 sensitivity_median_relative_error: sensitivity_med,
@@ -5372,6 +5917,22 @@ fn run_factory(
             }
             filtered_candidates.push(candidate);
         }
+        let mut deduped: std::collections::HashMap<String, CandidateSummary> =
+            std::collections::HashMap::new();
+        for candidate in filtered_candidates {
+            let key = candidate.equation_text.clone();
+            let replace = match deduped.get(&key) {
+                Some(prev) => {
+                    candidate_sort_key(&candidate, advanced.sensitivity_mode, advanced.sens_weight)
+                        < candidate_sort_key(prev, advanced.sensitivity_mode, advanced.sens_weight)
+                }
+                None => true,
+            };
+            if replace {
+                deduped.insert(key, candidate);
+            }
+        }
+        filtered_candidates = deduped.into_values().collect();
         if filtered_candidates.is_empty() {
             selector_trace
                 .push("all_candidates_dropped_by_filters=fallback_to_unfiltered".to_string());
@@ -5478,6 +6039,15 @@ fn run_factory(
         judge_input
             .notes
             .push(format!("atlas_candidates={atlas_candidate_count}"));
+        if !atlas_variant_counts.is_empty() {
+            let mut variant_parts = Vec::new();
+            for (variant, count) in &atlas_variant_counts {
+                variant_parts.push(format!("{variant}:{count}"));
+            }
+            judge_input
+                .notes
+                .push(format!("atlas_variant_counts={}", variant_parts.join(",")));
+        }
         judge_input
             .notes
             .push(format!("sensitivity_eval={}", policy.sensitivity_eval));
@@ -5488,6 +6058,17 @@ fn run_factory(
         judge_input
             .notes
             .push(format!("atlas_gate={}", advanced.atlas_gate.as_str()));
+        judge_input.notes.push(format!(
+            "gate_geometry_method={}",
+            gate_geometry_report.method
+        ));
+        judge_input
+            .notes
+            .push(format!("gate_r0_effective={}", effective_gate_params.r0));
+        judge_input.notes.push(format!(
+            "gate_width_effective={}",
+            effective_gate_params.width
+        ));
         judge_input.notes.push(format!(
             "sensitivity_mode={}",
             advanced.sensitivity_mode.as_str()
@@ -5689,6 +6270,7 @@ fn run_factory(
                 "factory_policy": policy.kind.as_str(),
                 "model_family": policy.model_family.as_str(),
                 "atlas_candidate_count": atlas_candidate_count,
+                "atlas_variant_counts": atlas_variant_counts.clone(),
                 "policy": format!("mcts_uct(c={})", equation_search.uct_explore_c),
                 "archive_nodes": equation_search_archive.nodes.len(),
                 "archive_total_updates": equation_search_archive.total_updates,
@@ -5768,6 +6350,22 @@ fn run_factory(
             policy.model_family.as_str()
         ));
         md.push_str(&format!("- Atlas candidates: {}\n", atlas_candidate_count));
+        if !atlas_variant_counts.is_empty() {
+            let mut variant_parts = Vec::new();
+            for (variant, count) in &atlas_variant_counts {
+                variant_parts.push(format!("{variant}:{count}"));
+            }
+            md.push_str(&format!(
+                "- Atlas variant counts: {}\n",
+                variant_parts.join(", ")
+            ));
+        }
+        md.push_str(&format!(
+            "- Gate geometry: method={}, r0={:.6}, width={:.6}\n",
+            gate_geometry_report.method,
+            gate_geometry_report.selected_r0,
+            gate_geometry_report.selected_width
+        ));
         md.push_str(&format!("- Steps: {}\n", sim_summary.steps));
         md.push_str(&format!("- Energy drift: {:?}\n", sim_summary.energy_drift));
         md.push_str(&format!(
@@ -6012,6 +6610,7 @@ fn run_factory(
         out_dir.join("equation_search_report.md"),
         render_equation_search_report_md(&equation_search_archive, equation_search, 32),
     )?;
+    set_gate_params(effective_gate_params);
 
     let mut eval_notes = Vec::new();
     eval_notes.push(format!("max_iters={}", max_iters));
@@ -6027,8 +6626,21 @@ fn run_factory(
     eval_notes.push(format!("model_family={}", policy.model_family.as_str()));
     eval_notes.push(format!("sensitivity_eval={}", policy.sensitivity_eval));
     eval_notes.push(format!("atlas_gate={}", advanced.atlas_gate.as_str()));
-    eval_notes.push(format!("gate_r0={}", advanced.gate_r0));
-    eval_notes.push(format!("gate_width={}", advanced.gate_width));
+    eval_notes.push(format!("gate_r0_requested={}", advanced.gate_r0));
+    eval_notes.push(format!("gate_width_requested={}", advanced.gate_width));
+    eval_notes.push(format!("gate_r0_effective={}", effective_gate_params.r0));
+    eval_notes.push(format!(
+        "gate_width_effective={}",
+        effective_gate_params.width
+    ));
+    eval_notes.push(format!(
+        "gate_geometry_method={}",
+        gate_geometry_report.method
+    ));
+    eval_notes.push(format!(
+        "gate_tuning_enabled={}",
+        if gate_tuning_enabled { "true" } else { "false" }
+    ));
     eval_notes.push(format!(
         "redundancy_prune={}",
         advanced.redundancy_prune.as_str()
@@ -6717,6 +7329,10 @@ fn compute_benchmark_eval_v1(
         cfg.integrator.max_rejects = cfg.integrator.max_rejects.max(64);
     }
     cfg.validate().map_err(anyhow::Error::msg)?;
+    let gate_params = load_gate_geometry_report(factory_dir)
+        .map(|r| r.selected_params())
+        .unwrap_or_else(GateParams::default);
+    set_gate_params(gate_params);
 
     let model = vector_model_from_equation_text(&best.candidate.equation_text)
         .ok_or_else(|| anyhow::anyhow!("failed to parse best equation into a model"))?;
@@ -6821,6 +7437,10 @@ fn compute_sensitivity_summary_v1(
     factory_dir: &std::path::Path,
     best: &BestFactoryCandidate,
 ) -> anyhow::Result<SensitivitySummaryV1> {
+    let gate_params = load_gate_geometry_report(factory_dir)
+        .map(|r| r.selected_params())
+        .unwrap_or_else(GateParams::default);
+    set_gate_params(gate_params);
     let run_dir = factory_dir.join(&best.run_id);
     let oracle = load_oracle_run_from_dir(&run_dir)?;
     let model = vector_model_from_equation_text(&best.candidate.equation_text)
@@ -7127,6 +7747,10 @@ fn compute_seed_suite_aggregate_v1(
         cfg.integrator.max_rejects = cfg.integrator.max_rejects.max(64);
     }
     cfg.validate().map_err(anyhow::Error::msg)?;
+    let gate_params = load_gate_geometry_report(factory_dir)
+        .map(|r| r.selected_params())
+        .unwrap_or_else(GateParams::default);
+    set_gate_params(gate_params);
 
     let current_model = vector_model_from_equation_text(&best.candidate.equation_text)
         .ok_or_else(|| anyhow::anyhow!("failed to parse current best equation"))?;
@@ -7382,6 +8006,7 @@ struct BestFactoryCandidate {
 struct CandidateQualityAudit {
     candidate_id: usize,
     equation_text: String,
+    canonicalization_notes: Vec<String>,
     redundancy_flags: Vec<String>,
     max_abs_feature_corr: Option<f64>,
     sensitivity_median_relative_error: Option<f64>,
@@ -7433,6 +8058,168 @@ fn axis_coeff_map(eq: &threebody_discover::Equation) -> std::collections::BTreeM
     m
 }
 
+fn equation_from_coeff_map(
+    coeffs: std::collections::BTreeMap<String, f64>,
+) -> threebody_discover::Equation {
+    let terms = coeffs
+        .into_iter()
+        .filter(|(_f, c)| c.is_finite() && c.abs() > 1e-12)
+        .map(|(feature, coeff)| threebody_discover::equation::Term { feature, coeff })
+        .collect();
+    threebody_discover::Equation { terms }
+}
+
+fn canonicalize_model_partition_redundancy(model: &mut VectorModel, tol: f64) -> Vec<String> {
+    fn axis_partition_pairs(axis: &str) -> Vec<(String, String, String)> {
+        vec![
+            (
+                format!("grav_{axis}"),
+                format!("grav_close_{axis}"),
+                format!("grav_far_{axis}"),
+            ),
+            (
+                format!("elec_{axis}"),
+                format!("elec_close_{axis}"),
+                format!("elec_far_{axis}"),
+            ),
+            (
+                format!("mag_{axis}"),
+                format!("mag_close_{axis}"),
+                format!("mag_far_{axis}"),
+            ),
+            (
+                format!("grav_{axis}"),
+                format!("grav_sclose_{axis}"),
+                format!("grav_sfar_{axis}"),
+            ),
+            (
+                format!("elec_{axis}"),
+                format!("elec_sclose_{axis}"),
+                format!("elec_sfar_{axis}"),
+            ),
+            (
+                format!("mag_{axis}"),
+                format!("mag_sclose_{axis}"),
+                format!("mag_sfar_{axis}"),
+            ),
+            (
+                format!("grav_{axis}"),
+                format!("grav_sclose_inner_{axis}"),
+                format!("grav_sfar_inner_{axis}"),
+            ),
+            (
+                format!("elec_{axis}"),
+                format!("elec_sclose_inner_{axis}"),
+                format!("elec_sfar_inner_{axis}"),
+            ),
+            (
+                format!("mag_{axis}"),
+                format!("mag_sclose_inner_{axis}"),
+                format!("mag_sfar_inner_{axis}"),
+            ),
+            (
+                format!("grav_{axis}"),
+                format!("grav_sclose_outer_{axis}"),
+                format!("grav_sfar_outer_{axis}"),
+            ),
+            (
+                format!("elec_{axis}"),
+                format!("elec_sclose_outer_{axis}"),
+                format!("elec_sfar_outer_{axis}"),
+            ),
+            (
+                format!("mag_{axis}"),
+                format!("mag_sclose_outer_{axis}"),
+                format!("mag_sfar_outer_{axis}"),
+            ),
+        ]
+    }
+
+    fn canonicalize_axis(
+        eq: &mut threebody_discover::Equation,
+        axis: &str,
+        tol: f64,
+        notes: &mut Vec<String>,
+    ) {
+        let mut coeffs = axis_coeff_map(eq);
+        for (base, close, far) in axis_partition_pairs(axis) {
+            let Some(c_base) = coeffs.get(&base).copied() else {
+                continue;
+            };
+            let Some(c_close) = coeffs.get(&close).copied() else {
+                continue;
+            };
+            let Some(c_far) = coeffs.get(&far).copied() else {
+                continue;
+            };
+            let delta = (c_close + c_far - c_base).abs();
+            if delta > tol {
+                continue;
+            }
+            let new_base = c_base + c_far;
+            let new_close = c_close - c_far;
+            if new_base.abs() > 1e-12 {
+                coeffs.insert(base.clone(), new_base);
+            } else {
+                coeffs.remove(&base);
+            }
+            if new_close.abs() > 1e-12 {
+                coeffs.insert(close.clone(), new_close);
+            } else {
+                coeffs.remove(&close);
+            }
+            coeffs.remove(&far);
+            notes.push(format!(
+                "canonicalized_exact_partition:{axis}:{base}~{close}+{far}"
+            ));
+        }
+        *eq = equation_from_coeff_map(coeffs);
+    }
+
+    let mut notes = Vec::new();
+    canonicalize_axis(&mut model.eq_x, "x", tol, &mut notes);
+    canonicalize_axis(&mut model.eq_y, "y", tol, &mut notes);
+    canonicalize_axis(&mut model.eq_z, "z", tol, &mut notes);
+    notes
+}
+
+fn refresh_candidate_from_model(
+    candidate: &mut CandidateSummary,
+    model: &VectorModel,
+    dataset_x: &Dataset,
+    dataset_y: &Dataset,
+    dataset_z: &Dataset,
+    feature_names: &[String],
+    result: &threebody_core::sim::SimResult,
+    cfg: &Config,
+    regime: &str,
+    rollout_integrator: RolloutIntegrator,
+) {
+    let mse_x = threebody_discover::equation::score_equation(&model.eq_x, dataset_x);
+    let mse_y = threebody_discover::equation::score_equation(&model.eq_y, dataset_y);
+    let mse_z = threebody_discover::equation::score_equation(&model.eq_z, dataset_z);
+    let mse = (mse_x + mse_y + mse_z) / 3.0;
+    let complexity = model.eq_x.complexity() + model.eq_y.complexity() + model.eq_z.complexity();
+    let (rmse, divergence_time) =
+        rollout_metrics(model, feature_names, result, cfg, rollout_integrator);
+    let mut flags = Vec::new();
+    flags.extend(stability_flags_for(&model.eq_x, regime));
+    flags.extend(stability_flags_for(&model.eq_y, regime));
+    flags.extend(stability_flags_for(&model.eq_z, regime));
+    flags.sort();
+    flags.dedup();
+
+    candidate.equation = model.eq_x.clone();
+    candidate.equation_text = format_vector_model(model);
+    candidate.metrics = CandidateMetrics {
+        mse,
+        complexity,
+        rollout_rmse: Some(rmse),
+        divergence_time,
+        stability_flags: flags,
+    };
+}
+
 fn redundancy_flags_for_model(model: &VectorModel) -> Vec<String> {
     fn axis_flags(coeffs: &std::collections::BTreeMap<String, f64>, axis: &str) -> Vec<String> {
         let mut out = Vec::new();
@@ -7467,9 +8254,43 @@ fn redundancy_flags_for_model(model: &VectorModel) -> Vec<String> {
                 format!("mag_sclose_{axis}"),
                 format!("mag_sfar_{axis}"),
             ),
+            (
+                "grav_sinner",
+                format!("grav_sclose_inner_{axis}"),
+                format!("grav_sfar_inner_{axis}"),
+            ),
+            (
+                "elec_sinner",
+                format!("elec_sclose_inner_{axis}"),
+                format!("elec_sfar_inner_{axis}"),
+            ),
+            (
+                "mag_sinner",
+                format!("mag_sclose_inner_{axis}"),
+                format!("mag_sfar_inner_{axis}"),
+            ),
+            (
+                "grav_souter",
+                format!("grav_sclose_outer_{axis}"),
+                format!("grav_sfar_outer_{axis}"),
+            ),
+            (
+                "elec_souter",
+                format!("elec_sclose_outer_{axis}"),
+                format!("elec_sfar_outer_{axis}"),
+            ),
+            (
+                "mag_souter",
+                format!("mag_sclose_outer_{axis}"),
+                format!("mag_sfar_outer_{axis}"),
+            ),
         ] {
             let base = if prefix.ends_with("_s") {
                 format!("{}_{}", &prefix[..prefix.len() - 2], axis)
+            } else if prefix.ends_with("_sinner") {
+                format!("{}_{}", &prefix[..prefix.len() - 7], axis)
+            } else if prefix.ends_with("_souter") {
+                format!("{}_{}", &prefix[..prefix.len() - 7], axis)
             } else {
                 format!("{prefix}_{axis}")
             };
@@ -9225,6 +10046,10 @@ fn feature_pool_for_axis(feature_names: &[String], axis: char, regime: &str) -> 
             || name == "gate_far"
             || name == "gate_smooth_close"
             || name == "gate_smooth_far"
+            || name == "gate_smooth_close_inner"
+            || name == "gate_smooth_far_inner"
+            || name == "gate_smooth_close_outer"
+            || name == "gate_smooth_far_outer"
             || name.ends_with(&format!("_{axis}"))
     }
     fn regime_ok(name: &str, regime: &str) -> bool {
@@ -11443,6 +12268,24 @@ mod tests {
     }
 
     #[test]
+    fn atlas_smooth_variants_have_expected_gate_pairs() {
+        assert_eq!(atlas_gate_variants(AtlasGateMode::Binary).len(), 1);
+        assert_eq!(atlas_gate_variants(AtlasGateMode::Smooth).len(), 3);
+        assert_eq!(
+            atlas_gate_feature_pair(AtlasGateMode::Smooth, AtlasGateVariant::Primary),
+            Some(("gate_smooth_close", "gate_smooth_far"))
+        );
+        assert_eq!(
+            atlas_gate_feature_pair(AtlasGateMode::Smooth, AtlasGateVariant::Inner),
+            Some(("gate_smooth_close_inner", "gate_smooth_far_inner"))
+        );
+        assert_eq!(
+            atlas_gate_feature_pair(AtlasGateMode::Smooth, AtlasGateVariant::Outer),
+            Some(("gate_smooth_close_outer", "gate_smooth_far_outer"))
+        );
+    }
+
+    #[test]
     fn propose_equation_mutants_is_deterministic_and_axis_consistent() {
         let features = FeatureLibrary::default_physics().features;
         let parent = "ax=+1.000000*grav_x ; ay=+1.000000*grav_y ; az=0";
@@ -11457,6 +12300,10 @@ mod tests {
                         || f == "gate_far"
                         || f == "gate_smooth_close"
                         || f == "gate_smooth_far"
+                        || f == "gate_smooth_close_inner"
+                        || f == "gate_smooth_far_inner"
+                        || f == "gate_smooth_close_outer"
+                        || f == "gate_smooth_far_outer"
                         || f.ends_with("_x")
                 );
             }
@@ -11466,6 +12313,10 @@ mod tests {
                         || f == "gate_far"
                         || f == "gate_smooth_close"
                         || f == "gate_smooth_far"
+                        || f == "gate_smooth_close_inner"
+                        || f == "gate_smooth_far_inner"
+                        || f == "gate_smooth_close_outer"
+                        || f == "gate_smooth_far_outer"
                         || f.ends_with("_y")
                 );
             }
@@ -11475,6 +12326,10 @@ mod tests {
                         || f == "gate_far"
                         || f == "gate_smooth_close"
                         || f == "gate_smooth_far"
+                        || f == "gate_smooth_close_inner"
+                        || f == "gate_smooth_far_inner"
+                        || f == "gate_smooth_close_outer"
+                        || f == "gate_smooth_far_outer"
                         || f.ends_with("_z")
                 );
             }
@@ -11546,6 +12401,74 @@ mod tests {
         assert!((f_a[0] - f_b[0]).abs() < 0.2);
         assert!((f_a[0] + f_a[1] - 1.0).abs() < 1e-9);
         assert!((f_b[0] + f_b[1] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn smooth_inner_outer_gate_pairs_sum_to_one() {
+        set_gate_params(GateParams {
+            r0: 0.5,
+            width: 0.05,
+        });
+        let cfg = Config::default();
+        let system = System::new(
+            [Body::new(1.0, 0.0); 3],
+            State::new(
+                [
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.53, 0.0, 0.0),
+                    Vec3::new(-1.0, 0.0, 0.0),
+                ],
+                [Vec3::zero(); 3],
+            ),
+        );
+        let names = vec![
+            "gate_smooth_close_inner".to_string(),
+            "gate_smooth_far_inner".to_string(),
+            "gate_smooth_close_outer".to_string(),
+            "gate_smooth_far_outer".to_string(),
+        ];
+        let f = compute_feature_vector(&system, 0, &cfg, &names);
+        assert!((f[0] + f[1] - 1.0).abs() < 1e-9);
+        assert!((f[2] + f[3] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn canonicalize_partition_redundancy_eliminates_exact_far_term() {
+        let mut model = VectorModel {
+            eq_x: threebody_discover::Equation {
+                terms: vec![
+                    threebody_discover::equation::Term {
+                        feature: "grav_close_x".to_string(),
+                        coeff: 0.6,
+                    },
+                    threebody_discover::equation::Term {
+                        feature: "grav_far_x".to_string(),
+                        coeff: 0.4,
+                    },
+                    threebody_discover::equation::Term {
+                        feature: "grav_x".to_string(),
+                        coeff: 1.0,
+                    },
+                ],
+            },
+            eq_y: threebody_discover::Equation { terms: vec![] },
+            eq_z: threebody_discover::Equation { terms: vec![] },
+        };
+        let notes = canonicalize_model_partition_redundancy(&mut model, 1e-9);
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("canonicalized_exact_partition"))
+        );
+        let coeffs = axis_coeff_map(&model.eq_x);
+        assert!(!coeffs.contains_key("grav_far_x"));
+        let c_base = coeffs.get("grav_x").copied().unwrap_or(0.0);
+        let c_close = coeffs.get("grav_close_x").copied().unwrap_or(0.0);
+        for g in [0.1f64, 0.8f64] {
+            let original = 1.0 + 0.6 * g + 0.4 * (1.0 - g);
+            let canonical = c_base + c_close * g;
+            assert!((original - canonical).abs() < 1e-9);
+        }
     }
 
     #[test]
