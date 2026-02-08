@@ -27,6 +27,7 @@ This revision adds three math families outside the prior force-library core (\te
 
 We additionally implemented a deterministic delay-embedding track (\texttt{predictability takens}) with strict chronological holdouts, local deterministic formulas, and a sensitivity-consistency score based on one-step tangent prediction. Beyond local linear and local rational families, we added residual (delta) variants that fit $\Delta x_{t+1}=x_{t+1}-x_t$ and reconstruct $x_{t+1}=x_t+\widehat{\Delta x}_{t+1}$. On a matched 4-channel benchmark (February 8, 2026), the delta-enabled baseline (target-only embedding) was mixed: 2/4 channels effective, median all-channel improvement $\approx 0.23797$ (95\% bootstrap CI $[-0.52325,\,0.99981]$). With sensor-augmented embeddings plus delta-enabled model selection, efficacy rose to 4/4 effective channels with median all-channel improvement $\approx 0.99989$ (95\% CI $[0.99980,\,0.99999]$), and paired before/after comparison showed strict non-regression on all shared channels.
 To make the guiding question operational, we added a reporting layer that now includes deterministic bootstrap confidence intervals and an explicit before/after comparator with effect-size and non-regression flags. The measured gain from baseline to sensor-augmented delta mode was substantial on this run: all-channel median improvement delta $\approx +0.7619$ and derived-channel median improvement delta $\approx +1.5231$.
+We also introduced an information-context framing: for a target channel and sensor set, define context volume $W=(\tau m)|S|$ and estimate the minimum $W^\star$ that meets a strict holdout gate. In a matched high-bar analysis ($\Delta_{\mathrm{rel}}>0.6$, sensitivity median $\le 0.2$), we measured $W^\star=3$ for one-body inertial and two-body Kepler regimes, versus $W^\star=20$ for a perturbed three-body regime, suggesting higher information demand as interaction complexity increases.
 
 We emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. We argue that novelty arises not from claiming a universal closed-form solution, but from automatically discovering compact regime-specific laws with explicit validity domains, strict holdout testing, and reproducible failure reporting against the oracle.
 Code repository: \texttt{https://github.com/Hendler/threebody}.
@@ -41,6 +42,22 @@ The guiding question for this research, requested by Jonathan Hendler, is:
 Given richer measurements of a deterministic three-body system, can we discover and use mathematically better predictive laws?
 \end{quote}
 All methods and evaluations in this paper are judged against that question: they must improve strict holdout prediction, not only in-sample fit.
+
+\subsection*{Predictability context-window framing}
+To sharpen the guiding question, we treat prediction as an information-budget problem. For a target channel $x_t$ and sensor set $S$, a delay embedding uses:
+\[
+z_t=\{x_{t-j\tau}^{(s)}: j=0,\ldots,m-1,\ s\in S\},
+\]
+with context volume
+\[
+W=(\tau m)\,|S|.
+\]
+Given a strict effectiveness gate $(\tau_\Delta,\tau_s)$ on holdout relative improvement and sensitivity consistency, we define the \emph{minimum effective context}:
+\[
+W^\star=\min\{W:\Delta_{\mathrm{rel}}(W)>\tau_\Delta,\ \varepsilon_{\mathrm{sens}}(W)\le\tau_s\}.
+\]
+If no tested context passes, we report ``not found in tested grid'' rather than claiming failure of determinism.
+This framing connects directly to Jonathan Hendler's primary question: better sensors and better mathematical representations should reduce forecast error by moving the model into an effective context regime.
 
 We propose a two-system approach:
 \begin{itemize}
@@ -498,6 +515,32 @@ Interpretation for the guiding question: in this controlled matched run, richer 
 For physicists: this is strong one-step evidence for representation matching (state augmentation + residualization), not a claim of long-horizon shadowing.
 For novice readers: once we gave the equation better inputs and asked it to predict the change instead of the full value, it became much more accurate on every test signal we checked here.
 
+\subsection{Predictability context-window ladder (February 8, 2026)}
+We implemented \texttt{predictability context-window} to sweep embedding context length and estimate minimum effective context under strict holdout gates. For each point, context volume is $W=(\tau m)|S|$.
+
+Matched runs used \texttt{tau=1}, $m\in\{1,2,3,4,5,6,8,10\}$, \texttt{k} in $\{6,10\}$, $\lambda$ in $\{10^{-8},10^{-6}\}$, \texttt{model=all}, chronological split, and a high-bar gate $\Delta_{\mathrm{rel}}>0.6$, sensitivity median $\le 0.2$.
+
+\begin{center}
+\begin{tabular}{lccc}
+\hline
+regime & target/sensors & estimated $W^\star$ & note \\
+\hline
+one-body inertial & \texttt{r1\_x} / \texttt{r1\_x,v1\_x,a1\_x} & $3$ & effective already at $m=1$ \\
+two-body Kepler & \texttt{r1\_x} / \texttt{r1\_x,v1\_x,a1\_x} & $3$ & effective already at $m=1$ \\
+three-body perturbed & \texttt{a1\_x} / \texttt{a1\_x,v1\_x,r1\_x,r2\_x,r3\_x} & $20$ & first high-bar pass at $m=4$ \\
+\hline
+\end{tabular}
+\end{center}
+
+Artifacts: \texttt{results/context\_window\_one\_body.json}, \texttt{results/context\_window\_two\_body.json}, \texttt{results/context\_window\_three\_body\_a1x.json}, and ladder summary \texttt{results/context\_window\_ladder.json}.
+
+Interpretation:
+\begin{itemize}
+\item Under this high-bar gate, the measured effective context requirement is substantially larger for the perturbed three-body regime than for one-body/two-body regimes.
+\item This supports a practical ``information-context law'' view: deterministic dynamics are not random, but the information/context budget needed for reliable local prediction can increase sharply with interaction complexity.
+\item We also observed non-monotonic performance across $m$ in the three-body case; so increasing context alone is not guaranteed to improve accuracy without matching model class and feature geometry.
+\end{itemize}
+
 \subsection{Policy and claim-gate summary (main-body view)}
 Extended policy sweeps and paired matrix studies are now treated as supporting evidence rather than core narrative and are reported in Appendix~B.
 In the main body, the key outcomes are:
@@ -547,6 +590,7 @@ We interpret ``novel'' as compact approximations that outperform naive baselines
 Future work priorities are explicitly ordered by the guiding question posed by Jonathan Hendler: whether richer information plus new mathematics yields better strict-holdout prediction over time.
 \begin{itemize}
 \item Promote residual local maps and sensor-augmented embeddings to the default predictability benchmark path (done for model-family default; remaining work: broader channel suites and multi-seed replication).
+\item Turn the context-window hypothesis into a full response surface $W^\star(\text{regime}, \text{channel}, \tau_\Delta, \tau_s, H)$, including multi-horizon $H$ and uncertainty bands over seeds.
 \item Add strict multi-horizon holdout metrics (1-step, short-horizon, and shadowing-time) so ``predicts better over time'' is measured directly, not inferred from one-step scores.
 \item Build explicit information-value experiments: compare sensor subsets under matched splits and compute uncertainty bars for each subset to estimate marginal value of each diagnostic channel.
 \item Extend deterministic equation families with mathematically compact non-physics bases from dynamical systems: Koopman/EDMD dictionaries, Ulam transfer operators, symbolic-dynamics/entropy features, and recurrence-quantification gates.
@@ -557,6 +601,8 @@ Future work priorities are explicitly ordered by the guiding question posed by J
 
 \section{Conclusion}
 The primary question of this paper is now explicit and testable: can richer deterministic measurements of a three-body system support better predictive mathematics under strict holdout testing? In this revision, the strongest positive result is in the predictability track: sensor-augmented residual local formulas (delta-enabled Takens family) improved matched one-step holdout efficacy from 2/4 effective channels to 4/4, with a paired non-regression pass across all shared channels and large derived-channel gain. This is concrete evidence that better information and better representation can materially improve predictive accuracy in at least one rigorous setting.
+
+We also introduced and tested a context-window formulation of that question. Using $W=(\tau m)|S|$ and a high-bar strict gate, estimated minimum effective context increased from $W^\star=3$ in one-body/two-body reference regimes to $W^\star=20$ in a perturbed three-body regime. This is not a universal theorem, but it is a reproducible empirical signal that ``how much information you need'' grows with dynamical interaction complexity.
 
 At the same time, our force-library global-equation discovery track still has an important negative result: new geometry feature families and MDL-aware selection did not produce a robust strict-holdout gain over Newtonian baseline in the reported matched runs. So we do \emph{not} claim a new universal law.
 
@@ -635,6 +681,8 @@ S. Mikkola and S. J. Aarseth, ``An implementation of N-body chain regularization
 \item New deterministic feature-family atoms include \texttt{jacobi\_legendre}, \texttt{shape\_invariants}, and \texttt{symmetry\_invariants}; selection can be switched to an MDL-prioritized comparator via \texttt{--selector-policy numeric\_mdl}.
 \item The \texttt{predictability takens} command now supports local linear, local rational, and residual (delta) model families (\texttt{--model}, default \texttt{all}), sensor-augmented embeddings from simulator columns (\texttt{--sensors}), strict split modes, and sensitivity-weighted selection (\texttt{--sensitivity-weight}), producing JSON reports with holdout and tangent-consistency metrics.
 \item The \texttt{predictability report} command aggregates channel-level efficacy from report JSON files with explicit thresholds (\texttt{--improvement-threshold}, \texttt{--max-sensitivity-median}), deterministic bootstrap confidence intervals (\texttt{--bootstrap-*}), and JSON/Markdown outputs. The \texttt{predictability compare} command provides paired before/after effect-size and non-regression summaries.
+\item The \texttt{predictability context-window} command sweeps embedding context length (\texttt{m}) at fixed delay (\texttt{tau}) and reports minimum effective context under strict holdout+sensitivity gates, including per-point artifacts and JSON/Markdown summaries.
+\item New deterministic presets include \texttt{one-body} and \texttt{three-body-perturbed} for complexity-ladder experiments.
 \item The \texttt{research\_v2\_atlas} policy defaults to an atlas model family and benchmark-first claim gating (\texttt{highbar\_v2\_benchmark\_first}).
 \item Bootstrap CI computation for the claim gate now uses index-safe resampling and is covered by a regression test to prevent out-of-bounds failures on 12-case suites.
 \end{itemize}

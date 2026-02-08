@@ -27,6 +27,9 @@ This priority layer is additive: it does not remove simulation-accuracy or equat
 - [x] R016. Add sensor-augmented Takens input mode (`--sensors`) so equations can use richer simulator channels in the embedding state.
 - [x] R017. Add TDD fixture proving richer auxiliary sensors can materially improve one-step prediction in a controlled coupled system.
 - [x] R018. Run matched baseline-vs-sensor efficacy summaries on current trajectory channels and record channel-wise gains/failures.
+- [x] R019. Add `predictability context-window` command to estimate minimum effective information/context window `W*` from strict holdout+sensitivity gates.
+- [x] R020. Add TDD coverage for context-window summary logic and CLI integration.
+- [x] R021. Run one/two/three regime context-window ladder experiments and persist artifacts (`results/context_window_*`, `results/context_window_ladder.json`).
 
 ## Stream 1: Project governance and reproducibility scaffold
 - [ ] 001. Define acceptance criteria and measurable success metric for "Project governance and reproducibility scaffold".
