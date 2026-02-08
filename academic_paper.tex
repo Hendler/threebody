@@ -11,8 +11,17 @@
 \begin{document}
 \maketitle
 
+\begin{center}
+\fbox{\parbox{0.97\linewidth}{
+\textbf{Primary research question (posed by Jonathan Hendler):}
+If we collect better sensors and richer information about a deterministic three-body system, can we discover and use better mathematics that predicts its evolution more accurately over time?
+
+This question is the central objective of this paper and now explicitly guides future work.
+}}
+\end{center}
+
 \begin{abstract}
-We present a two-system framework for studying and predicting three-body dynamics under coupled gravitational and electromagnetic interactions. The first system is a high-fidelity numerical simulator (``oracle'') designed for reproducibility, performance, and explicit error control. It supports Newtonian gravity and a nonrelativistic electromagnetic interaction model including electric and magnetic fields as well as scalar and vector potentials ($\phi$, $A$). The second system is a model-discovery engine that searches for sparse, interpretable equations that predict the oracle's trajectories with minimal complexity. In the current implementation, discovery proceeds via structured feature libraries and sparse regression (STLS/LASSO)\cite{Brunton2016,Tibshirani1996}, using simulator-provided accelerations to avoid derivative noise; an optional GA baseline is also available.
+The primary research question for this project, explicitly posed by Jonathan Hendler, is whether better sensing/information can enable better mathematics for prediction in deterministic three-body dynamics. We present a two-system framework for testing that question under coupled gravitational and electromagnetic interactions. The first system is a high-fidelity numerical simulator (``oracle'') designed for reproducibility, performance, and explicit error control. It supports Newtonian gravity and a nonrelativistic electromagnetic interaction model including electric and magnetic fields as well as scalar and vector potentials ($\phi$, $A$). The second system is a model-discovery engine that searches for sparse, interpretable equations that predict the oracle's trajectories with minimal complexity. In the current implementation, discovery proceeds via structured feature libraries and sparse regression (STLS/LASSO)\cite{Brunton2016,Tibshirani1996}, using simulator-provided accelerations to avoid derivative noise; an optional GA baseline is also available.
 
 This revision adds three math families outside the prior force-library core (\texttt{jacobi\_legendre}, \texttt{shape\_invariants}, \texttt{symmetry\_invariants}), plus an MDL-aware deterministic selector mode (\texttt{numeric\_mdl}) layered on top of existing MCTS archive reuse and strict holdout gates. In matched deterministic gravity-only runs on February 8, 2026 (\texttt{research\_v2\_atlas}, 3 iterations, 150 steps, $dt=0.01$), the best equation and benchmark metrics were unchanged versus baseline: median relative improvement $0.0$ (12-seed suite, 95\% bootstrap CI $[0,0]$), benchmark relative improvement $\approx 1.3\times10^{-16}$, and \texttt{strict\_holdout\_passed=false}. A targeted global-model run with the new families produced a simpler equation (complexity 5) but a small negative benchmark delta ($-7.5\times10^{-5}$, CI fully negative). Therefore, current evidence supports tooling progress and stronger falsification, not a new physical law.
 
@@ -25,6 +34,13 @@ Code repository: \texttt{https://github.com/Hendler/threebody}.
 \section{Introduction}
 The classical three-body problem is a paradigmatic nonlinear dynamical system exhibiting sensitivity to initial conditions and, for most configurations, the absence of closed-form global solutions. Practical prediction therefore relies on numerical integration, while theory offers partial analytic structure (integrals of motion, special solutions, perturbation expansions, invariant manifolds). For modern applications---ranging from celestial mechanics to charged particle dynamics---one often wants both: (i) an accurate simulator suitable as ``ground truth,'' and (ii) interpretable approximations that predict well and illuminate structure.
 
+\subsection*{Guiding question and scope}
+The guiding question for this research, requested by Jonathan Hendler, is:
+\begin{quote}
+Given richer measurements of a deterministic three-body system, can we discover and use mathematically better predictive laws?
+\end{quote}
+All methods and evaluations in this paper are judged against that question: they must improve strict holdout prediction, not only in-sample fit.
+
 We propose a two-system approach:
 \begin{itemize}
 \item \textbf{Truth-grade simulation system (``oracle'')} -- a careful, reproducible, numerically controlled engine that produces trajectories and physically meaningful diagnostics.
@@ -34,7 +50,7 @@ We propose a two-system approach:
 This paper describes the architecture, numerical methods, and discovery methodology, and it explicitly lists modeling assumptions and unresolved issues.
 
 \subsection*{Reader guide (physicists and novice readers)}
-For physicists: Sections 2--3 define the implemented force model and numerical/discovery pipeline precisely enough to audit assumptions, approximations, and reproducibility artifacts.
+For physicists: the main body focuses on the central question, methods, and claim-level outcomes; implementation details and extended ablations are moved to appendices for auditability.
 For novice readers: the workflow is ``simulate first, then discover'' --- we generate trusted trajectories with a strict simulator, ask sparse regression/search to propose simple equations, and only keep equations that roll out accurately on new tests.
 
 \section{Simulator (``Oracle'') Design}
@@ -428,82 +444,15 @@ Interpretation:
 For physicists: the result supports a mixed view of deterministic local formulas. Delay-embedding local models can provide strong short-horizon prediction for some observables, but they do not yet give a uniformly better reduced law across derived chaotic diagnostics.
 For novice readers: this new method can predict some signals much better than a naive ``next value equals current value'' guess, but it still fails badly on other signals, so we are not at a universal formula.
 
-\subsection{Current empirical evidence for archive-guided search}
-We ran a controlled local sweep (8 factory iterations, STLS, \texttt{three-body} preset, \texttt{steps}=200, $dt=0.01$, mock LLM), varying $c\in\{0.4,0.7,1.0\}$ and $K\in\{6,8,12\}$ at fixed seed.
+\subsection{Policy and claim-gate summary (main-body view)}
+Extended policy sweeps and paired matrix studies are now treated as supporting evidence rather than core narrative and are reported in Appendix~B.
+In the main body, the key outcomes are:
 \begin{itemize}
-\item Across all settings, the best rollout RMSE found in the run was identical: $9.2602898\times 10^{-3}$.
-\item The tuned setting ($c=0.4$, $K=12$) was slightly better on that seed in average per-iteration top-candidate RMSE ($2.7002408\times 10^{-2}$ vs.\ $2.7074579\times 10^{-2}$ for prior defaults $c=0.7$, $K=8$), and in final-iteration top RMSE ($1.7625853\times 10^{-2}$ vs.\ $1.7921833\times 10^{-2}$).
-\item The archive became more diverse (node count $38\rightarrow45$, updates $60\rightarrow69$ for the same 8-iteration budget).
+\item Archive/MCTS policy tuning improved search bookkeeping and diversity but did not produce robust cross-seed predictive gains.
+\item The strict claim gate remained conservative in all reported matched runs, with \texttt{claim\_status=no\_improvement} whenever holdout evidence was not statistically positive.
+\item In both gravity-dominant and EM-active paired matrices, policy updates were mostly neutral and occasionally worse on held-out benchmarks.
 \end{itemize}
-Cross-seed verification (two additional seeds) showed no measurable predictive advantage between prior defaults and tuned settings; best and mean rollout RMSE were numerically identical in those checks. Therefore, we treat the current change as a search-efficiency and reporting improvement, not evidence of a robust accuracy breakthrough.
-
-\subsection{Current status of the claim gate}
-In the latest matched geometry+MDL run on February 8, 2026 (\texttt{research\_v2\_atlas}), \texttt{highbar\_v2\_benchmark\_first} returned:
-\begin{itemize}
-\item \texttt{claim\_status=no\_improvement},
-\item \texttt{n\_cases=12} (seed suite fully evaluated),
-\item \texttt{benchmark\_passed=true} with essentially zero delta,
-\item \texttt{strict\_holdout\_passed=false}.
-\end{itemize}
-This is intended behavior: no statistically positive holdout gain implies no novelty claim, even when benchmark non-regression passes.
-
-\subsection{Claim-gated legacy vs.\ research comparison (matrix run)}
-On February 8, 2026, we ran a 5-case paired matrix with clean buckets (3 factory iterations per run, STLS, LLM off, deterministic 12-seed claim suite). For each case, we first ran \texttt{legacy}, then \texttt{research\_v1} with the same seed and bucket.
-
-\begin{center}
-\begin{tabular}{lrrrrr}
-\hline
-case & seed & steps & RMSE$_\text{legacy}$ & RMSE$_\text{research}$ & $\Delta$ (research-prior) \\
-\hline
-1 & 5151 & 180 & $1.0141\times 10^{-2}$ & $1.0141\times 10^{-2}$ & $0.0$ \\
-2 & 6161 & 181 & $1.2134\times 10^{-2}$ & $1.2134\times 10^{-2}$ & $0.0$ \\
-3 & 7171 & 182 & $2.0797\times 10^{-2}$ & $2.0797\times 10^{-2}$ & $0.0$ \\
-4 & 8181 & 183 & $1.1167\times 10^{-2}$ & $1.1355\times 10^{-2}$ & $1.8847\times 10^{-4}$ \\
-5 & 9191 & 184 & $1.1744\times 10^{-2}$ & $1.1744\times 10^{-2}$ & $\approx 0$ \\
-\hline
-\end{tabular}
-\end{center}
-
-Aggregate outcomes:
-\begin{itemize}
-\item Mean $\Delta$ (research-prior) $=3.77\times 10^{-5}$, median $\Delta=0$.
-\item 4/5 cases were exactly equal within floating-point tolerance; 1/5 was slightly worse.
-\item Claim gate output was \texttt{no\_improvement} in 5/5 cases, with 0/5 high-bar passes.
-\item In all 5 cases, the top equation text selected by \texttt{research\_v1} matched the prior baseline equation.
-\end{itemize}
-
-For physicists: this suggests that, in these gravity-only deterministic settings, the current policy-level exploration knobs did not change the dominant sparse support selected by the solver.
-
-In plain language for novice readers: in this test matrix, the newer search policy did not beat the older one. The system correctly reported that as ``no improvement'' instead of overstating progress.
-
-\subsection{EM-active paired matrix (new run)}
-To test a genuinely EM-active setting, on February 8, 2026 we ran a second 5-case paired matrix with \texttt{--em}, a charged preset (\texttt{em-three-body}), and the EM-oriented feature library (\texttt{em\_fields}); each pair again used identical seed and bucket, with \texttt{legacy} first and \texttt{research\_v1} second.
-
-The mean EM-to-gravity acceleration ratio on the research best runs was $1.605$ (range $[1.603,1.607]$), so these trajectories were not gravity-dominated.
-
-\begin{center}
-\begin{tabular}{lrrrr}
-\hline
-case & seed & $\Delta$ RMSE (research-prior) & $\Delta$ benchmark RMSE & claim status \\
-\hline
-1 & 2301 & $0.0$ & $0.0$ & no\_improvement \\
-2 & 2401 & $-1.528\times 10^{-2}$ & $+5.001\times 10^{-1}$ & directional\_trend \\
-3 & 2501 & $\approx 0$ & $0.0$ & no\_improvement \\
-4 & 2601 & $-8.013\times 10^{-4}$ & $0.0$ & no\_improvement \\
-5 & 2701 & $0.0$ & $0.0$ & no\_improvement \\
-\hline
-\end{tabular}
-\end{center}
-
-Aggregate outcomes:
-\begin{itemize}
-\item Mean $\Delta$ RMSE (research-prior) $=-3.22\times 10^{-3}$, median $\Delta \approx 0$.
-\item Mean $\Delta$ benchmark RMSE $=+1.00\times 10^{-1}$, median $\Delta=0$.
-\item Claim gate output: 4/5 \texttt{no\_improvement}, 1/5 \texttt{directional\_trend}, and 0/5 high-bar passes.
-\end{itemize}
-
-For physicists: one case improved within-run rollout RMSE but degraded on the held-out EM benchmark, indicating local fit gains without robust cross-regime generalization.
-In plain language for novice readers: even when EM effects are strong, the new policy did not consistently predict better than the old one, so we should not claim a breakthrough yet.
+This behavior is aligned with the paper's guiding question: we only claim progress when richer information plus new math improves strict holdout prediction.
 
 \subsection{What we can claim}
 \begin{itemize}
@@ -541,6 +490,7 @@ In practice, a common failure mode is to repeatedly rediscover gravity-only stru
 We interpret ``novel'' as compact approximations that outperform naive baselines within a regime and are expressed in human-interpretable terms. We do not claim a universal analytic solution.
 
 \section{Future Work}
+Future work priorities are explicitly ordered by the guiding question posed by Jonathan Hendler: whether richer information plus new mathematics yields better strict-holdout prediction over time.
 \begin{itemize}
 \item Add principled close-encounter regularization (KS/chain, Sundman transforms) and/or multi-precision truth mode (beyond softening/smooth substepping).
 \item Implement predict and score commands with standardized benchmarks (divergence time, RMS error curves).
@@ -628,6 +578,85 @@ S. Mikkola and S. J. Aarseth, ``An implementation of N-body chain regularization
 \item The \texttt{predictability takens} command now supports local linear and local rational maps (\texttt{--model}), strict split modes, and sensitivity-weighted selection (\texttt{--sensitivity-weight}), producing JSON reports with holdout and tangent-consistency metrics.
 \item The \texttt{research\_v2\_atlas} policy defaults to an atlas model family and benchmark-first claim gating (\texttt{highbar\_v2\_benchmark\_first}).
 \item Bootstrap CI computation for the claim gate now uses index-safe resampling and is covered by a regression test to prevent out-of-bounds failures on 12-case suites.
+\end{itemize}
+
+\section{Extended Policy and Matrix Evidence}
+\subsection{Archive-guided search sweep details}
+We ran a controlled local sweep (8 factory iterations, STLS, \texttt{three-body} preset, \texttt{steps}=200, $dt=0.01$, mock LLM), varying $c\in\{0.4,0.7,1.0\}$ and $K\in\{6,8,12\}$ at fixed seed.
+\begin{itemize}
+\item Across all settings, the best rollout RMSE found in the run was identical: $9.2602898\times 10^{-3}$.
+\item The tuned setting ($c=0.4$, $K=12$) was slightly better on that seed in average per-iteration top-candidate RMSE ($2.7002408\times 10^{-2}$ vs.\ $2.7074579\times 10^{-2}$ for prior defaults $c=0.7$, $K=8$), and in final-iteration top RMSE ($1.7625853\times 10^{-2}$ vs.\ $1.7921833\times 10^{-2}$).
+\item The archive became more diverse (node count $38\rightarrow45$, updates $60\rightarrow69$ for the same 8-iteration budget).
+\end{itemize}
+Cross-seed verification (two additional seeds) showed no measurable predictive advantage between prior defaults and tuned settings; best and mean rollout RMSE were numerically identical in those checks.
+
+\subsection{Claim-gate status snapshot}
+In the latest matched geometry+MDL run on February 8, 2026 (\texttt{research\_v2\_atlas}), \texttt{highbar\_v2\_benchmark\_first} returned:
+\begin{itemize}
+\item \texttt{claim\_status=no\_improvement},
+\item \texttt{n\_cases=12} (seed suite fully evaluated),
+\item \texttt{benchmark\_passed=true} with essentially zero delta,
+\item \texttt{strict\_holdout\_passed=false}.
+\end{itemize}
+No statistically positive holdout gain implies no novelty claim, even when benchmark non-regression passes.
+
+\subsection{Claim-gated legacy vs.\ research matrix (gravity-dominant)}
+On February 8, 2026, we ran a 5-case paired matrix with clean buckets (3 factory iterations per run, STLS, LLM off, deterministic 12-seed claim suite). For each case, we first ran \texttt{legacy}, then \texttt{research\_v1} with the same seed and bucket.
+
+\begin{center}
+\begin{tabular}{lrrrrr}
+\hline
+case & seed & steps & RMSE$_\text{legacy}$ & RMSE$_\text{research}$ & $\Delta$ (research-prior) \\
+\hline
+1 & 5151 & 180 & $1.0141\times 10^{-2}$ & $1.0141\times 10^{-2}$ & $0.0$ \\
+2 & 6161 & 181 & $1.2134\times 10^{-2}$ & $1.2134\times 10^{-2}$ & $0.0$ \\
+3 & 7171 & 182 & $2.0797\times 10^{-2}$ & $2.0797\times 10^{-2}$ & $0.0$ \\
+4 & 8181 & 183 & $1.1167\times 10^{-2}$ & $1.1355\times 10^{-2}$ & $1.8847\times 10^{-4}$ \\
+5 & 9191 & 184 & $1.1744\times 10^{-2}$ & $1.1744\times 10^{-2}$ & $\approx 0$ \\
+\hline
+\end{tabular}
+\end{center}
+
+Aggregate outcomes:
+\begin{itemize}
+\item Mean $\Delta$ (research-prior) $=3.77\times 10^{-5}$, median $\Delta=0$.
+\item 4/5 cases were exactly equal within floating-point tolerance; 1/5 was slightly worse.
+\item Claim gate output was \texttt{no\_improvement} in 5/5 cases, with 0/5 high-bar passes.
+\item In all 5 cases, the top equation text selected by \texttt{research\_v1} matched the prior baseline equation.
+\end{itemize}
+
+\subsection{EM-active paired matrix}
+To test a genuinely EM-active setting, on February 8, 2026 we ran a second 5-case paired matrix with \texttt{--em}, a charged preset (\texttt{em-three-body}), and the EM-oriented feature library (\texttt{em\_fields}); each pair again used identical seed and bucket, with \texttt{legacy} first and \texttt{research\_v1} second.
+
+The mean EM-to-gravity acceleration ratio on the research best runs was $1.605$ (range $[1.603,1.607]$), so these trajectories were not gravity-dominated.
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\hline
+case & seed & $\Delta$ RMSE (research-prior) & $\Delta$ benchmark RMSE & claim status \\
+\hline
+1 & 2301 & $0.0$ & $0.0$ & no\_improvement \\
+2 & 2401 & $-1.528\times 10^{-2}$ & $+5.001\times 10^{-1}$ & directional\_trend \\
+3 & 2501 & $\approx 0$ & $0.0$ & no\_improvement \\
+4 & 2601 & $-8.013\times 10^{-4}$ & $0.0$ & no\_improvement \\
+5 & 2701 & $0.0$ & $0.0$ & no\_improvement \\
+\hline
+\end{tabular}
+\end{center}
+
+Aggregate outcomes:
+\begin{itemize}
+\item Mean $\Delta$ RMSE (research-prior) $=-3.22\times 10^{-3}$, median $\Delta \approx 0$.
+\item Mean $\Delta$ benchmark RMSE $=+1.00\times 10^{-1}$, median $\Delta=0$.
+\item Claim gate output: 4/5 \texttt{no\_improvement}, 1/5 \texttt{directional\_trend}, and 0/5 high-bar passes.
+\end{itemize}
+
+\section{Main-Body Compression Plan}
+This revision begins a structural change requested by the project lead:
+\begin{itemize}
+\item Keep the main body focused on the primary research question, method summary, and claim-level outcomes.
+\item Move detailed build-up, expanded ablation tables, and preliminary matrix evidence to appendices.
+\item Continue this migration in future revisions by moving additional simulator/discovery derivations and implementation-level detail out of the main narrative.
 \end{itemize}
 
 \end{document}
