@@ -348,6 +348,7 @@ Validation ranking is
 \mathrm{rank\_score}=\mathrm{MSE}_{\mathrm{val}}\left(1+\lambda_{\mathrm{sens}}\varepsilon_{\mathrm{sens,val}}\right),
 \end{equation*}
 with user-set $\lambda_{\mathrm{sens}}\ge 0$.
+For \texttt{delta\_mlp} candidates, report artifacts now additionally include deterministic gate diagnostics (\texttt{delta\_mlp\_diagnostics}): per-sensor gate weights, active-sensor fraction at a fixed threshold, effective sensor count, and the matched NN-row metrics. We also log per-model evaluation counts (\texttt{model\_eval\_counts}) so side-by-side model-family comparisons are auditable.
 
 \subsection{What counts as ``predicts well''}
 Pointwise acceleration fit is not sufficient. We evaluate:
@@ -622,7 +623,8 @@ Interpretation:
 \item NN-only ablations remained worse on strict holdout error.
 \item For \texttt{energy\_proxy}, persistence is nearly exact in this trajectory, so any flexible learned model is heavily penalized relative to that baseline.
 \end{itemize}
-Therefore, in current tested settings, the stronger neural residual baseline still does not improve strict holdout outcomes over the best symbolic/local residual model. Artifacts: \texttt{results/nn\_temporal\_retry\_20260208\_143317/summary.json} and per-channel reports in the same directory.
+Using the new gate diagnostics in the same run family (\texttt{results/nn\_gate\_diag\_20260208\_150552/summary.json}), the best \texttt{delta\_mlp} rows did \emph{not} collapse to a single sensor: active gates were $13$--$16$ out of $19$ sensors (active fraction $\approx 0.68$--$0.84$), with effective sensor count $\approx 15.8$--$17.1$. Top-gated channels were mostly velocity components (e.g., \texttt{v1\_z}, \texttt{v1\_x}, \texttt{v2\_z}), and for \texttt{energy\_proxy} the target channel itself was also strongly weighted. Thus, poorer NN holdout performance in these tests is not explained by sparse one-sensor collapse; it is more consistent with model-class mismatch or optimization limits under this strict protocol.
+Therefore, in current tested settings, the stronger neural residual baseline still does not improve strict holdout outcomes over the best symbolic/local residual model. Artifacts: \texttt{results/nn\_temporal\_retry\_20260208\_143317/summary.json} and \texttt{results/nn\_gate\_diag\_20260208\_150552/summary.json}.
 
 \subsection{Policy and claim-gate summary (main-body view)}
 Extended policy sweeps and paired matrix studies are now treated as supporting evidence rather than core narrative and are reported in Appendix~B.

@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufRead};
 use std::path::PathBuf;
@@ -89,6 +90,19 @@ fn push_unique_model(dst: &mut Vec<ModelKind>, model: ModelKind) {
     }
 }
 
+const SENSOR_GATE_ACTIVE_THRESHOLD: f64 = 0.35;
+const DELTA_MLP_ENERGY_PENALTY: f64 = 0.05;
+
+fn model_kind_name(model: ModelKind) -> &'static str {
+    match model {
+        ModelKind::Linear => "linear",
+        ModelKind::Rational => "rational",
+        ModelKind::DeltaLinear => "delta_linear",
+        ModelKind::DeltaRational => "delta_rational",
+        ModelKind::DeltaMlp => "delta_mlp",
+    }
+}
+
 #[derive(Debug, Clone)]
 struct SplitIndices {
     train: Vec<usize>,
@@ -149,6 +163,40 @@ struct BestEval {
 }
 
 #[derive(Debug, Clone, Serialize)]
+struct SensorGateValue {
+    sensor: String,
+    gate: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SensorGateSummary {
+    active_threshold: f64,
+    active_count: usize,
+    active_fraction: f64,
+    min_gate: f64,
+    max_gate: f64,
+    mean_gate: f64,
+    effective_sensor_count: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct DeltaMlpDiagnostics {
+    config: TakensConfig,
+    n_embedded: usize,
+    split: SplitCounts,
+    val_mse: f64,
+    holdout_mse: f64,
+    holdout_baseline_mse: f64,
+    holdout_relative_improvement: f64,
+    val_sensitivity_median: f64,
+    holdout_sensitivity_median: f64,
+    target_is_energy: bool,
+    energy_penalty: f64,
+    gate_summary: SensorGateSummary,
+    sensor_gates_ranked: Vec<SensorGateValue>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 struct TakensReport {
     version: String,
     input_csv: String,
@@ -156,8 +204,10 @@ struct TakensReport {
     sensors: Vec<String>,
     n_raw: usize,
     grid_evals: usize,
+    model_eval_counts: BTreeMap<String, usize>,
     sensitivity_weight: f64,
     best: BestEval,
+    delta_mlp_diagnostics: Option<DeltaMlpDiagnostics>,
     notes: Vec<String>,
 }
 
@@ -345,6 +395,57 @@ pub(crate) fn run_takens(
         holdout_sensitivity: best_holdout_sensitivity,
     };
 
+    let mut model_eval_counts = BTreeMap::<String, usize>::new();
+    for row in &all_rows {
+        *model_eval_counts
+            .entry(model_kind_name(row.config.model).to_string())
+            .or_insert(0) += 1;
+    }
+
+    let mut notes = vec![
+        "Takens embedding uses one-step target x_{t+1} and delay coordinates from selected sensor columns."
+            .to_string(),
+        "Model families include local linear, local rational, residual local variants (delta_*), and a temporal-window neural residual baseline with sparse sensor gates (delta_mlp/delta_tcn aliases)."
+            .to_string(),
+        "Primary score is strict holdout MSE; baseline is persistence y_hat=x_t.".to_string(),
+        "Selection rank_score = val_mse * (1 + sensitivity_weight * val_sensitivity_median)."
+            .to_string(),
+        "Chronological split enforces no-future-leakage across train/val/holdout.".to_string(),
+    ];
+    let delta_mlp_row = all_rows
+        .iter()
+        .find(|row| matches!(row.config.model, ModelKind::DeltaMlp))
+        .cloned();
+    let delta_mlp_diagnostics = if let Some(delta_row) = delta_mlp_row {
+        let samples =
+            build_delay_embedding_multi(&aligned.target, &aligned.sensors, delta_row.config.tau, delta_row.config.m)?;
+        let split = split_indices(
+            samples.len(),
+            delta_row.config.split_mode,
+            seed,
+            train_frac,
+            val_frac,
+        )?;
+        if matches!(delta_row.config.split_mode, SplitMode::Chronological) {
+            assert_no_chronological_leakage(&samples, &split)?;
+        }
+        match build_delta_mlp_diagnostics(
+            &samples,
+            &split,
+            &delta_row,
+            &sensors,
+            target_is_energy,
+        ) {
+            Ok(diag) => Some(diag),
+            Err(err) => {
+                notes.push(format!("delta_mlp diagnostics unavailable: {}", err));
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let report = TakensReport {
         version: PREDICTABILITY_VERSION.to_string(),
         input_csv: input.display().to_string(),
@@ -352,18 +453,11 @@ pub(crate) fn run_takens(
         sensors,
         n_raw: aligned.target.len(),
         grid_evals: all_rows.len(),
+        model_eval_counts,
         sensitivity_weight,
         best,
-        notes: vec![
-            "Takens embedding uses one-step target x_{t+1} and delay coordinates from selected sensor columns."
-                .to_string(),
-            "Model families include local linear, local rational, residual local variants (delta_*), and a temporal-window neural residual baseline with sparse sensor gates (delta_mlp/delta_tcn aliases)."
-                .to_string(),
-            "Primary score is strict holdout MSE; baseline is persistence y_hat=x_t.".to_string(),
-            "Selection rank_score = val_mse * (1 + sensitivity_weight * val_sensitivity_median)."
-                .to_string(),
-            "Chronological split enforces no-future-leakage across train/val/holdout.".to_string(),
-        ],
+        delta_mlp_diagnostics,
+        notes,
     };
 
     fs::write(&out, serde_json::to_string_pretty(&report)?)?;
@@ -1166,7 +1260,7 @@ fn learn_sparse_sensor_gates(x_norm: &[Vec<f64>], y_norm: &[f64], n_sensors: usi
     }
 
     // Keep a minimum active sensor budget so the temporal model does not collapse to one channel.
-    let active_threshold = 0.35;
+    let active_threshold = SENSOR_GATE_ACTIVE_THRESHOLD;
     let target_active = if n_sensors <= 2 {
         1
     } else {
@@ -1200,6 +1294,58 @@ fn learn_sparse_sensor_gates(x_norm: &[Vec<f64>], y_norm: &[f64], n_sensors: usi
     gates
 }
 
+fn summarize_sensor_gates(
+    sensors: &[String],
+    sensor_gates: &[f64],
+) -> anyhow::Result<(SensorGateSummary, Vec<SensorGateValue>)> {
+    if sensors.is_empty() || sensor_gates.is_empty() || sensors.len() != sensor_gates.len() {
+        anyhow::bail!(
+            "sensor gate shape mismatch: sensors={} gates={}",
+            sensors.len(),
+            sensor_gates.len()
+        );
+    }
+    if sensor_gates.iter().any(|g| !g.is_finite()) {
+        anyhow::bail!("non-finite sensor gate encountered");
+    }
+
+    let mut ranked = sensors
+        .iter()
+        .zip(sensor_gates.iter())
+        .map(|(s, g)| SensorGateValue {
+            sensor: s.clone(),
+            gate: *g,
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|a, b| b.gate.partial_cmp(&a.gate).unwrap_or(Ordering::Equal));
+
+    let n = sensor_gates.len();
+    let sum = sensor_gates.iter().sum::<f64>();
+    let sum_sq = sensor_gates.iter().map(|g| g * g).sum::<f64>();
+    let active_count = sensor_gates
+        .iter()
+        .filter(|g| **g >= SENSOR_GATE_ACTIVE_THRESHOLD)
+        .count();
+    let min_gate = sensor_gates
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, |a, b| a.min(b));
+    let max_gate = sensor_gates
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, |a, b| a.max(b));
+    let summary = SensorGateSummary {
+        active_threshold: SENSOR_GATE_ACTIVE_THRESHOLD,
+        active_count,
+        active_fraction: active_count as f64 / n as f64,
+        min_gate,
+        max_gate,
+        mean_gate: sum / n as f64,
+        effective_sensor_count: if sum_sq > 0.0 { (sum * sum) / sum_sq } else { 0.0 },
+    };
+    Ok((summary, ranked))
+}
+
 fn normalize_input(x: &[f64], mean: &[f64], scale: &[f64]) -> Option<Vec<f64>> {
     if x.len() != mean.len() || x.len() != scale.len() {
         return None;
@@ -1214,6 +1360,51 @@ fn normalize_input(x: &[f64], mean: &[f64], scale: &[f64]) -> Option<Vec<f64>> {
         out.push(v);
     }
     Some(out)
+}
+
+fn build_delta_mlp_diagnostics(
+    samples: &[DelaySample],
+    split: &SplitIndices,
+    row: &GridEval,
+    sensors: &[String],
+    target_is_energy: bool,
+) -> anyhow::Result<DeltaMlpDiagnostics> {
+    let n_sensors = sensors.len().max(1);
+    let mlp = fit_delta_mlp_model(
+        samples,
+        &split.train,
+        n_sensors,
+        row.config.k,
+        row.config.lambda,
+        target_is_energy,
+    )
+    .ok_or_else(|| anyhow::anyhow!("delta_mlp fit failed for diagnostics"))?;
+    let (gate_summary, sensor_gates_ranked) = summarize_sensor_gates(sensors, &mlp.sensor_gates)?;
+
+    let rel = if row.holdout_baseline_mse > 0.0 {
+        (row.holdout_baseline_mse - row.holdout_mse) / row.holdout_baseline_mse
+    } else {
+        0.0
+    };
+    Ok(DeltaMlpDiagnostics {
+        config: row.config.clone(),
+        n_embedded: row.n_embedded,
+        split: row.split.clone(),
+        val_mse: row.val_mse,
+        holdout_mse: row.holdout_mse,
+        holdout_baseline_mse: row.holdout_baseline_mse,
+        holdout_relative_improvement: rel,
+        val_sensitivity_median: row.val_sensitivity_median,
+        holdout_sensitivity_median: row.holdout_sensitivity_median,
+        target_is_energy,
+        energy_penalty: if target_is_energy {
+            DELTA_MLP_ENERGY_PENALTY
+        } else {
+            0.0
+        },
+        gate_summary,
+        sensor_gates_ranked,
+    })
 }
 
 fn fit_delta_mlp_model(
@@ -1302,7 +1493,11 @@ fn fit_delta_mlp_model(
     let h2 = (h1 / 2).clamp(4, 32);
     let cfg = DeltaMlpTrainConfig {
         lambda: lambda.max(0.0),
-        energy_penalty: if target_is_energy { 0.05 } else { 0.0 },
+        energy_penalty: if target_is_energy {
+            DELTA_MLP_ENERGY_PENALTY
+        } else {
+            0.0
+        },
         epochs: 260,
         learning_rate: 1e-2,
     };
@@ -2196,5 +2391,26 @@ mod tests {
             active,
             gates
         );
+    }
+
+    #[test]
+    fn summarize_sensor_gates_reports_ranked_and_active_counts() {
+        let sensors = vec![
+            "s0".to_string(),
+            "s1".to_string(),
+            "s2".to_string(),
+            "s3".to_string(),
+            "s4".to_string(),
+        ];
+        let gates = vec![0.15, 0.72, 0.38, 0.21, 0.64];
+        let (summary, ranked) = super::summarize_sensor_gates(&sensors, &gates).unwrap();
+        assert_eq!(ranked.len(), sensors.len());
+        assert_eq!(ranked[0].sensor, "s1");
+        assert_eq!(ranked[1].sensor, "s4");
+        assert_eq!(summary.active_threshold, super::SENSOR_GATE_ACTIVE_THRESHOLD);
+        assert_eq!(summary.active_count, 3);
+        assert!((summary.active_fraction - 0.6).abs() < 1e-12);
+        assert!(summary.effective_sensor_count >= 1.0);
+        assert!(summary.effective_sensor_count <= sensors.len() as f64);
     }
 }

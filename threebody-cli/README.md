@@ -42,6 +42,10 @@ cargo run -p threebody-cli -- predictability takens --input traj.csv --column a1
 
 # Neural-only ablation:
 # cargo run -p threebody-cli -- predictability takens --input traj.csv --column a1_x --sensors "a1_x,r1_x,r1_y,r1_z,r2_x,r2_y,r2_z,r3_x,r3_y,r3_z,v1_x,v1_y,v1_z,v2_x,v2_y,v2_z,v3_x,v3_y,v3_z" --tau 1 --m 2,4 --k 8 --lambda 1e-6 --model delta_mlp --split-mode chronological --out takens_a1x_nn.json
+
+# Takens report JSON now includes:
+# - model_eval_counts (how many grid rows per model family),
+# - delta_mlp_diagnostics (best-NN-row metrics + ranked sensor gates) when delta_mlp is in --model.
 ```
 
 **Flags**
