@@ -21,7 +21,7 @@ To make the guiding question operational, we added a reporting layer that now in
 In a same-day follow-up stress test on a separate perturbed-three-body trajectory, sensor gains were non-monotonic: one \texttt{min\_pair\_dist} target-only scan reached a strict high-bar pass at $W^\star=4$, while richer position/state sensor sets did not pass in the tested grid.
 We also introduced an information-context framing: for a target channel and sensor set, define context volume $W=(\tau m)|S|$ and estimate the minimum $W^\star$ that meets a strict holdout gate. In a matched high-bar analysis ($\Delta_{\mathrm{rel}}>0.6$, sensitivity median $\le 0.2$), we measured $W^\star=3$ for one-body inertial and two-body Kepler regimes, versus $W^\star=20$ for a perturbed three-body regime, suggesting higher information demand as interaction complexity increases.
 
-We emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. Relative to bounded-horizon ANN surrogates for three-body dynamics\cite{Breen2020} and generic sparse-discovery pipelines\cite{Brunton2016}, novelty here is methodological: deterministic claim-gated reporting, explicit information-context thresholds, and reproducible failure reporting against the oracle.
+We emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. Relative to bounded-horizon ANN surrogates for three-body dynamics\cite{Breen2020} and generic sparse-discovery pipelines\cite{Brunton2016}, novelty here is methodological: deterministic claim-gated reporting, explicit information-context thresholds, and reproducible failure reporting against the oracle. In an additional same-day retry, a stronger temporal-window neural residual baseline (sparse sensor gates plus an energy-target penalty) still did not beat the best symbolic/local model under matched strict holdout tests.
 Code repository: \texttt{https://github.com/Hendler/threebody}.
 \end{abstract}
 
@@ -34,6 +34,16 @@ At project inception, Jonathan Hendler posed the guiding question:
 Given richer measurements of a deterministic three-body system, can we discover and use mathematically better predictive laws?
 \end{quote}
 All methods and evaluations in this paper are judged against that question: they must improve strict holdout prediction, not only in-sample fit.
+
+\subsection*{Thinking behind this work}
+The design of this project follows four decisions.
+\begin{itemize}
+\item \textbf{Deterministic does not mean easy:} chaotic three-body dynamics are not random, but sensitivity makes long-horizon microstate prediction fragile.
+\item \textbf{Information should be testable as value:} if better sensors help, they must improve strict holdout metrics, not only fit on seen data.
+\item \textbf{Model class must match channel structure:} richer inputs can help only when the equation family can use them without overfitting.
+\item \textbf{Negative outcomes are scientific outcomes:} failures (no improvement, or degradation) are explicitly reported and claim-gated.
+\end{itemize}
+This is why we use deterministic protocols (fixed splits/seeds), paired before/after comparisons, and conservative claim gates.
 
 \subsection*{Relation to prior work and novelty boundary}
 Related literature gives useful anchors: data-driven sparse equation discovery (e.g., SINDy)\cite{Brunton2016}; delay-embedding reconstruction and embedding-dimension diagnostics\cite{Takens1981,Kennel1992,KennelAbarbanel2002}; and bounded-horizon neural surrogates for chaotic three-body trajectories\cite{Breen2020}. Our contribution is not a universal closed-form solution and not a claim that local models solve long-horizon chaos. The genuinely new element is the integrated protocol: strict claim gates tied to holdout metrics, explicit context-volume testing via $W=(\tau m)|S|$, and deterministic before/after sensor-value comparisons.
@@ -577,6 +587,43 @@ Interpretation for the guiding question:
 \end{itemize}
 Artifacts: \texttt{results/exp\_sensor\_context\_20260208\_133940/sensor\_information\_value\_m2\_summary.json} and \texttt{results/exp\_sensor\_context\_20260208\_133940/min\_pair\_dist\_sensor\_context\_scan\_summary.json}.
 
+\subsection{Temporal-window neural baseline outcome (February 8, 2026)}
+We upgraded the neural candidate to a deterministic temporal-window residual model (\texttt{delta\_mlp}; alias \texttt{delta\_tcn}) with three inductive-bias changes:
+\begin{itemize}
+\item lag-window features that include both raw delays and first differences across delays,
+\item learned sparse sensor gates (deterministic pre-fit selection),
+\item an energy-target penalty term activated for \texttt{energy\_proxy} channels.
+\end{itemize}
+The model predicts residual dynamics,
+\[
+\hat{x}_{t+1}=x_t+\widehat{\Delta x}_{t+1},\qquad
+\widehat{\Delta x}_{t+1}=g_\theta(\Psi(z_t;\gamma)),
+\]
+with $\Psi$ the gated temporal feature map and $\gamma$ the learned sensor-gate vector.
+Training uses deterministic initialization and Adam on fixed splits.
+
+We then reran side-by-side comparisons where only the model set changed (baseline symbolic/local set vs.\ \texttt{all} including the upgraded temporal NN), with matched trajectory, sensors, and chronological holdouts.
+
+\begin{center}
+\begin{tabular}{lrrr}
+\hline
+channel & baseline best rel.\ improvement & with temporal NN in \texttt{all} & NN-only rel.\ improvement \\
+\hline
+\texttt{a1\_x} & $-47.8686$ (\texttt{delta\_linear}) & $-47.8686$ (\texttt{delta\_linear}) & $-2015.79$ (\texttt{delta\_mlp}) \\
+\texttt{min\_pair\_dist} & $+0.5052$ (\texttt{delta\_linear}) & $+0.5052$ (\texttt{delta\_linear}) & $-4.6011$ (\texttt{delta\_mlp}) \\
+\texttt{energy\_proxy} & $-6517.49$ (\texttt{delta\_linear}) & $-6517.49$ (\texttt{delta\_linear}) & $-4.31\times 10^{13}$ (\texttt{delta\_mlp}) \\
+\hline
+\end{tabular}
+\end{center}
+
+Interpretation:
+\begin{itemize}
+\item For all three tested channels, adding the upgraded temporal NN to \texttt{all} did not change the selected winner; \texttt{delta\_linear} remained best under strict holdout MSE.
+\item NN-only ablations remained worse on strict holdout error.
+\item For \texttt{energy\_proxy}, persistence is nearly exact in this trajectory, so any flexible learned model is heavily penalized relative to that baseline.
+\end{itemize}
+Therefore, in current tested settings, the stronger neural residual baseline still does not improve strict holdout outcomes over the best symbolic/local residual model. Artifacts: \texttt{results/nn\_temporal\_retry\_20260208\_143317/summary.json} and per-channel reports in the same directory.
+
 \subsection{Policy and claim-gate summary (main-body view)}
 Extended policy sweeps and paired matrix studies are now treated as supporting evidence rather than core narrative and are reported in Appendix~B.
 In the main body, the key outcomes are:
@@ -629,6 +676,7 @@ Future work priorities are explicitly ordered by the guiding question posed by J
 \item Turn the context-window hypothesis into a full response surface $W^\star(\text{regime}, \text{channel}, \tau_\Delta, \tau_s, H)$, including multi-horizon $H$ and uncertainty bands over seeds.
 \item Add strict multi-horizon holdout metrics (1-step, short-horizon, and shadowing-time) so ``predicts better over time'' is measured directly, not inferred from one-step scores.
 \item Build explicit information-value experiments: compare sensor subsets under matched splits and compute uncertainty bars for each subset to estimate marginal value of each diagnostic channel.
+\item Strengthen the new neural path with physics-grade constraints: longer delay windows (TCN/attention variants), symplectic or Hamiltonian-inspired regularization, and calibrated sparse-gate learning validated by strict holdout ablations.
 \item Add deterministic sensor-selection and shrinkage controls (e.g., sparse sensor masks and complexity penalties on embedding channels) so ``more sensors'' does not automatically mean worse conditioning or overfit.
 \item Extend deterministic equation families with mathematically compact non-physics bases from dynamical systems: Koopman/EDMD dictionaries\cite{Williams2015}, Ulam transfer operators, symbolic-dynamics/entropy features, and recurrence-quantification gates.
 \item Keep strict falsification gates: paired before/after comparisons with non-regression flags, bootstrap CIs, and preregistered thresholds before any novelty claim.
@@ -646,6 +694,7 @@ Yes, in a qualified sense. Under strict one-step holdout evaluation, richer simu
 \item \textbf{Claim C2 (context-demand signal):} Defining context volume $W=(\tau m)|S|$, the estimated minimum effective context under a high-bar gate increased from $W^\star=3$ (one-body/two-body references) to $W^\star=20$ (perturbed three-body, tested channel/sensors). This supports an \emph{empirical} information-context scaling hypothesis.
 \item \textbf{Claim C3 (negative global result):} In global force-library discovery, added geometry families and MDL-aware ranking did not yield robust strict-holdout gains over the Newtonian baseline in reported matched runs.
 \item \textbf{Claim C4 (non-monotonic sensor value):} In follow-up strict scans on \texttt{min\_pair\_dist}, a target-only embedding reached a high-bar pass at $W^\star=4$, while richer position/state sensor sets did not pass in the tested grid. Information value is therefore not monotonic in sensor count.
+\item \textbf{Claim C5 (current temporal NN result):} In matched side-by-side Takens runs on \texttt{a1\_x}, \texttt{min\_pair\_dist}, and \texttt{energy\_proxy}, adding the upgraded temporal-window \texttt{delta\_mlp} candidate did not improve selected strict-holdout results, and NN-only ablations were worse.
 \end{itemize}
 
 \subsection*{What is genuinely novel in this work}
@@ -661,6 +710,7 @@ Yes, in a qualified sense. Under strict one-step holdout evaluation, richer simu
 \item We do \emph{not} claim long-horizon shadowing success from one-step metrics.
 \item We do \emph{not} claim a proved theorem for $W^\star$ scaling; current evidence is empirical, protocol-dependent, and channel-dependent.
 \item We do \emph{not} claim that adding more sensors is always beneficial; current evidence shows channel-dependent gains and failures.
+\item We do \emph{not} claim that a generic neural baseline currently outperforms symbolic/local residual models in this benchmark.
 \end{itemize}
 
 \subsection*{Claim gate for future novelty statements}

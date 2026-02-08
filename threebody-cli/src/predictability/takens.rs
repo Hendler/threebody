@@ -54,7 +54,8 @@ impl ModelKind {
                 "delta_rational" | "residual_rational" => {
                     push_unique_model(&mut out, Self::DeltaRational)
                 }
-                "delta_mlp" | "residual_mlp" | "mlp" | "nn" | "neural" => {
+                "delta_mlp" | "residual_mlp" | "mlp" | "nn" | "neural" | "delta_tcn"
+                | "residual_tcn" | "tcn" => {
                     push_unique_model(&mut out, Self::DeltaMlp)
                 }
                 "delta" | "residual" => {
@@ -199,6 +200,8 @@ pub(crate) fn run_takens(
     } else if !sensors.iter().any(|s| s == &column) {
         sensors.insert(0, column.clone());
     }
+    let n_sensors = sensors.len().max(1);
+    let target_is_energy = column == "energy_proxy";
 
     let aligned = read_aligned_target_and_sensors(&input, &column, &sensors)?;
     if aligned.target.len() < 16 {
@@ -233,6 +236,8 @@ pub(crate) fn run_takens(
                             k,
                             lambda,
                             model,
+                            n_sensors,
+                            target_is_energy,
                         )?;
                         let holdout_mse = evaluate_model_mse(
                             &samples,
@@ -241,6 +246,8 @@ pub(crate) fn run_takens(
                             k,
                             lambda,
                             model,
+                            n_sensors,
+                            target_is_energy,
                         )?;
                         let holdout_baseline_mse =
                             evaluate_persistence_mse(&samples, &split.holdout)?;
@@ -251,6 +258,8 @@ pub(crate) fn run_takens(
                             k,
                             lambda,
                             model,
+                            n_sensors,
+                            target_is_energy,
                         )?;
                         let holdout_sensitivity = evaluate_sensitivity_summary(
                             &samples,
@@ -259,6 +268,8 @@ pub(crate) fn run_takens(
                             k,
                             lambda,
                             model,
+                            n_sensors,
+                            target_is_energy,
                         )?;
                         let rank_score = val_mse
                             * (1.0
@@ -346,7 +357,7 @@ pub(crate) fn run_takens(
         notes: vec![
             "Takens embedding uses one-step target x_{t+1} and delay coordinates from selected sensor columns."
                 .to_string(),
-            "Model families include local linear, local rational, residual local variants (delta_*), and a global residual MLP baseline (delta_mlp)."
+            "Model families include local linear, local rational, residual local variants (delta_*), and a temporal-window neural residual baseline with sparse sensor gates (delta_mlp/delta_tcn aliases)."
                 .to_string(),
             "Primary score is strict holdout MSE; baseline is persistence y_hat=x_t.".to_string(),
             "Selection rank_score = val_mse * (1 + sensitivity_weight * val_sensitivity_median)."
@@ -865,6 +876,8 @@ impl LocalModel {
 
 #[derive(Debug, Clone)]
 struct DeltaMlpModel {
+    n_sensors: usize,
+    sensor_gates: Vec<f64>,
     input_mean: Vec<f64>,
     input_scale: Vec<f64>,
     target_mean: f64,
@@ -879,11 +892,12 @@ struct DeltaMlpModel {
 
 impl DeltaMlpModel {
     fn predict(&self, query_z: &[f64]) -> Option<f64> {
-        if query_z.len() != self.input_mean.len() || query_z.is_empty() {
+        if query_z.len() != self.input_mean.len() || query_z.is_empty() || self.n_sensors == 0 {
             return None;
         }
         let x_norm = normalize_input(query_z, &self.input_mean, &self.input_scale)?;
-        let (_, _, _, h2) = self.forward_hidden(&x_norm)?;
+        let x_feat = build_temporal_window_features(&x_norm, self.n_sensors, &self.sensor_gates)?;
+        let (_, _, _, h2) = self.forward_hidden(&x_feat)?;
         let y_norm = dot(&self.w3, &h2) + self.b3;
         if !y_norm.is_finite() {
             return None;
@@ -894,14 +908,16 @@ impl DeltaMlpModel {
     }
 
     fn gradient(&self, query_z: &[f64]) -> Option<Vec<f64>> {
-        if query_z.len() != self.input_mean.len() || query_z.is_empty() {
+        if query_z.len() != self.input_mean.len() || query_z.is_empty() || self.n_sensors == 0 {
             return None;
         }
         let x_norm = normalize_input(query_z, &self.input_mean, &self.input_scale)?;
-        let (_, h1, _, h2) = self.forward_hidden(&x_norm)?;
+        let x_feat = build_temporal_window_features(&x_norm, self.n_sensors, &self.sensor_gates)?;
+        let (_, h1, _, h2) = self.forward_hidden(&x_feat)?;
         let h1_n = h1.len();
         let h2_n = h2.len();
-        let d = query_z.len();
+        let feat_d = x_feat.len();
+        let raw_d = query_z.len();
         if self.w2.len() != h2_n || self.w3.len() != h2_n || self.w1.len() != h1_n {
             return None;
         }
@@ -929,8 +945,8 @@ impl DeltaMlpModel {
             }
         }
 
-        let mut g_xn = vec![0.0; d];
-        for (m, slot) in g_xn.iter_mut().enumerate().take(d) {
+        let mut g_feat = vec![0.0; feat_d];
+        for (m, slot) in g_feat.iter_mut().enumerate().take(feat_d) {
             let mut acc = 0.0;
             for (k, row) in self.w1.iter().enumerate().take(h1_n) {
                 let w = *row.get(m)?;
@@ -942,8 +958,14 @@ impl DeltaMlpModel {
             *slot = acc;
         }
 
-        let mut grad = vec![0.0; d];
-        for j in 0..d {
+        let g_xn = backprop_temporal_window_features(
+            &g_feat,
+            raw_d,
+            self.n_sensors,
+            &self.sensor_gates,
+        )?;
+        let mut grad = vec![0.0; raw_d];
+        for j in 0..raw_d {
             let scale = self.input_scale[j].abs().max(1e-12);
             grad[j] = self.target_scale * g_xn[j] / scale;
             if j == 0 {
@@ -1005,8 +1027,153 @@ impl DeltaMlpModel {
 #[derive(Debug, Clone)]
 struct DeltaMlpTrainConfig {
     lambda: f64,
+    energy_penalty: f64,
     epochs: usize,
     learning_rate: f64,
+}
+
+fn infer_lag_count(input_dim: usize, n_sensors: usize) -> Option<usize> {
+    if n_sensors == 0 || input_dim == 0 || input_dim % n_sensors != 0 {
+        return None;
+    }
+    Some(input_dim / n_sensors)
+}
+
+fn build_temporal_window_features(
+    x_norm: &[f64],
+    n_sensors: usize,
+    sensor_gates: &[f64],
+) -> Option<Vec<f64>> {
+    let n_lags = infer_lag_count(x_norm.len(), n_sensors)?;
+    if sensor_gates.len() != n_sensors {
+        return None;
+    }
+    let mut out = Vec::with_capacity(x_norm.len() + n_sensors * n_lags.saturating_sub(1));
+    for lag in 0..n_lags {
+        let base = lag * n_sensors;
+        for (s, gate) in sensor_gates.iter().enumerate().take(n_sensors) {
+            out.push(*gate * x_norm[base + s]);
+        }
+    }
+    for lag in 0..n_lags.saturating_sub(1) {
+        let a = lag * n_sensors;
+        let b = (lag + 1) * n_sensors;
+        for (s, gate) in sensor_gates.iter().enumerate().take(n_sensors) {
+            out.push(*gate * (x_norm[a + s] - x_norm[b + s]));
+        }
+    }
+    Some(out)
+}
+
+fn backprop_temporal_window_features(
+    grad_feat: &[f64],
+    raw_input_dim: usize,
+    n_sensors: usize,
+    sensor_gates: &[f64],
+) -> Option<Vec<f64>> {
+    let n_lags = infer_lag_count(raw_input_dim, n_sensors)?;
+    if sensor_gates.len() != n_sensors {
+        return None;
+    }
+    let raw_len = raw_input_dim;
+    let diff_len = n_sensors * n_lags.saturating_sub(1);
+    if grad_feat.len() != raw_len + diff_len {
+        return None;
+    }
+    let mut grad_x = vec![0.0; raw_input_dim];
+    for lag in 0..n_lags {
+        let base = lag * n_sensors;
+        for (s, gate) in sensor_gates.iter().enumerate().take(n_sensors) {
+            grad_x[base + s] += *gate * grad_feat[base + s];
+        }
+    }
+    let diff_base = raw_len;
+    for lag in 0..n_lags.saturating_sub(1) {
+        let a = lag * n_sensors;
+        let b = (lag + 1) * n_sensors;
+        for (s, gate) in sensor_gates.iter().enumerate().take(n_sensors) {
+            let gd = grad_feat[diff_base + lag * n_sensors + s];
+            grad_x[a + s] += *gate * gd;
+            grad_x[b + s] -= *gate * gd;
+        }
+    }
+    Some(grad_x)
+}
+
+fn learn_sparse_sensor_gates(x_norm: &[Vec<f64>], y_norm: &[f64], n_sensors: usize) -> Vec<f64> {
+    if x_norm.is_empty() || y_norm.is_empty() || n_sensors == 0 {
+        return vec![1.0; n_sensors.max(1)];
+    }
+    let d = x_norm[0].len();
+    let n_lags = infer_lag_count(d, n_sensors).unwrap_or(1);
+    let n = x_norm.len().min(y_norm.len());
+    if n == 0 {
+        return vec![1.0; n_sensors];
+    }
+
+    let y_mean = y_norm.iter().take(n).sum::<f64>() / n as f64;
+    let y_var = y_norm
+        .iter()
+        .take(n)
+        .map(|v| {
+            let dv = *v - y_mean;
+            dv * dv
+        })
+        .sum::<f64>()
+        / n as f64;
+    let y_std = y_var.sqrt().max(1e-9);
+
+    let mut scores = vec![0.0; n_sensors];
+    for s in 0..n_sensors {
+        let mut x_vals = Vec::with_capacity(n);
+        for row in x_norm.iter().take(n) {
+            let mut acc = 0.0;
+            for lag in 0..n_lags {
+                acc += row[lag * n_sensors + s];
+            }
+            x_vals.push(acc / n_lags as f64);
+        }
+        let x_mean = x_vals.iter().sum::<f64>() / n as f64;
+        let mut cov = 0.0;
+        let mut xv = 0.0;
+        for i in 0..n {
+            let dx = x_vals[i] - x_mean;
+            let dy = y_norm[i] - y_mean;
+            cov += dx * dy;
+            xv += dx * dx;
+        }
+        cov /= n as f64;
+        xv /= n as f64;
+        let x_std = xv.sqrt().max(1e-9);
+        scores[s] = (cov / (x_std * y_std)).abs();
+    }
+
+    let max_score = scores
+        .iter()
+        .copied()
+        .fold(0.0f64, |a, b| if b > a { b } else { a })
+        .max(1e-9);
+    let sparse_threshold = 0.10;
+    let min_gate = 0.15;
+    let mut gates = vec![0.0; n_sensors];
+    for s in 0..n_sensors {
+        let norm = (scores[s] / max_score).clamp(0.0, 1.0);
+        let sparse = ((norm - sparse_threshold) / (1.0 - sparse_threshold)).clamp(0.0, 1.0);
+        gates[s] = (min_gate + (1.0 - min_gate) * sparse).clamp(min_gate, 1.0);
+    }
+
+    if gates.iter().all(|g| *g <= min_gate + 1e-9) {
+        let mut best = 0usize;
+        let mut best_score = f64::NEG_INFINITY;
+        for (i, s) in scores.iter().enumerate() {
+            if *s > best_score {
+                best_score = *s;
+                best = i;
+            }
+        }
+        gates[best] = 1.0;
+    }
+    gates
 }
 
 fn normalize_input(x: &[f64], mean: &[f64], scale: &[f64]) -> Option<Vec<f64>> {
@@ -1028,14 +1195,17 @@ fn normalize_input(x: &[f64], mean: &[f64], scale: &[f64]) -> Option<Vec<f64>> {
 fn fit_delta_mlp_model(
     samples: &[DelaySample],
     train_indices: &[usize],
+    n_sensors: usize,
     hidden_hint: usize,
     lambda: f64,
+    target_is_energy: bool,
 ) -> Option<DeltaMlpModel> {
     let first = samples.get(*train_indices.first()?)?;
     let d = first.z.len();
-    if d == 0 {
+    if d == 0 || n_sensors == 0 {
         return None;
     }
+    let _n_lags = infer_lag_count(d, n_sensors)?;
 
     let train_n = train_indices.len();
     if train_n < 8 {
@@ -1094,11 +1264,22 @@ fn fit_delta_mlp_model(
         y_norm.push(yn);
     }
 
+    let sensor_gates = learn_sparse_sensor_gates(&x_norm, &y_norm, n_sensors);
+    let mut x_feat = Vec::with_capacity(train_n);
+    for x in x_norm.iter().take(train_n) {
+        x_feat.push(build_temporal_window_features(x, n_sensors, &sensor_gates)?);
+    }
+    let p = x_feat.first()?.len();
+    if p == 0 {
+        return None;
+    }
+
     let h1 = hidden_hint.clamp(4, 64);
     let h2 = (h1 / 2).clamp(4, 32);
     let cfg = DeltaMlpTrainConfig {
         lambda: lambda.max(0.0),
-        epochs: 220,
+        energy_penalty: if target_is_energy { 0.05 } else { 0.0 },
+        epochs: 260,
         learning_rate: 1e-2,
     };
 
@@ -1109,17 +1290,17 @@ fn fit_delta_mlp_model(
     seed ^= cfg.lambda.to_bits().wrapping_mul(0x1656_67B1_9E37_79F9);
     let mut rng = threebody_discover::ga::Lcg::new(seed);
 
-    let s1 = (1.0 / d as f64).sqrt();
+    let s1 = (1.0 / p as f64).sqrt();
     let s2 = (1.0 / h1 as f64).sqrt();
     let s3 = (1.0 / h2 as f64).sqrt();
-    let mut w1 = vec![vec![0.0; d]; h1];
+    let mut w1 = vec![vec![0.0; p]; h1];
     let mut b1 = vec![0.0; h1];
     let mut w2 = vec![vec![0.0; h1]; h2];
     let mut b2 = vec![0.0; h2];
     let mut w3 = vec![0.0; h2];
     let mut b3 = 0.0f64;
     for row in w1.iter_mut().take(h1) {
-        for w in row.iter_mut().take(d) {
+        for w in row.iter_mut().take(p) {
             *w = rng.gen_range_f64(-s1, s1);
         }
     }
@@ -1134,8 +1315,8 @@ fn fit_delta_mlp_model(
 
     // Adam state
     let (beta1, beta2, eps) = (0.9, 0.999, 1e-8);
-    let mut mw1 = vec![vec![0.0; d]; h1];
-    let mut vw1 = vec![vec![0.0; d]; h1];
+    let mut mw1 = vec![vec![0.0; p]; h1];
+    let mut vw1 = vec![vec![0.0; p]; h1];
     let mut mb1 = vec![0.0; h1];
     let mut vb1 = vec![0.0; h1];
     let mut mw2 = vec![vec![0.0; h1]; h2];
@@ -1147,7 +1328,7 @@ fn fit_delta_mlp_model(
     let mut mb3 = 0.0f64;
     let mut vb3 = 0.0f64;
 
-    let mut gw1 = vec![vec![0.0; d]; h1];
+    let mut gw1 = vec![vec![0.0; p]; h1];
     let mut gb1 = vec![0.0; h1];
     let mut gw2 = vec![vec![0.0; h1]; h2];
     let mut gb2 = vec![0.0; h2];
@@ -1167,7 +1348,7 @@ fn fit_delta_mlp_model(
         gb3 = 0.0;
 
         let inv_n = 1.0 / train_n as f64;
-        for (x, y) in x_norm.iter().zip(y_norm.iter()) {
+        for (x, y) in x_feat.iter().zip(y_norm.iter()) {
             let mut u1 = vec![0.0; h1];
             let mut h1v = vec![0.0; h1];
             for i in 0..h1 {
@@ -1189,7 +1370,11 @@ fn fit_delta_mlp_model(
                 h2v[i] = acc.tanh();
             }
             let y_hat = dot(&w3, &h2v) + b3;
-            let dy = (y_hat - *y) * (2.0 * inv_n);
+            let mut dy = (y_hat - *y) * (2.0 * inv_n);
+            if cfg.energy_penalty > 0.0 {
+                let delta_raw = y_hat * target_scale + target_mean;
+                dy += 2.0 * cfg.energy_penalty * delta_raw * target_scale * inv_n;
+            }
             if !dy.is_finite() {
                 return None;
             }
@@ -1214,7 +1399,7 @@ fn fit_delta_mlp_model(
             for k in 0..h1 {
                 let du1 = dh1[k] * (1.0 - h1v[k] * h1v[k]);
                 gb1[k] += du1;
-                for (m, xv) in x.iter().enumerate().take(d) {
+                for (m, xv) in x.iter().enumerate().take(p) {
                     gw1[k][m] += du1 * xv;
                 }
             }
@@ -1223,7 +1408,7 @@ fn fit_delta_mlp_model(
         if cfg.lambda > 0.0 {
             let wd = 2.0 * cfg.lambda;
             for i in 0..h1 {
-                for j in 0..d {
+                for j in 0..p {
                     gw1[i][j] += wd * w1[i][j];
                 }
             }
@@ -1240,7 +1425,7 @@ fn fit_delta_mlp_model(
         let lr = cfg.learning_rate / (1.0 + 0.01 * epoch as f64);
         let t = epoch as i32;
         for i in 0..h1 {
-            for j in 0..d {
+            for j in 0..p {
                 let g = gw1[i][j].clamp(-5.0, 5.0);
                 mw1[i][j] = beta1 * mw1[i][j] + (1.0 - beta1) * g;
                 vw1[i][j] = beta2 * vw1[i][j] + (1.0 - beta2) * g * g;
@@ -1299,6 +1484,8 @@ fn fit_delta_mlp_model(
     }
 
     Some(DeltaMlpModel {
+        n_sensors,
+        sensor_gates,
         input_mean,
         input_scale,
         target_mean,
@@ -1423,13 +1610,15 @@ fn evaluate_model_mse(
     k: usize,
     lambda: f64,
     model: ModelKind,
+    n_sensors: usize,
+    target_is_energy: bool,
 ) -> anyhow::Result<f64> {
     if eval_indices.is_empty() {
         anyhow::bail!("empty evaluation split");
     }
 
     if matches!(model, ModelKind::DeltaMlp) {
-        let mlp = fit_delta_mlp_model(samples, train_indices, k, lambda)
+        let mlp = fit_delta_mlp_model(samples, train_indices, n_sensors, k, lambda, target_is_energy)
             .ok_or_else(|| anyhow::anyhow!("delta_mlp fit failed"))?;
         let mut se = 0.0;
         let mut n = 0usize;
@@ -1472,6 +1661,8 @@ fn evaluate_sensitivity_summary(
     k: usize,
     lambda: f64,
     model: ModelKind,
+    n_sensors: usize,
+    target_is_energy: bool,
 ) -> anyhow::Result<SensitivitySummary> {
     if eval_indices.len() < 2 {
         anyhow::bail!("sensitivity evaluation requires at least 2 points");
@@ -1479,7 +1670,7 @@ fn evaluate_sensitivity_summary(
 
     let fitted_mlp = if matches!(model, ModelKind::DeltaMlp) {
         Some(
-            fit_delta_mlp_model(samples, train_indices, k, lambda)
+            fit_delta_mlp_model(samples, train_indices, n_sensors, k, lambda, target_is_energy)
                 .ok_or_else(|| anyhow::anyhow!("delta_mlp fit failed"))?,
         )
     } else {
@@ -1752,6 +1943,8 @@ mod tests {
             12,
             1e-8,
             ModelKind::Linear,
+            1,
+            false,
         )
         .unwrap();
         let baseline_mse = evaluate_persistence_mse(&emb, &split.holdout).unwrap();
@@ -1778,6 +1971,8 @@ mod tests {
             k_global,
             1e-8,
             ModelKind::Linear,
+            1,
+            false,
         )
         .unwrap();
         let rational_mse = evaluate_model_mse(
@@ -1787,6 +1982,8 @@ mod tests {
             k_global,
             1e-8,
             ModelKind::Rational,
+            1,
+            false,
         )
         .unwrap();
 
@@ -1812,6 +2009,8 @@ mod tests {
             18,
             1e-8,
             ModelKind::Linear,
+            1,
+            false,
         )
         .unwrap();
 
@@ -1846,6 +2045,8 @@ mod tests {
             k_global,
             1e-8,
             ModelKind::Linear,
+            1,
+            false,
         )
         .unwrap();
         let mse_with_sensor = evaluate_model_mse(
@@ -1855,6 +2056,8 @@ mod tests {
             k_global,
             1e-8,
             ModelKind::Linear,
+            2,
+            false,
         )
         .unwrap();
 
@@ -1880,6 +2083,8 @@ mod tests {
             k_global,
             1.0,
             ModelKind::Linear,
+            2,
+            false,
         )
         .unwrap();
         let delta_mse = evaluate_model_mse(
@@ -1889,6 +2094,8 @@ mod tests {
             k_global,
             1.0,
             ModelKind::DeltaLinear,
+            2,
+            false,
         )
         .unwrap();
         assert!(
@@ -1912,6 +2119,8 @@ mod tests {
             12,
             1e-6,
             ModelKind::DeltaMlp,
+            2,
+            false,
         )
         .unwrap();
         let baseline_mse = evaluate_persistence_mse(&emb, &split.holdout).unwrap();
