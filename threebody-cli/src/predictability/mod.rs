@@ -6,6 +6,7 @@ mod detect;
 mod ensemble;
 mod extract;
 mod features;
+mod report;
 mod takens;
 mod train_map;
 
@@ -151,6 +152,24 @@ pub enum PredictabilityCommand {
         #[arg(long, default_value_t = 0.1)]
         sensitivity_weight: f64,
     },
+    /// Summarize efficacy from one or more predictability report JSON files.
+    Report {
+        /// Input report JSON files (comma-separated or repeated).
+        #[arg(long, value_delimiter = ',', num_args = 1.., required = true)]
+        reports: Vec<PathBuf>,
+        /// Output summary JSON path.
+        #[arg(long, default_value = "efficacy_report.json")]
+        out: PathBuf,
+        /// Optional Markdown summary output path.
+        #[arg(long)]
+        markdown_out: Option<PathBuf>,
+        /// Minimum relative-improvement threshold for marking a channel effective.
+        #[arg(long, default_value_t = 0.0)]
+        improvement_threshold: f64,
+        /// Maximum allowed sensitivity-median threshold for marking a channel effective.
+        #[arg(long, default_value_t = 0.1)]
+        max_sensitivity_median: f64,
+    },
     /// Forecast with lock detection and optional encounter map (reserved for v1).
     Forecast {
         #[arg(long)]
@@ -243,6 +262,19 @@ pub fn run(cmd: PredictabilityCommand) -> anyhow::Result<()> {
             train_frac,
             val_frac,
             sensitivity_weight,
+        ),
+        PredictabilityCommand::Report {
+            reports,
+            out,
+            markdown_out,
+            improvement_threshold,
+            max_sensitivity_median,
+        } => report::run_report(
+            reports,
+            out,
+            markdown_out,
+            improvement_threshold,
+            max_sensitivity_median,
         ),
         PredictabilityCommand::Forecast { .. } => {
             anyhow::bail!("predictability forecast not implemented yet")

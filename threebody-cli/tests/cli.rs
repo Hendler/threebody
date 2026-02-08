@@ -885,3 +885,87 @@ fn predictability_takens_writes_report_with_sensitivity_fields() {
             .is_some()
     );
 }
+
+#[test]
+fn predictability_report_summarizes_channel_efficacy() {
+    let exe = env!("CARGO_BIN_EXE_threebody-cli");
+    let tmp_dir = env::temp_dir().join(format!("threebody_efficacy_report_{}", std::process::id()));
+    if tmp_dir.exists() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+    fs::create_dir_all(&tmp_dir).expect("create temp dir");
+
+    let report_raw = tmp_dir.join("takens_a1x.json");
+    let report_derived = tmp_dir.join("takens_min_pair.json");
+
+    fs::write(
+        &report_raw,
+        r#"{
+  "column":"a1_x",
+  "best":{
+    "config":{"model":"linear"},
+    "holdout_mse":0.0005,
+    "holdout_baseline_mse":0.1,
+    "holdout_relative_improvement":0.995,
+    "holdout_sensitivity":{"median_rel_error":0.02}
+  }
+}"#,
+    )
+    .expect("write raw report");
+
+    fs::write(
+        &report_derived,
+        r#"{
+  "column":"min_pair_dist",
+  "best":{
+    "config":{"model":"linear"},
+    "holdout_mse":0.2,
+    "holdout_baseline_mse":0.1,
+    "holdout_relative_improvement":-1.0,
+    "holdout_sensitivity":{"median_rel_error":1.0}
+  }
+}"#,
+    )
+    .expect("write derived report");
+
+    let out_json = tmp_dir.join("efficacy_report.json");
+    let out_md = tmp_dir.join("efficacy_report.md");
+    let reports_csv = format!("{},{}", report_raw.display(), report_derived.display());
+
+    let out = Command::new(exe)
+        .current_dir(&tmp_dir)
+        .args([
+            "predictability",
+            "report",
+            "--reports",
+            &reports_csv,
+            "--out",
+            out_json.to_str().unwrap(),
+            "--markdown-out",
+            out_md.to_str().unwrap(),
+            "--improvement-threshold",
+            "0.0",
+            "--max-sensitivity-median",
+            "0.1",
+        ])
+        .output()
+        .expect("run predictability report");
+
+    assert!(
+        out.status.success(),
+        "report failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out_json.exists());
+    assert!(out_md.exists());
+
+    let json = fs::read_to_string(&out_json).expect("read efficacy report");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid efficacy json");
+    let agg = value.get("aggregate").expect("aggregate");
+    assert_eq!(agg.get("n_channels").and_then(|v| v.as_u64()), Some(2));
+    assert_eq!(agg.get("n_effective").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(
+        agg.get("claim_status").and_then(|v| v.as_str()),
+        Some("information_helpful_in_some_channels")
+    );
+}
