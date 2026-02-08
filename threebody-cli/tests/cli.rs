@@ -833,6 +833,8 @@ fn predictability_takens_writes_report_with_sensitivity_fields() {
             input_csv.to_str().unwrap(),
             "--column",
             "min_pair_dist",
+            "--sensors",
+            "a1_x,v1_x",
             "--out",
             report_path.to_str().unwrap(),
             "--tau",
@@ -870,6 +872,13 @@ fn predictability_takens_writes_report_with_sensitivity_fields() {
         value.get("column").and_then(|v| v.as_str()),
         Some("min_pair_dist")
     );
+    let sensors = value
+        .get("sensors")
+        .and_then(|v| v.as_array())
+        .expect("sensors in report");
+    assert!(sensors.iter().any(|s| s.as_str() == Some("min_pair_dist")));
+    assert!(sensors.iter().any(|s| s.as_str() == Some("a1_x")));
+    assert!(sensors.iter().any(|s| s.as_str() == Some("v1_x")));
     let best = value.get("best").expect("best row in report");
     let model = best
         .get("config")

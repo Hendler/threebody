@@ -118,6 +118,9 @@ pub enum PredictabilityCommand {
         /// Numeric column name to model.
         #[arg(long, default_value = "min_pair_dist")]
         column: String,
+        /// Optional sensor columns (comma-separated). When omitted, uses only --column.
+        #[arg(long, default_value = "")]
+        sensors: String,
         /// Output report JSON path.
         #[arg(long, default_value = "takens_report.json")]
         out: PathBuf,
@@ -237,6 +240,7 @@ pub fn run(cmd: PredictabilityCommand) -> anyhow::Result<()> {
         PredictabilityCommand::Takens {
             input,
             column,
+            sensors,
             out,
             tau,
             m,
@@ -251,6 +255,7 @@ pub fn run(cmd: PredictabilityCommand) -> anyhow::Result<()> {
         } => takens::run_takens(
             input,
             column,
+            sensors,
             out,
             tau,
             m,

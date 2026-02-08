@@ -11,6 +11,7 @@ use crate::predictability::PREDICTABILITY_VERSION;
 #[derive(Debug, Clone)]
 struct DelaySample {
     z: Vec<f64>,
+    x_t: f64,
     y: f64,
     target_step: usize,
 }
@@ -132,6 +133,7 @@ struct TakensReport {
     version: String,
     input_csv: String,
     column: String,
+    sensors: Vec<String>,
     n_raw: usize,
     grid_evals: usize,
     sensitivity_weight: f64,
@@ -142,6 +144,7 @@ struct TakensReport {
 pub(crate) fn run_takens(
     input: PathBuf,
     column: String,
+    sensors_raw: String,
     out: PathBuf,
     tau_raw: String,
     m_raw: String,
@@ -171,11 +174,18 @@ pub(crate) fn run_takens(
     let lambdas = parse_csv_f64_list(&lambda_raw, "lambda")?;
     let models = ModelKind::parse_list(&model_raw)?;
 
-    let series = read_numeric_column(&input, &column)?;
-    if series.len() < 16 {
+    let mut sensors = parse_csv_string_list(&sensors_raw)?;
+    if sensors.is_empty() {
+        sensors.push(column.clone());
+    } else if !sensors.iter().any(|s| s == &column) {
+        sensors.insert(0, column.clone());
+    }
+
+    let aligned = read_aligned_target_and_sensors(&input, &column, &sensors)?;
+    if aligned.target.len() < 16 {
         anyhow::bail!(
             "series too short in column {column}: {} (need at least 16 samples)",
-            series.len()
+            aligned.target.len()
         );
     }
 
@@ -186,7 +196,7 @@ pub(crate) fn run_takens(
 
     for &tau in &taus {
         for &m in &ms {
-            let samples = build_delay_embedding(&series, tau, m)?;
+            let samples = build_delay_embedding_multi(&aligned.target, &aligned.sensors, tau, m)?;
             if samples.len() < 8 {
                 continue;
             }
@@ -307,12 +317,13 @@ pub(crate) fn run_takens(
         version: PREDICTABILITY_VERSION.to_string(),
         input_csv: input.display().to_string(),
         column: column.clone(),
-        n_raw: series.len(),
+        sensors,
+        n_raw: aligned.target.len(),
         grid_evals: all_rows.len(),
         sensitivity_weight,
         best,
         notes: vec![
-            "Takens embedding uses z_t=[x_t, x_{t-tau}, ..., x_{t-(m-1)tau}] with one-step target x_{t+1}."
+            "Takens embedding uses one-step target x_{t+1} and delay coordinates from selected sensor columns."
                 .to_string(),
             "Model families include local linear and local linear-fractional (rational) maps fit on kNN neighborhoods."
                 .to_string(),
@@ -325,8 +336,9 @@ pub(crate) fn run_takens(
 
     fs::write(&out, serde_json::to_string_pretty(&report)?)?;
     eprintln!(
-        "wrote Takens report: {} | model={:?} holdout_mse={:.6e} baseline={:.6e} rel_impr={:.6} sens_med={:.6}",
+        "wrote Takens report: {} | sensors={} model={:?} holdout_mse={:.6e} baseline={:.6e} rel_impr={:.6} sens_med={:.6}",
         out.display(),
+        report.sensors.len(),
         report.best.config.model,
         report.best.holdout_mse,
         report.best.holdout_baseline_mse,
@@ -374,7 +386,43 @@ fn parse_csv_f64_list(raw: &str, field: &str) -> anyhow::Result<Vec<f64>> {
     Ok(out)
 }
 
-fn read_numeric_column(input: &PathBuf, column: &str) -> anyhow::Result<Vec<f64>> {
+fn parse_csv_string_list(raw: &str) -> anyhow::Result<Vec<String>> {
+    let mut out = Vec::new();
+    for tok in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if tok.contains(',') {
+            anyhow::bail!("invalid sensor token with comma: {tok:?}");
+        }
+        let candidate = tok.to_string();
+        if !out.iter().any(|s| s == &candidate) {
+            out.push(candidate);
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Debug, Clone)]
+struct AlignedSeries {
+    target: Vec<f64>,
+    sensors: Vec<Vec<f64>>,
+}
+
+fn read_aligned_target_and_sensors(
+    input: &PathBuf,
+    target_column: &str,
+    sensors: &[String],
+) -> anyhow::Result<AlignedSeries> {
+    if sensors.is_empty() {
+        anyhow::bail!("sensor list is empty");
+    }
+
+    let mut requested = Vec::<String>::new();
+    requested.push(target_column.to_string());
+    for s in sensors {
+        if !requested.iter().any(|x| x == s) {
+            requested.push(s.clone());
+        }
+    }
+
     let file = fs::File::open(input)?;
     let mut reader = io::BufReader::new(file);
     let mut header_line = String::new();
@@ -382,48 +430,116 @@ fn read_numeric_column(input: &PathBuf, column: &str) -> anyhow::Result<Vec<f64>
         anyhow::bail!("empty CSV: {}", input.display());
     }
     let header = parse_header(&header_line);
-    let map = require_columns(&header, &[column]).map_err(anyhow::Error::msg)?;
-    let col_idx = *map.get(column).expect("required column index");
+    let requested_ref: Vec<&str> = requested.iter().map(|s| s.as_str()).collect();
+    let map = require_columns(&header, &requested_ref).map_err(anyhow::Error::msg)?;
 
-    let mut out = Vec::new();
+    let mut cols_out = vec![Vec::<f64>::new(); requested.len()];
     for (line_no, line) in reader.lines().enumerate() {
         let line = line?;
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let cols: Vec<&str> = line.split(',').collect();
-        let raw = cols.get(col_idx).copied().ok_or_else(|| {
-            anyhow::anyhow!(
-                "row {} missing column {} in {}",
-                line_no + 2,
-                column,
-                input.display()
-            )
-        })?;
-        let v: f64 = raw.parse().map_err(|e| {
-            anyhow::anyhow!(
-                "row {} invalid {}={:?} in {}: {}",
-                line_no + 2,
-                column,
-                raw,
-                input.display(),
-                e
-            )
-        })?;
-        if v.is_finite() {
-            out.push(v);
+        let row_cols: Vec<&str> = line.split(',').collect();
+        let mut row_values = Vec::with_capacity(requested.len());
+        let mut finite = true;
+        for name in &requested {
+            let idx = *map
+                .get(name.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing required column mapping for {}", name))?;
+            let raw = row_cols.get(idx).copied().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "row {} missing column {} in {}",
+                    line_no + 2,
+                    name,
+                    input.display()
+                )
+            })?;
+            let v: f64 = raw.parse().map_err(|e| {
+                anyhow::anyhow!(
+                    "row {} invalid {}={:?} in {}: {}",
+                    line_no + 2,
+                    name,
+                    raw,
+                    input.display(),
+                    e
+                )
+            })?;
+            if !v.is_finite() {
+                finite = false;
+                break;
+            }
+            row_values.push(v);
+        }
+        if finite && row_values.len() == requested.len() {
+            for (dst, v) in cols_out.iter_mut().zip(row_values.into_iter()) {
+                dst.push(v);
+            }
         }
     }
-    Ok(out)
+
+    let target = cols_out
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("target column data not found"))?;
+    if target.is_empty() {
+        anyhow::bail!(
+            "no finite aligned rows for target={} sensors={} in {}",
+            target_column,
+            sensors.join(","),
+            input.display()
+        );
+    }
+
+    let mut sensor_out = Vec::with_capacity(sensors.len());
+    for sensor in sensors {
+        let idx = requested
+            .iter()
+            .position(|name| name == sensor)
+            .ok_or_else(|| anyhow::anyhow!("sensor {} not found in requested columns", sensor))?;
+        let series = cols_out
+            .get(idx)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("sensor index out of bounds for {}", sensor))?;
+        sensor_out.push(series);
+    }
+
+    Ok(AlignedSeries {
+        target,
+        sensors: sensor_out,
+    })
 }
 
+#[cfg(test)]
 fn build_delay_embedding(series: &[f64], tau: usize, m: usize) -> anyhow::Result<Vec<DelaySample>> {
+    let sensors = vec![series.to_vec()];
+    build_delay_embedding_multi(series, &sensors, tau, m)
+}
+
+fn build_delay_embedding_multi(
+    target: &[f64],
+    sensors: &[Vec<f64>],
+    tau: usize,
+    m: usize,
+) -> anyhow::Result<Vec<DelaySample>> {
     if tau == 0 || m == 0 {
         anyhow::bail!("tau and m must be positive");
     }
+    if sensors.is_empty() {
+        anyhow::bail!("need at least one sensor column");
+    }
+    for (idx, s) in sensors.iter().enumerate() {
+        if s.len() != target.len() {
+            anyhow::bail!(
+                "sensor length mismatch at index {}: sensor_len={} target_len={}",
+                idx,
+                s.len(),
+                target.len()
+            );
+        }
+    }
     let lag = (m - 1) * tau;
-    if series.len() <= lag + 1 {
+    if target.len() <= lag + 1 {
         anyhow::bail!(
             "series too short for tau={}, m={} (need > {})",
             tau,
@@ -432,15 +548,20 @@ fn build_delay_embedding(series: &[f64], tau: usize, m: usize) -> anyhow::Result
         );
     }
     let mut out = Vec::new();
-    for t in lag..(series.len() - 1) {
-        let mut z = Vec::with_capacity(m);
+    for t in lag..(target.len() - 1) {
+        let mut z = Vec::with_capacity(m * sensors.len());
         for j in 0..m {
-            z.push(series[t - j * tau]);
+            let src = t - j * tau;
+            for s in sensors {
+                z.push(s[src]);
+            }
         }
-        let y = series[t + 1];
-        if z.iter().all(|v| v.is_finite()) && y.is_finite() {
+        let x_t = target[t];
+        let y = target[t + 1];
+        if z.iter().all(|v| v.is_finite()) && y.is_finite() && x_t.is_finite() {
             out.push(DelaySample {
                 z,
+                x_t,
                 y,
                 target_step: t + 1,
             });
@@ -906,10 +1027,7 @@ fn evaluate_persistence_mse(samples: &[DelaySample], eval_indices: &[usize]) -> 
         let s = samples
             .get(i)
             .ok_or_else(|| anyhow::anyhow!("evaluation index out of bounds: {i}"))?;
-        let pred = *s
-            .z
-            .first()
-            .ok_or_else(|| anyhow::anyhow!("empty embedding vector at index {i}"))?;
+        let pred = s.x_t;
         let err = pred - s.y;
         se += err * err;
         n += 1;
@@ -921,6 +1039,7 @@ fn evaluate_persistence_mse(samples: &[DelaySample], eval_indices: &[usize]) -> 
 mod tests {
     use super::{
         ModelKind, SplitMode, assert_no_chronological_leakage, build_delay_embedding,
+        build_delay_embedding_multi,
         evaluate_model_mse, evaluate_persistence_mse, evaluate_sensitivity_summary, split_indices,
     };
 
@@ -960,18 +1079,44 @@ mod tests {
         out
     }
 
+    fn coupled_series(n: usize, y0: f64) -> (Vec<f64>, Vec<f64>) {
+        let mut y = Vec::with_capacity(n);
+        let mut u = Vec::with_capacity(n);
+        let mut prev_y = y0;
+        for t in 0..n {
+            let tt = t as f64;
+            let sensor = (0.07 * tt).sin() + 0.3 * (0.11 * tt).cos();
+            y.push(prev_y);
+            u.push(sensor);
+            prev_y = 0.7 * prev_y + 0.2 * sensor;
+        }
+        (y, u)
+    }
+
     #[test]
     fn delay_embedding_indexing_is_correct() {
         let series: Vec<f64> = (0..10).map(|v| v as f64).collect();
         let emb = build_delay_embedding(&series, 2, 3).unwrap();
         assert_eq!(emb.len(), 5);
         assert_eq!(emb[0].z, vec![4.0, 2.0, 0.0]);
+        assert_eq!(emb[0].x_t, 4.0);
         assert_eq!(emb[0].y, 5.0);
         assert_eq!(emb[0].target_step, 5);
         let last = emb.last().unwrap();
         assert_eq!(last.z, vec![8.0, 6.0, 4.0]);
+        assert_eq!(last.x_t, 8.0);
         assert_eq!(last.y, 9.0);
         assert_eq!(last.target_step, 9);
+    }
+
+    #[test]
+    fn multi_sensor_embedding_dimension_matches_m_times_sensors() {
+        let target: Vec<f64> = (0..12).map(|v| v as f64).collect();
+        let sensor_b: Vec<f64> = (0..12).map(|v| (v as f64) * 10.0).collect();
+        let emb = build_delay_embedding_multi(&target, &[target.clone(), sensor_b], 1, 3).unwrap();
+        assert!(!emb.is_empty());
+        assert_eq!(emb[0].z.len(), 6);
+        assert_eq!(emb[0].z, vec![2.0, 20.0, 1.0, 10.0, 0.0, 0.0]);
     }
 
     #[test]
@@ -1084,6 +1229,49 @@ mod tests {
             sens.median_rel_error < 0.15,
             "expected low linear sensitivity error, got {:?}",
             sens
+        );
+    }
+
+    #[test]
+    fn richer_sensors_improve_prediction_for_coupled_target() {
+        let (target, sensor_u) = coupled_series(800, 0.13);
+        let emb_target_only = build_delay_embedding_multi(&target, &[target.clone()], 1, 1).unwrap();
+        let emb_with_sensor =
+            build_delay_embedding_multi(&target, &[target.clone(), sensor_u], 1, 1).unwrap();
+
+        let split = split_indices(
+            emb_target_only.len(),
+            SplitMode::Chronological,
+            42,
+            0.7,
+            0.15,
+        )
+        .unwrap();
+        let k_global = split.train.len();
+        let mse_target_only = evaluate_model_mse(
+            &emb_target_only,
+            &split.train,
+            &split.holdout,
+            k_global,
+            1e-8,
+            ModelKind::Linear,
+        )
+        .unwrap();
+        let mse_with_sensor = evaluate_model_mse(
+            &emb_with_sensor,
+            &split.train,
+            &split.holdout,
+            k_global,
+            1e-8,
+            ModelKind::Linear,
+        )
+        .unwrap();
+
+        assert!(
+            mse_with_sensor < mse_target_only * 0.1,
+            "expected richer sensors to improve prediction (target_only={} with_sensor={})",
+            mse_target_only,
+            mse_with_sensor
         );
     }
 }
