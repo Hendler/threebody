@@ -206,6 +206,14 @@ cargo run -p threebody-cli -- predictability extract --input "$out/traj.csv" --o
 # 4) Train a lightweight sparse encounter map baseline (predicts energy / angular-momentum exchange across encounters).
 cargo run -p threebody-cli -- predictability train-map --encounters "$out/encounters.jsonl" --out "$out/encounter_map.json"
 
+# 5) Train/evaluate Takens local maps with an optional neural residual baseline.
+# Model set options now include: linear, rational, delta_linear, delta_rational, delta_mlp, all.
+# `all` runs the symbolic/local models and delta_mlp side-by-side under the same holdout split.
+cargo run -p threebody-cli -- predictability takens --input "$out/traj.csv" --column a1_x --sensors "a1_x,r1_x,r1_y,r1_z,r2_x,r2_y,r2_z,r3_x,r3_y,r3_z,v1_x,v1_y,v1_z,v2_x,v2_y,v2_z,v3_x,v3_y,v3_z" --tau 1 --m 2,4 --k 8 --lambda 1e-6 --model all --split-mode chronological --out "$out/takens_a1x_all.json"
+
+# Optional: NN-only ablation on the same task
+# cargo run -p threebody-cli -- predictability takens --input "$out/traj.csv" --column a1_x --sensors "a1_x,r1_x,r1_y,r1_z,r2_x,r2_y,r2_z,r3_x,r3_y,r3_z,v1_x,v1_y,v1_z,v2_x,v2_y,v2_z,v3_x,v3_y,v3_z" --tau 1 --m 2,4 --k 8 --lambda 1e-6 --model delta_mlp --split-mode chronological --out "$out/takens_a1x_nn.json"
+
 # Run the LLM-assisted factory loop (10 iterations) and generate an explainer at $out/factory/evaluation.md
 cargo run -p threebody-cli -- factory --out-dir "$out/factory" --max-iters 10 --auto --config "$out/config.json" --steps 200 --dt 0.01 --llm-mode mock
 

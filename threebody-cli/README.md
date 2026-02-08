@@ -36,6 +36,12 @@ cargo run -p threebody-cli -- factory --max-iters 1 --auto --llm-mode openai --m
 
 # Show help
 cargo run -p threebody-cli -- --help
+
+# Predictability Takens with symbolic + neural residual candidates (delta_mlp)
+cargo run -p threebody-cli -- predictability takens --input traj.csv --column a1_x --sensors "a1_x,r1_x,r1_y,r1_z,r2_x,r2_y,r2_z,r3_x,r3_y,r3_z,v1_x,v1_y,v1_z,v2_x,v2_y,v2_z,v3_x,v3_y,v3_z" --tau 1 --m 2,4 --k 8 --lambda 1e-6 --model all --split-mode chronological --out takens_a1x_all.json
+
+# Neural-only ablation:
+# cargo run -p threebody-cli -- predictability takens --input traj.csv --column a1_x --sensors "a1_x,r1_x,r1_y,r1_z,r2_x,r2_y,r2_z,r3_x,r3_y,r3_z,v1_x,v1_y,v1_z,v2_x,v2_y,v2_z,v3_x,v3_y,v3_z" --tau 1 --m 2,4 --k 8 --lambda 1e-6 --model delta_mlp --split-mode chronological --out takens_a1x_nn.json
 ```
 
 **Flags**

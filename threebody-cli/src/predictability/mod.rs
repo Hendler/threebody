@@ -137,7 +137,7 @@ pub enum PredictabilityCommand {
         /// Ridge lambdas (comma-separated nonnegative floats).
         #[arg(long, default_value = "1e-8,1e-6,1e-4,1e-2")]
         lambda: String,
-        /// Model family: linear | rational | delta_linear | delta_rational | both | all.
+        /// Model family: linear | rational | delta_linear | delta_rational | delta_mlp | both | all.
         #[arg(long, default_value = "all")]
         model: String,
         /// Split mode: chronological | shuffled.
@@ -185,7 +185,7 @@ pub enum PredictabilityCommand {
         /// Ridge lambdas (comma-separated nonnegative floats).
         #[arg(long, default_value = "1e-8,1e-6,1e-4,1e-2")]
         lambda: String,
-        /// Model family: linear | rational | delta_linear | delta_rational | both | all.
+        /// Model family: linear | rational | delta_linear | delta_rational | delta_mlp | both | all.
         #[arg(long, default_value = "all")]
         model: String,
         /// Split mode: chronological | shuffled.

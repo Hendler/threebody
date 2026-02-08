@@ -40,6 +40,7 @@ enum ModelKind {
     Rational,
     DeltaLinear,
     DeltaRational,
+    DeltaMlp,
 }
 
 impl ModelKind {
@@ -53,6 +54,9 @@ impl ModelKind {
                 "delta_rational" | "residual_rational" => {
                     push_unique_model(&mut out, Self::DeltaRational)
                 }
+                "delta_mlp" | "residual_mlp" | "mlp" | "nn" | "neural" => {
+                    push_unique_model(&mut out, Self::DeltaMlp)
+                }
                 "delta" | "residual" => {
                     push_unique_model(&mut out, Self::DeltaLinear);
                     push_unique_model(&mut out, Self::DeltaRational);
@@ -63,10 +67,11 @@ impl ModelKind {
                     if tok.eq_ignore_ascii_case("all") {
                         push_unique_model(&mut out, Self::DeltaLinear);
                         push_unique_model(&mut out, Self::DeltaRational);
+                        push_unique_model(&mut out, Self::DeltaMlp);
                     }
                 }
                 _ => anyhow::bail!(
-                    "unknown model kind: {tok} (expected linear|rational|delta_linear|delta_rational|both|all or CSV list)"
+                    "unknown model kind: {tok} (expected linear|rational|delta_linear|delta_rational|delta_mlp|both|all or CSV list)"
                 ),
             }
         }
@@ -341,7 +346,7 @@ pub(crate) fn run_takens(
         notes: vec![
             "Takens embedding uses one-step target x_{t+1} and delay coordinates from selected sensor columns."
                 .to_string(),
-            "Model families include local linear, local rational, and residual variants (delta_*) fit on kNN neighborhoods."
+            "Model families include local linear, local rational, residual local variants (delta_*), and a global residual MLP baseline (delta_mlp)."
                 .to_string(),
             "Primary score is strict holdout MSE; baseline is persistence y_hat=x_t.".to_string(),
             "Selection rank_score = val_mse * (1 + sensitivity_weight * val_sensitivity_median)."
@@ -858,6 +863,455 @@ impl LocalModel {
     }
 }
 
+#[derive(Debug, Clone)]
+struct DeltaMlpModel {
+    input_mean: Vec<f64>,
+    input_scale: Vec<f64>,
+    target_mean: f64,
+    target_scale: f64,
+    w1: Vec<Vec<f64>>,
+    b1: Vec<f64>,
+    w2: Vec<Vec<f64>>,
+    b2: Vec<f64>,
+    w3: Vec<f64>,
+    b3: f64,
+}
+
+impl DeltaMlpModel {
+    fn predict(&self, query_z: &[f64]) -> Option<f64> {
+        if query_z.len() != self.input_mean.len() || query_z.is_empty() {
+            return None;
+        }
+        let x_norm = normalize_input(query_z, &self.input_mean, &self.input_scale)?;
+        let (_, _, _, h2) = self.forward_hidden(&x_norm)?;
+        let y_norm = dot(&self.w3, &h2) + self.b3;
+        if !y_norm.is_finite() {
+            return None;
+        }
+        let delta = y_norm * self.target_scale + self.target_mean;
+        let y = query_z[0] + delta;
+        if y.is_finite() { Some(y) } else { None }
+    }
+
+    fn gradient(&self, query_z: &[f64]) -> Option<Vec<f64>> {
+        if query_z.len() != self.input_mean.len() || query_z.is_empty() {
+            return None;
+        }
+        let x_norm = normalize_input(query_z, &self.input_mean, &self.input_scale)?;
+        let (_, h1, _, h2) = self.forward_hidden(&x_norm)?;
+        let h1_n = h1.len();
+        let h2_n = h2.len();
+        let d = query_z.len();
+        if self.w2.len() != h2_n || self.w3.len() != h2_n || self.w1.len() != h1_n {
+            return None;
+        }
+
+        let mut g_u2 = vec![0.0; h2_n];
+        for j in 0..h2_n {
+            let one_minus_sq = 1.0 - h2[j] * h2[j];
+            g_u2[j] = self.w3[j] * one_minus_sq;
+            if !g_u2[j].is_finite() {
+                return None;
+            }
+        }
+
+        let mut g_u1 = vec![0.0; h1_n];
+        for k in 0..h1_n {
+            let mut acc = 0.0;
+            for (j, row) in self.w2.iter().enumerate().take(h2_n) {
+                let w = *row.get(k)?;
+                acc += g_u2[j] * w;
+            }
+            let one_minus_sq = 1.0 - h1[k] * h1[k];
+            g_u1[k] = acc * one_minus_sq;
+            if !g_u1[k].is_finite() {
+                return None;
+            }
+        }
+
+        let mut g_xn = vec![0.0; d];
+        for (m, slot) in g_xn.iter_mut().enumerate().take(d) {
+            let mut acc = 0.0;
+            for (k, row) in self.w1.iter().enumerate().take(h1_n) {
+                let w = *row.get(m)?;
+                acc += g_u1[k] * w;
+            }
+            if !acc.is_finite() {
+                return None;
+            }
+            *slot = acc;
+        }
+
+        let mut grad = vec![0.0; d];
+        for j in 0..d {
+            let scale = self.input_scale[j].abs().max(1e-12);
+            grad[j] = self.target_scale * g_xn[j] / scale;
+            if j == 0 {
+                grad[j] += 1.0;
+            }
+            if !grad[j].is_finite() {
+                return None;
+            }
+        }
+        Some(grad)
+    }
+
+    fn forward_hidden(&self, x_norm: &[f64]) -> Option<(Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let h1_n = self.w1.len();
+        let h2_n = self.w2.len();
+        if h1_n == 0 || h2_n == 0 || x_norm.is_empty() {
+            return None;
+        }
+
+        let mut u1 = vec![0.0; h1_n];
+        let mut h1 = vec![0.0; h1_n];
+        for (i, (u, h)) in u1.iter_mut().zip(h1.iter_mut()).enumerate().take(h1_n) {
+            let mut acc = *self.b1.get(i)?;
+            let row = self.w1.get(i)?;
+            if row.len() != x_norm.len() {
+                return None;
+            }
+            for (w, x) in row.iter().zip(x_norm.iter()) {
+                acc += w * x;
+            }
+            if !acc.is_finite() {
+                return None;
+            }
+            *u = acc;
+            *h = acc.tanh();
+        }
+
+        let mut u2 = vec![0.0; h2_n];
+        let mut h2 = vec![0.0; h2_n];
+        for (i, (u, h)) in u2.iter_mut().zip(h2.iter_mut()).enumerate().take(h2_n) {
+            let mut acc = *self.b2.get(i)?;
+            let row = self.w2.get(i)?;
+            if row.len() != h1_n {
+                return None;
+            }
+            for (w, x) in row.iter().zip(h1.iter()) {
+                acc += w * x;
+            }
+            if !acc.is_finite() {
+                return None;
+            }
+            *u = acc;
+            *h = acc.tanh();
+        }
+        Some((u1, h1, u2, h2))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DeltaMlpTrainConfig {
+    lambda: f64,
+    epochs: usize,
+    learning_rate: f64,
+}
+
+fn normalize_input(x: &[f64], mean: &[f64], scale: &[f64]) -> Option<Vec<f64>> {
+    if x.len() != mean.len() || x.len() != scale.len() {
+        return None;
+    }
+    let mut out = Vec::with_capacity(x.len());
+    for j in 0..x.len() {
+        let s = scale[j].abs().max(1e-12);
+        let v = (x[j] - mean[j]) / s;
+        if !v.is_finite() {
+            return None;
+        }
+        out.push(v);
+    }
+    Some(out)
+}
+
+fn fit_delta_mlp_model(
+    samples: &[DelaySample],
+    train_indices: &[usize],
+    hidden_hint: usize,
+    lambda: f64,
+) -> Option<DeltaMlpModel> {
+    let first = samples.get(*train_indices.first()?)?;
+    let d = first.z.len();
+    if d == 0 {
+        return None;
+    }
+
+    let train_n = train_indices.len();
+    if train_n < 8 {
+        return None;
+    }
+
+    let mut input_mean = vec![0.0; d];
+    let mut target_mean = 0.0;
+    let mut x_train = Vec::with_capacity(train_n);
+    let mut y_train = Vec::with_capacity(train_n);
+    for &idx in train_indices {
+        let s = samples.get(idx)?;
+        if s.z.len() != d {
+            return None;
+        }
+        for (j, mu) in input_mean.iter_mut().enumerate().take(d) {
+            *mu += s.z[j];
+        }
+        let residual = s.y - s.x_t;
+        if !residual.is_finite() {
+            return None;
+        }
+        target_mean += residual;
+        x_train.push(s.z.clone());
+        y_train.push(residual);
+    }
+    for mu in input_mean.iter_mut().take(d) {
+        *mu /= train_n as f64;
+    }
+    target_mean /= train_n as f64;
+
+    let mut input_var = vec![0.0; d];
+    let mut target_var = 0.0;
+    for (x, y) in x_train.iter().zip(y_train.iter()) {
+        for j in 0..d {
+            let dv = x[j] - input_mean[j];
+            input_var[j] += dv * dv;
+        }
+        let dy = *y - target_mean;
+        target_var += dy * dy;
+    }
+    let mut input_scale = vec![0.0; d];
+    for j in 0..d {
+        input_scale[j] = (input_var[j] / train_n as f64).sqrt().max(1e-6);
+    }
+    let target_scale = (target_var / train_n as f64).sqrt().max(1e-6);
+
+    let mut x_norm = Vec::with_capacity(train_n);
+    let mut y_norm = Vec::with_capacity(train_n);
+    for (x, y) in x_train.iter().zip(y_train.iter()) {
+        x_norm.push(normalize_input(x, &input_mean, &input_scale)?);
+        let yn = (*y - target_mean) / target_scale;
+        if !yn.is_finite() {
+            return None;
+        }
+        y_norm.push(yn);
+    }
+
+    let h1 = hidden_hint.clamp(4, 64);
+    let h2 = (h1 / 2).clamp(4, 32);
+    let cfg = DeltaMlpTrainConfig {
+        lambda: lambda.max(0.0),
+        epochs: 220,
+        learning_rate: 1e-2,
+    };
+
+    let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+    seed ^= (d as u64).wrapping_mul(0xA24B_AED4_963E_E407);
+    seed ^= (train_n as u64).wrapping_mul(0x9FB2_1C65_1E98_DF25);
+    seed ^= (h1 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    seed ^= cfg.lambda.to_bits().wrapping_mul(0x1656_67B1_9E37_79F9);
+    let mut rng = threebody_discover::ga::Lcg::new(seed);
+
+    let s1 = (1.0 / d as f64).sqrt();
+    let s2 = (1.0 / h1 as f64).sqrt();
+    let s3 = (1.0 / h2 as f64).sqrt();
+    let mut w1 = vec![vec![0.0; d]; h1];
+    let mut b1 = vec![0.0; h1];
+    let mut w2 = vec![vec![0.0; h1]; h2];
+    let mut b2 = vec![0.0; h2];
+    let mut w3 = vec![0.0; h2];
+    let mut b3 = 0.0f64;
+    for row in w1.iter_mut().take(h1) {
+        for w in row.iter_mut().take(d) {
+            *w = rng.gen_range_f64(-s1, s1);
+        }
+    }
+    for row in w2.iter_mut().take(h2) {
+        for w in row.iter_mut().take(h1) {
+            *w = rng.gen_range_f64(-s2, s2);
+        }
+    }
+    for w in w3.iter_mut().take(h2) {
+        *w = rng.gen_range_f64(-s3, s3);
+    }
+
+    // Adam state
+    let (beta1, beta2, eps) = (0.9, 0.999, 1e-8);
+    let mut mw1 = vec![vec![0.0; d]; h1];
+    let mut vw1 = vec![vec![0.0; d]; h1];
+    let mut mb1 = vec![0.0; h1];
+    let mut vb1 = vec![0.0; h1];
+    let mut mw2 = vec![vec![0.0; h1]; h2];
+    let mut vw2 = vec![vec![0.0; h1]; h2];
+    let mut mb2 = vec![0.0; h2];
+    let mut vb2 = vec![0.0; h2];
+    let mut mw3 = vec![0.0; h2];
+    let mut vw3 = vec![0.0; h2];
+    let mut mb3 = 0.0f64;
+    let mut vb3 = 0.0f64;
+
+    let mut gw1 = vec![vec![0.0; d]; h1];
+    let mut gb1 = vec![0.0; h1];
+    let mut gw2 = vec![vec![0.0; h1]; h2];
+    let mut gb2 = vec![0.0; h2];
+    let mut gw3 = vec![0.0; h2];
+    let mut gb3: f64;
+
+    for epoch in 1..=cfg.epochs {
+        for row in gw1.iter_mut().take(h1) {
+            row.fill(0.0);
+        }
+        gb1.fill(0.0);
+        for row in gw2.iter_mut().take(h2) {
+            row.fill(0.0);
+        }
+        gb2.fill(0.0);
+        gw3.fill(0.0);
+        gb3 = 0.0;
+
+        let inv_n = 1.0 / train_n as f64;
+        for (x, y) in x_norm.iter().zip(y_norm.iter()) {
+            let mut u1 = vec![0.0; h1];
+            let mut h1v = vec![0.0; h1];
+            for i in 0..h1 {
+                let mut acc = b1[i];
+                for (w, xv) in w1[i].iter().zip(x.iter()) {
+                    acc += w * xv;
+                }
+                u1[i] = acc;
+                h1v[i] = acc.tanh();
+            }
+            let mut u2 = vec![0.0; h2];
+            let mut h2v = vec![0.0; h2];
+            for i in 0..h2 {
+                let mut acc = b2[i];
+                for (w, h) in w2[i].iter().zip(h1v.iter()) {
+                    acc += w * h;
+                }
+                u2[i] = acc;
+                h2v[i] = acc.tanh();
+            }
+            let y_hat = dot(&w3, &h2v) + b3;
+            let dy = (y_hat - *y) * (2.0 * inv_n);
+            if !dy.is_finite() {
+                return None;
+            }
+
+            for j in 0..h2 {
+                gw3[j] += dy * h2v[j];
+            }
+            gb3 += dy;
+
+            let mut du2 = vec![0.0; h2];
+            for j in 0..h2 {
+                du2[j] = dy * w3[j] * (1.0 - h2v[j] * h2v[j]);
+            }
+            let mut dh1 = vec![0.0; h1];
+            for j in 0..h2 {
+                gb2[j] += du2[j];
+                for k in 0..h1 {
+                    gw2[j][k] += du2[j] * h1v[k];
+                    dh1[k] += du2[j] * w2[j][k];
+                }
+            }
+            for k in 0..h1 {
+                let du1 = dh1[k] * (1.0 - h1v[k] * h1v[k]);
+                gb1[k] += du1;
+                for (m, xv) in x.iter().enumerate().take(d) {
+                    gw1[k][m] += du1 * xv;
+                }
+            }
+        }
+
+        if cfg.lambda > 0.0 {
+            let wd = 2.0 * cfg.lambda;
+            for i in 0..h1 {
+                for j in 0..d {
+                    gw1[i][j] += wd * w1[i][j];
+                }
+            }
+            for i in 0..h2 {
+                for j in 0..h1 {
+                    gw2[i][j] += wd * w2[i][j];
+                }
+            }
+            for j in 0..h2 {
+                gw3[j] += wd * w3[j];
+            }
+        }
+
+        let lr = cfg.learning_rate / (1.0 + 0.01 * epoch as f64);
+        let t = epoch as i32;
+        for i in 0..h1 {
+            for j in 0..d {
+                let g = gw1[i][j].clamp(-5.0, 5.0);
+                mw1[i][j] = beta1 * mw1[i][j] + (1.0 - beta1) * g;
+                vw1[i][j] = beta2 * vw1[i][j] + (1.0 - beta2) * g * g;
+                let mhat = mw1[i][j] / (1.0 - beta1.powi(t));
+                let vhat = vw1[i][j] / (1.0 - beta2.powi(t));
+                w1[i][j] -= lr * mhat / (vhat.sqrt() + eps);
+            }
+            let g = gb1[i].clamp(-5.0, 5.0);
+            mb1[i] = beta1 * mb1[i] + (1.0 - beta1) * g;
+            vb1[i] = beta2 * vb1[i] + (1.0 - beta2) * g * g;
+            let mhat = mb1[i] / (1.0 - beta1.powi(t));
+            let vhat = vb1[i] / (1.0 - beta2.powi(t));
+            b1[i] -= lr * mhat / (vhat.sqrt() + eps);
+        }
+        for i in 0..h2 {
+            for j in 0..h1 {
+                let g = gw2[i][j].clamp(-5.0, 5.0);
+                mw2[i][j] = beta1 * mw2[i][j] + (1.0 - beta1) * g;
+                vw2[i][j] = beta2 * vw2[i][j] + (1.0 - beta2) * g * g;
+                let mhat = mw2[i][j] / (1.0 - beta1.powi(t));
+                let vhat = vw2[i][j] / (1.0 - beta2.powi(t));
+                w2[i][j] -= lr * mhat / (vhat.sqrt() + eps);
+            }
+            let g = gb2[i].clamp(-5.0, 5.0);
+            mb2[i] = beta1 * mb2[i] + (1.0 - beta1) * g;
+            vb2[i] = beta2 * vb2[i] + (1.0 - beta2) * g * g;
+            let mhat = mb2[i] / (1.0 - beta1.powi(t));
+            let vhat = vb2[i] / (1.0 - beta2.powi(t));
+            b2[i] -= lr * mhat / (vhat.sqrt() + eps);
+        }
+        for j in 0..h2 {
+            let g = gw3[j].clamp(-5.0, 5.0);
+            mw3[j] = beta1 * mw3[j] + (1.0 - beta1) * g;
+            vw3[j] = beta2 * vw3[j] + (1.0 - beta2) * g * g;
+            let mhat = mw3[j] / (1.0 - beta1.powi(t));
+            let vhat = vw3[j] / (1.0 - beta2.powi(t));
+            w3[j] -= lr * mhat / (vhat.sqrt() + eps);
+        }
+        let g = gb3.clamp(-5.0, 5.0);
+        mb3 = beta1 * mb3 + (1.0 - beta1) * g;
+        vb3 = beta2 * vb3 + (1.0 - beta2) * g * g;
+        let mhat = mb3 / (1.0 - beta1.powi(t));
+        let vhat = vb3 / (1.0 - beta2.powi(t));
+        b3 -= lr * mhat / (vhat.sqrt() + eps);
+    }
+
+    // Basic finite guard.
+    let mut all_finite = b3.is_finite();
+    all_finite &= b1.iter().all(|v| v.is_finite());
+    all_finite &= b2.iter().all(|v| v.is_finite());
+    all_finite &= w1.iter().flatten().all(|v| v.is_finite());
+    all_finite &= w2.iter().flatten().all(|v| v.is_finite());
+    all_finite &= w3.iter().all(|v| v.is_finite());
+    if !all_finite {
+        return None;
+    }
+
+    Some(DeltaMlpModel {
+        input_mean,
+        input_scale,
+        target_mean,
+        target_scale,
+        w1,
+        b1,
+        w2,
+        b2,
+        w3,
+        b3,
+    })
+}
+
 fn fit_linear_model(
     samples: &[DelaySample],
     neighbors: &[usize],
@@ -957,6 +1411,7 @@ fn fit_local_model(
         ModelKind::Rational => fit_rational_model(samples, &neighbors, lambda, false)?,
         ModelKind::DeltaLinear => fit_linear_model(samples, &neighbors, lambda, true)?,
         ModelKind::DeltaRational => fit_rational_model(samples, &neighbors, lambda, true)?,
+        ModelKind::DeltaMlp => return None,
     };
     Some((local, fallback))
 }
@@ -971,6 +1426,25 @@ fn evaluate_model_mse(
 ) -> anyhow::Result<f64> {
     if eval_indices.is_empty() {
         anyhow::bail!("empty evaluation split");
+    }
+
+    if matches!(model, ModelKind::DeltaMlp) {
+        let mlp = fit_delta_mlp_model(samples, train_indices, k, lambda)
+            .ok_or_else(|| anyhow::anyhow!("delta_mlp fit failed"))?;
+        let mut se = 0.0;
+        let mut n = 0usize;
+        for &i in eval_indices {
+            let s = samples
+                .get(i)
+                .ok_or_else(|| anyhow::anyhow!("evaluation index out of bounds: {i}"))?;
+            let pred = mlp
+                .predict(&s.z)
+                .ok_or_else(|| anyhow::anyhow!("delta_mlp prediction failed for index {i}"))?;
+            let err = pred - s.y;
+            se += err * err;
+            n += 1;
+        }
+        return Ok(se / n as f64);
     }
 
     let mut se = 0.0;
@@ -1003,6 +1477,15 @@ fn evaluate_sensitivity_summary(
         anyhow::bail!("sensitivity evaluation requires at least 2 points");
     }
 
+    let fitted_mlp = if matches!(model, ModelKind::DeltaMlp) {
+        Some(
+            fit_delta_mlp_model(samples, train_indices, k, lambda)
+                .ok_or_else(|| anyhow::anyhow!("delta_mlp fit failed"))?,
+        )
+    } else {
+        None
+    };
+
     let mut rel_errors = Vec::new();
     for &i in eval_indices {
         let s_i = samples
@@ -1023,11 +1506,16 @@ fn evaluate_sensitivity_summary(
             .get(j)
             .ok_or_else(|| anyhow::anyhow!("sensitivity peer index out of bounds: {j}"))?;
 
-        let (local, _) = fit_local_model(samples, train_indices, &s_i.z, k, lambda, model)
-            .ok_or_else(|| anyhow::anyhow!("local model fit failed for index {i}"))?;
-        let grad = local
-            .gradient(&s_i.z)
-            .ok_or_else(|| anyhow::anyhow!("gradient failed for index {i}"))?;
+        let grad = if let Some(mlp) = fitted_mlp.as_ref() {
+            mlp.gradient(&s_i.z)
+                .ok_or_else(|| anyhow::anyhow!("delta_mlp gradient failed for index {i}"))?
+        } else {
+            let (local, _) = fit_local_model(samples, train_indices, &s_i.z, k, lambda, model)
+                .ok_or_else(|| anyhow::anyhow!("local model fit failed for index {i}"))?;
+            local
+                .gradient(&s_i.z)
+                .ok_or_else(|| anyhow::anyhow!("gradient failed for index {i}"))?
+        };
 
         let mut dz = vec![0.0; s_i.z.len()];
         for (slot, (a, b)) in dz.iter_mut().zip(s_j.z.iter().zip(s_i.z.iter())) {
@@ -1169,6 +1657,21 @@ mod tests {
             x.push(prev_x);
             u.push(sensor);
             prev_x = prev_x + 0.03 * sensor - 0.005 * sensor * sensor;
+        }
+        (x, u)
+    }
+
+    fn nonlinear_delta_series(n: usize, x0: f64) -> (Vec<f64>, Vec<f64>) {
+        let mut x = Vec::with_capacity(n);
+        let mut u = Vec::with_capacity(n);
+        let mut prev_x = x0;
+        for t in 0..n {
+            let tt = t as f64;
+            let sensor = (0.03 * tt).sin() + 0.35 * (0.07 * tt).cos();
+            x.push(prev_x);
+            u.push(sensor);
+            let delta = 0.18 * (1.4 * prev_x).sin() + 0.07 * sensor * sensor + 0.03 * sensor;
+            prev_x += delta;
         }
         (x, u)
     }
@@ -1393,6 +1896,31 @@ mod tests {
             "expected delta linear to outperform linear on persistence-dominated target (linear={} delta={})",
             linear_mse,
             delta_mse
+        );
+    }
+
+    #[test]
+    fn delta_mlp_beats_persistence_on_nonlinear_residual_fixture() {
+        let (target, sensor_u) = nonlinear_delta_series(1200, 0.1);
+        let emb = build_delay_embedding_multi(&target, &[target.clone(), sensor_u], 1, 1).unwrap();
+        let split = split_indices(emb.len(), SplitMode::Chronological, 21, 0.7, 0.15).unwrap();
+
+        let delta_mlp_mse = evaluate_model_mse(
+            &emb,
+            &split.train,
+            &split.holdout,
+            12,
+            1e-6,
+            ModelKind::DeltaMlp,
+        )
+        .unwrap();
+        let baseline_mse = evaluate_persistence_mse(&emb, &split.holdout).unwrap();
+
+        assert!(
+            delta_mlp_mse < baseline_mse * 0.5,
+            "expected delta_mlp to beat persistence on nonlinear residual fixture (baseline={} delta_mlp={})",
+            baseline_mse,
+            delta_mlp_mse
         );
     }
 }
