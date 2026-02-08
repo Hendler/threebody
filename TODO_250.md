@@ -6,6 +6,25 @@ Legend:
 - [ ] not started
 - [x] completed
 
+## Priority Override: Efficacy Reporting From Simulation-Extracted Information (TDD/DRY)
+This priority layer is additive: it does not remove simulation-accuracy or equation-effectiveness work already in the backlog. It narrows immediate execution to how we report efficacy from information extracted from the simulator.
+
+- [x] R001. Define a strict efficacy rubric driven by holdout relative improvement and sensitivity consistency.
+- [x] R002. Add failing unit tests for raw-vs-derived channel classification and aggregate claim-status behavior.
+- [x] R003. Implement `predictability report` command to summarize per-channel efficacy from report JSON inputs.
+- [x] R004. Add integration test proving `predictability report` writes JSON+Markdown and classifies mixed outcomes correctly.
+- [x] R005. Run reproducible efficacy summary on current Takens outputs and store artifacts (`results/efficacy_report_v1.json`, `results/efficacy_report_v1.md`).
+- [x] R006. Update paper main text with reporting rubric and measured efficacy aggregate.
+- [ ] R007. Add bootstrap confidence intervals for median improvement (all/raw/derived) in efficacy reports.
+- [ ] R008. Add paired-report comparator (`before` vs `after`) with effect-size and non-regression flags.
+- [ ] R009. Add schema validation test to guarantee backward-compatible report parsing.
+- [ ] R010. Add missing-data handling tests (NaN/inf/missing fields) and deterministic fallback behavior.
+- [ ] R011. Add multi-run aggregation command for seed suites (median, CI, win-rate by channel kind).
+- [ ] R012. Add novelty gate test that fails when no channel clears efficacy thresholds on strict holdout.
+- [ ] R013. Add information-value test: verify richer channel sets outperform reduced channel sets under matched splits.
+- [ ] R014. Auto-generate paper-ready efficacy table from JSON to avoid manual transcription drift.
+- [ ] R015. Add DRY helper library for shared quantiles/medians/claim-label logic across reporting tools.
+
 ## Stream 1: Project governance and reproducibility scaffold
 - [ ] 001. Define acceptance criteria and measurable success metric for "Project governance and reproducibility scaffold".
 - [ ] 002. Add a failing unit test that encodes the core mathematical contract for "Project governance and reproducibility scaffold".

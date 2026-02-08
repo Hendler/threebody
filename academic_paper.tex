@@ -26,6 +26,7 @@ The primary research question for this project, explicitly posed by Jonathan Hen
 This revision adds three math families outside the prior force-library core (\texttt{jacobi\_legendre}, \texttt{shape\_invariants}, \texttt{symmetry\_invariants}), plus an MDL-aware deterministic selector mode (\texttt{numeric\_mdl}) layered on top of existing MCTS archive reuse and strict holdout gates. In matched deterministic gravity-only runs on February 8, 2026 (\texttt{research\_v2\_atlas}, 3 iterations, 150 steps, $dt=0.01$), the best equation and benchmark metrics were unchanged versus baseline: median relative improvement $0.0$ (12-seed suite, 95\% bootstrap CI $[0,0]$), benchmark relative improvement $\approx 1.3\times10^{-16}$, and \texttt{strict\_holdout\_passed=false}. A targeted global-model run with the new families produced a simpler equation (complexity 5) but a small negative benchmark delta ($-7.5\times10^{-5}$, CI fully negative). Therefore, current evidence supports tooling progress and stronger falsification, not a new physical law.
 
 We additionally implemented a deterministic delay-embedding track (\texttt{predictability takens}) with strict chronological holdouts, local linear and local linear-fractional (rational) maps, and a sensitivity-consistency score based on one-step tangent prediction. On the current \texttt{traj.csv} benchmark (February 8, 2026), this track is strongly \emph{channel-dependent}: for derived extrema channels (\texttt{min\_pair\_dist}, \texttt{max\_accel}), persistence remained superior (relative improvement $\approx -22.33$), while for raw state channels (\texttt{a1\_x}, \texttt{v1\_x}) local maps beat persistence by $\approx 99.7\%$ holdout MSE reduction. Rational maps did not outperform local linear maps on these trajectory channels.
+To make this question operational, we added an efficacy-report layer that aggregates channel-level holdout improvement and sensitivity consistency from simulator-extracted signals, with explicit raw-vs-derived information separation. In the current 4-channel summary run, 2/4 channels were effective, with median raw improvement $\approx 0.998$, median derived improvement $\approx -22.334$, and a positive raw-minus-derived information delta $\approx 23.33$, indicating useful but strongly channel-specific gains.
 
 We emphasize editorially the areas of modeling uncertainty: the electromagnetic approximation (quasi-static, no retardation or radiation reaction)\cite{Darwin1920}, conservation-law interpretation under the chosen EM model, close-encounter numerical stiffness, and the limits of global predictability in chaotic regimes\cite{Lorenz1963}. We argue that novelty arises not from claiming a universal closed-form solution, but from automatically discovering compact regime-specific laws with explicit validity domains, strict holdout testing, and reproducible failure reporting against the oracle.
 Code repository: \texttt{https://github.com/Hendler/threebody}.
@@ -350,6 +351,7 @@ The systems are controlled by CLI:
 \item \textbf{simulate}: produce truth trajectories and diagnostics.
 \item \textbf{discover}: fit sparse equations using a chosen library.
 \item \textbf{predictability}: ensemble runs, lock-point detection, close-encounter extraction, a sparse encounter-map baseline (experimental), and delay-embedding local-map reports (\texttt{takens}) with strict holdout/sensitivity summaries.
+\item \textbf{predictability report}: aggregate efficacy summaries from report artifacts, including raw-vs-derived channel separation and claim labels.
 \item \textbf{factory}: an optional LLM-guided loop that selects initial conditions, runs simulation, performs discovery, and emits a judged report with suggested next runs.
 \item \textbf{quickstart}: a convenience wrapper that runs an end-to-end workflow and writes a novice-friendly summary plus evidence under a single directory.
 \item \textbf{bench-em}: deterministic EM identifiability suite (charge/velocity sweeps + diverse initial conditions) that writes a comparable report per case.
@@ -377,6 +379,19 @@ A ``truth-grade'' oracle requires:
 \end{itemize}
 
 Current implementation outputs CSV and a JSON ``sidecar'' containing config, header hash, warnings, last-regime diagnostics, dt statistics (accepted/rejected/min/max/avg), close-encounter event metadata (when triggered), and the initial state (masses/charges/positions/velocities) to support strict reproducibility.
+
+\subsection{Efficacy reporting from simulation-extracted information (new)}
+To align evaluation with the guiding question, we added a reporting layer that consumes per-channel predictability artifacts and classifies whether each channel shows usable information gain.
+
+For each channel $c$, let $\Delta_{\mathrm{rel}}(c)$ be holdout relative improvement versus persistence and let $\varepsilon_{\mathrm{sens}}(c)$ be holdout sensitivity-median error. With thresholds $\tau_\Delta$ and $\tau_s$, we define:
+\begin{equation*}
+\mathrm{effective}(c)=\mathbf{1}\{\Delta_{\mathrm{rel}}(c)>\tau_\Delta \ \wedge \ \varepsilon_{\mathrm{sens}}(c)\le\tau_s\}.
+\end{equation*}
+We then partition channels into raw-state and derived-diagnostic sets and report:
+\begin{equation*}
+\Delta_{\mathrm{info}}=\operatorname{median}_{c\in\mathrm{raw}}\Delta_{\mathrm{rel}}(c)-\operatorname{median}_{c\in\mathrm{derived}}\Delta_{\mathrm{rel}}(c).
+\end{equation*}
+The CLI command \texttt{predictability report} writes machine-readable JSON plus Markdown summaries for this rubric, so claims about ``better information $\rightarrow$ better math'' are tied to explicit thresholds and reproducible artifacts.
 
 \section{Results (What we expect, what we can claim, and what we cannot)}
 \subsection{Expected outcomes}
@@ -443,6 +458,19 @@ Interpretation:
 
 For physicists: the result supports a mixed view of deterministic local formulas. Delay-embedding local models can provide strong short-horizon prediction for some observables, but they do not yet give a uniformly better reduced law across derived chaotic diagnostics.
 For novice readers: this new method can predict some signals much better than a naive ``next value equals current value'' guess, but it still fails badly on other signals, so we are not at a universal formula.
+
+\subsection{Aggregate efficacy report from extracted channels (February 8, 2026)}
+Using \texttt{predictability report} on four channel reports (\texttt{a1\_x}, \texttt{v1\_x}, \texttt{min\_pair\_dist}, \texttt{max\_accel}) with thresholds $\tau_\Delta=0$ and $\tau_s=0.1$, we obtained:
+\begin{itemize}
+\item $n_{\mathrm{channels}}=4$, $n_{\mathrm{effective}}=2$ (effective rate $=0.5$),
+\item median improvement (all channels) $\approx -10.666$,
+\item median improvement (raw) $\approx 0.9976$,
+\item median improvement (derived) $\approx -22.3345$,
+\item $\Delta_{\mathrm{info}}$ (raw minus derived) $\approx 23.3321$,
+\item claim status: \texttt{information\_helpful\_in\_some\_channels}.
+\end{itemize}
+
+Interpretation for the guiding question: richer information can support much better local predictive formulas on some channels, but this does not yet transfer uniformly to all derived diagnostic channels.
 
 \subsection{Policy and claim-gate summary (main-body view)}
 Extended policy sweeps and paired matrix studies are now treated as supporting evidence rather than core narrative and are reported in Appendix~B.
@@ -576,6 +604,7 @@ S. Mikkola and S. J. Aarseth, ``An implementation of N-body chain regularization
 \item Advanced controls now include multi-smooth atlas variants, one-shot smooth gate-geometry tuning (\texttt{gate\_geometry.json}), strict redundancy/collinearity pruning with algebraic partition canonicalization, sensitivity-aware ranking, selectable feature-family hypotheses, and deterministic equation-template injection for non-Newtonian candidates.
 \item New deterministic feature-family atoms include \texttt{jacobi\_legendre}, \texttt{shape\_invariants}, and \texttt{symmetry\_invariants}; selection can be switched to an MDL-prioritized comparator via \texttt{--selector-policy numeric\_mdl}.
 \item The \texttt{predictability takens} command now supports local linear and local rational maps (\texttt{--model}), strict split modes, and sensitivity-weighted selection (\texttt{--sensitivity-weight}), producing JSON reports with holdout and tangent-consistency metrics.
+\item The \texttt{predictability report} command aggregates channel-level efficacy from report JSON files with explicit thresholds (\texttt{--improvement-threshold}, \texttt{--max-sensitivity-median}) and writes JSON/Markdown claim artifacts.
 \item The \texttt{research\_v2\_atlas} policy defaults to an atlas model family and benchmark-first claim gating (\texttt{highbar\_v2\_benchmark\_first}).
 \item Bootstrap CI computation for the claim gate now uses index-safe resampling and is covered by a regression test to prevent out-of-bounds failures on 12-case suites.
 \end{itemize}
