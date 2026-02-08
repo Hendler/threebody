@@ -358,6 +358,36 @@ enum Commands {
         /// Candidate model family: auto | global | atlas.
         #[arg(long, default_value = "auto")]
         model_family: String,
+        /// Atlas gate mode: binary | smooth.
+        #[arg(long, default_value = "smooth")]
+        atlas_gate: String,
+        /// Gate center distance r0 used by smooth gates.
+        #[arg(long, default_value_t = 0.5)]
+        gate_r0: f64,
+        /// Gate width used by smooth gates.
+        #[arg(long, default_value_t = 0.08)]
+        gate_width: f64,
+        /// Redundancy handling for collinear/equivalent candidates: off | warn | strict.
+        #[arg(long, default_value = "warn")]
+        redundancy_prune: String,
+        /// Maximum allowed absolute feature correlation before near-collinearity is flagged.
+        #[arg(long, default_value_t = 0.995)]
+        collinearity_threshold: f64,
+        /// Sensitivity integration mode: off | report | gate | objective.
+        #[arg(long, default_value = "objective")]
+        sensitivity_mode: String,
+        /// Weight for sensitivity median relative error in objective mode.
+        #[arg(long, default_value_t = 0.05)]
+        sens_weight: f64,
+        /// Maximum allowed sensitivity median relative error in gate mode.
+        #[arg(long, default_value_t = 0.35)]
+        sens_max_median_error: f64,
+        /// Feature-family hypotheses: newtonian,pn1,yukawa,darwin_like,tidal_invariants,jerk_augmented,hamiltonian_invariants,mixed.
+        #[arg(long, default_value = "mixed")]
+        feature_family: String,
+        /// Selector policy: numeric_only | llm_assist | llm_math_creative.
+        #[arg(long, default_value = "llm_math_creative")]
+        selector_policy: String,
         /// Factory policy profile (primary interface): research_v1 | research_v2_atlas | legacy.
         #[arg(long, default_value = "research_v1")]
         policy: String,
@@ -581,6 +611,16 @@ fn main() -> anyhow::Result<()> {
             equation_search_archive_topk,
             equation_search_mcts_parents,
             model_family,
+            atlas_gate,
+            gate_r0,
+            gate_width,
+            redundancy_prune,
+            collinearity_threshold,
+            sensitivity_mode,
+            sens_weight,
+            sens_max_median_error,
+            feature_family,
+            selector_policy,
             policy,
             claim_gate,
             seed_suite,
@@ -612,6 +652,30 @@ fn main() -> anyhow::Result<()> {
             let cli_model_family = parse_model_family(&model_family).ok_or_else(|| {
                 anyhow::anyhow!(
                     "unknown --model-family={model_family} (expected auto|global|atlas)"
+                )
+            })?;
+            let atlas_gate = parse_atlas_gate_mode(&atlas_gate).ok_or_else(|| {
+                anyhow::anyhow!("unknown --atlas-gate={atlas_gate} (expected binary|smooth)")
+            })?;
+            let redundancy_prune =
+                parse_redundancy_prune_mode(&redundancy_prune).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "unknown --redundancy-prune={redundancy_prune} (expected off|warn|strict)"
+                    )
+                })?;
+            let sensitivity_mode = parse_sensitivity_mode(&sensitivity_mode).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown --sensitivity-mode={sensitivity_mode} (expected off|report|gate|objective)"
+                )
+            })?;
+            let feature_families = parse_feature_family_set(&feature_family).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown --feature-family={feature_family} (expected comma list of newtonian,pn1,yukawa,darwin_like,tidal_invariants,jerk_augmented,hamiltonian_invariants,mixed)"
+                )
+            })?;
+            let selector_policy = parse_selector_policy(&selector_policy).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown --selector-policy={selector_policy} (expected numeric_only|llm_assist|llm_math_creative)"
                 )
             })?;
             let claim_gate = parse_claim_gate_profile(&claim_gate).ok_or_else(|| {
@@ -650,6 +714,18 @@ fn main() -> anyhow::Result<()> {
                 model_family: resolved_model_family,
                 sensitivity_eval: matches!(policy, FactoryPolicy::ResearchV2Atlas),
             };
+            let advanced = FactoryAdvancedSettings {
+                atlas_gate,
+                gate_r0,
+                gate_width,
+                redundancy_prune,
+                collinearity_threshold: collinearity_threshold.clamp(0.0, 0.999_999),
+                sensitivity_mode,
+                sens_weight: sens_weight.max(0.0),
+                sens_max_median_error: sens_max_median_error.max(0.0),
+                feature_families,
+                selector_policy,
+            };
             run_factory(
                 out_dir,
                 max_iters,
@@ -677,6 +753,7 @@ fn main() -> anyhow::Result<()> {
                 claim_gate,
                 seed_suite,
                 publish_report,
+                advanced,
             )?;
         }
         Commands::LlmCheck {
@@ -888,6 +965,7 @@ fn run_quickstart(
         ClaimGateProfile::highbar_v2_benchmark_first(),
         SeedSuite::deterministic_v1(),
         true,
+        FactoryAdvancedSettings::default(),
     )?;
 
     // Copy a single novice-friendly artifact to the quickstart root.
@@ -2782,28 +2860,48 @@ fn run_solver_on_components(
     }
 }
 
-fn atlas_map_feature(feature: &str, close: bool) -> Option<&'static str> {
-    match (feature, close) {
-        ("grav_x", true) => Some("grav_close_x"),
-        ("grav_y", true) => Some("grav_close_y"),
-        ("grav_z", true) => Some("grav_close_z"),
-        ("grav_x", false) => Some("grav_far_x"),
-        ("grav_y", false) => Some("grav_far_y"),
-        ("grav_z", false) => Some("grav_far_z"),
-        ("elec_x", true) => Some("elec_close_x"),
-        ("elec_y", true) => Some("elec_close_y"),
-        ("elec_z", true) => Some("elec_close_z"),
-        ("elec_x", false) => Some("elec_far_x"),
-        ("elec_y", false) => Some("elec_far_y"),
-        ("elec_z", false) => Some("elec_far_z"),
-        ("mag_x", true) => Some("mag_close_x"),
-        ("mag_y", true) => Some("mag_close_y"),
-        ("mag_z", true) => Some("mag_close_z"),
-        ("mag_x", false) => Some("mag_far_x"),
-        ("mag_y", false) => Some("mag_far_y"),
-        ("mag_z", false) => Some("mag_far_z"),
-        ("gate_close", true) => Some("gate_close"),
-        ("gate_far", false) => Some("gate_far"),
+fn atlas_map_feature(feature: &str, close: bool, mode: AtlasGateMode) -> Option<&'static str> {
+    match (mode, feature, close) {
+        (AtlasGateMode::Binary, "grav_x", true) => Some("grav_close_x"),
+        (AtlasGateMode::Binary, "grav_y", true) => Some("grav_close_y"),
+        (AtlasGateMode::Binary, "grav_z", true) => Some("grav_close_z"),
+        (AtlasGateMode::Binary, "grav_x", false) => Some("grav_far_x"),
+        (AtlasGateMode::Binary, "grav_y", false) => Some("grav_far_y"),
+        (AtlasGateMode::Binary, "grav_z", false) => Some("grav_far_z"),
+        (AtlasGateMode::Binary, "elec_x", true) => Some("elec_close_x"),
+        (AtlasGateMode::Binary, "elec_y", true) => Some("elec_close_y"),
+        (AtlasGateMode::Binary, "elec_z", true) => Some("elec_close_z"),
+        (AtlasGateMode::Binary, "elec_x", false) => Some("elec_far_x"),
+        (AtlasGateMode::Binary, "elec_y", false) => Some("elec_far_y"),
+        (AtlasGateMode::Binary, "elec_z", false) => Some("elec_far_z"),
+        (AtlasGateMode::Binary, "mag_x", true) => Some("mag_close_x"),
+        (AtlasGateMode::Binary, "mag_y", true) => Some("mag_close_y"),
+        (AtlasGateMode::Binary, "mag_z", true) => Some("mag_close_z"),
+        (AtlasGateMode::Binary, "mag_x", false) => Some("mag_far_x"),
+        (AtlasGateMode::Binary, "mag_y", false) => Some("mag_far_y"),
+        (AtlasGateMode::Binary, "mag_z", false) => Some("mag_far_z"),
+        (AtlasGateMode::Binary, "gate_close", true) => Some("gate_close"),
+        (AtlasGateMode::Binary, "gate_far", false) => Some("gate_far"),
+        (AtlasGateMode::Smooth, "grav_x", true) => Some("grav_sclose_x"),
+        (AtlasGateMode::Smooth, "grav_y", true) => Some("grav_sclose_y"),
+        (AtlasGateMode::Smooth, "grav_z", true) => Some("grav_sclose_z"),
+        (AtlasGateMode::Smooth, "grav_x", false) => Some("grav_sfar_x"),
+        (AtlasGateMode::Smooth, "grav_y", false) => Some("grav_sfar_y"),
+        (AtlasGateMode::Smooth, "grav_z", false) => Some("grav_sfar_z"),
+        (AtlasGateMode::Smooth, "elec_x", true) => Some("elec_sclose_x"),
+        (AtlasGateMode::Smooth, "elec_y", true) => Some("elec_sclose_y"),
+        (AtlasGateMode::Smooth, "elec_z", true) => Some("elec_sclose_z"),
+        (AtlasGateMode::Smooth, "elec_x", false) => Some("elec_sfar_x"),
+        (AtlasGateMode::Smooth, "elec_y", false) => Some("elec_sfar_y"),
+        (AtlasGateMode::Smooth, "elec_z", false) => Some("elec_sfar_z"),
+        (AtlasGateMode::Smooth, "mag_x", true) => Some("mag_sclose_x"),
+        (AtlasGateMode::Smooth, "mag_y", true) => Some("mag_sclose_y"),
+        (AtlasGateMode::Smooth, "mag_z", true) => Some("mag_sclose_z"),
+        (AtlasGateMode::Smooth, "mag_x", false) => Some("mag_sfar_x"),
+        (AtlasGateMode::Smooth, "mag_y", false) => Some("mag_sfar_y"),
+        (AtlasGateMode::Smooth, "mag_z", false) => Some("mag_sfar_z"),
+        (AtlasGateMode::Smooth, "gate_smooth_close", true) => Some("gate_smooth_close"),
+        (AtlasGateMode::Smooth, "gate_smooth_far", false) => Some("gate_smooth_far"),
         _ => None,
     }
 }
@@ -2811,13 +2909,14 @@ fn atlas_map_feature(feature: &str, close: bool) -> Option<&'static str> {
 fn map_equation_to_atlas_gate(
     eq: &threebody_discover::Equation,
     close: bool,
+    mode: AtlasGateMode,
 ) -> threebody_discover::Equation {
     let mut agg: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
     for term in &eq.terms {
         if !term.coeff.is_finite() {
             continue;
         }
-        let Some(mapped) = atlas_map_feature(term.feature.as_str(), close) else {
+        let Some(mapped) = atlas_map_feature(term.feature.as_str(), close, mode) else {
             continue;
         };
         *agg.entry(mapped.to_string()).or_insert(0.0) += term.coeff;
@@ -2865,6 +2964,7 @@ fn build_atlas_candidates(
     topk_far_x: &[threebody_discover::EquationScore],
     topk_far_y: &[threebody_discover::EquationScore],
     topk_far_z: &[threebody_discover::EquationScore],
+    mode: AtlasGateMode,
 ) -> Vec<CandidateSummary> {
     let mut out: Vec<CandidateSummary> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -2882,18 +2982,27 @@ fn build_atlas_candidates(
                 for ix_f in 0..nx_f {
                     for iy_f in 0..ny_f {
                         for iz_f in 0..nz_f {
-                            let eq_x_close =
-                                map_equation_to_atlas_gate(&topk_close_x[ix_c].equation, true);
-                            let eq_y_close =
-                                map_equation_to_atlas_gate(&topk_close_y[iy_c].equation, true);
-                            let eq_z_close =
-                                map_equation_to_atlas_gate(&topk_close_z[iz_c].equation, true);
+                            let eq_x_close = map_equation_to_atlas_gate(
+                                &topk_close_x[ix_c].equation,
+                                true,
+                                mode,
+                            );
+                            let eq_y_close = map_equation_to_atlas_gate(
+                                &topk_close_y[iy_c].equation,
+                                true,
+                                mode,
+                            );
+                            let eq_z_close = map_equation_to_atlas_gate(
+                                &topk_close_z[iz_c].equation,
+                                true,
+                                mode,
+                            );
                             let eq_x_far =
-                                map_equation_to_atlas_gate(&topk_far_x[ix_f].equation, false);
+                                map_equation_to_atlas_gate(&topk_far_x[ix_f].equation, false, mode);
                             let eq_y_far =
-                                map_equation_to_atlas_gate(&topk_far_y[iy_f].equation, false);
+                                map_equation_to_atlas_gate(&topk_far_y[iy_f].equation, false, mode);
                             let eq_z_far =
-                                map_equation_to_atlas_gate(&topk_far_z[iz_f].equation, false);
+                                map_equation_to_atlas_gate(&topk_far_z[iz_f].equation, false, mode);
 
                             let merge_axis =
                                 |a: &threebody_discover::Equation,
@@ -2971,15 +3080,48 @@ fn build_atlas_candidates(
     out
 }
 
+#[derive(Clone, Copy, Debug)]
+struct GateParams {
+    r0: f64,
+    width: f64,
+}
+
+impl Default for GateParams {
+    fn default() -> Self {
+        Self {
+            r0: 0.5,
+            width: 0.08,
+        }
+    }
+}
+
+fn gate_params_cell() -> &'static std::sync::RwLock<GateParams> {
+    static CELL: std::sync::OnceLock<std::sync::RwLock<GateParams>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::RwLock::new(GateParams::default()))
+}
+
+fn set_gate_params(params: GateParams) {
+    if let Ok(mut w) = gate_params_cell().write() {
+        *w = params;
+    }
+}
+
+fn current_gate_params() -> GateParams {
+    gate_params_cell()
+        .read()
+        .map(|g| *g)
+        .unwrap_or_else(|_| GateParams::default())
+}
+
 fn compute_feature_vector(
     system: &System,
     body: usize,
     cfg: &Config,
     feature_names: &[String],
 ) -> Vec<f64> {
-    fn softened_inv_r3_r4(r2: f64, epsilon: f64) -> (f64, f64) {
+    fn softened_inv_r3_r4_r(r2: f64, epsilon: f64) -> (f64, f64, f64) {
         if r2 == 0.0 {
-            return (0.0, 0.0);
+            return (0.0, 0.0, 0.0);
         }
         let soft2 = if epsilon == 0.0 {
             r2
@@ -2988,12 +3130,12 @@ fn compute_feature_vector(
         };
         let r = soft2.sqrt();
         if r == 0.0 || !r.is_finite() {
-            return (0.0, 0.0);
+            return (0.0, 0.0, 0.0);
         }
         let inv_r = 1.0 / r;
         let inv_r3 = inv_r * inv_r * inv_r;
         let inv_r4 = inv_r3 * inv_r;
-        (inv_r3, inv_r4)
+        (inv_r3, inv_r4, r)
     }
 
     let epsilon = cfg.softening;
@@ -3003,6 +3145,12 @@ fn compute_feature_vector(
     let mut elec_r4 = Vec3::zero(); // (q_i/m_i) Σ q_j (r_i - r_j) / |r|^4 (no k_e)
     let mut mag = Vec3::zero(); // (q_i/m_i) (v_i × B_basis) where B_basis=(1/4π)Σ q_j(v_j×(r_i-r_j))/|r|^3 (no μ0)
     let mut mag_r4 = Vec3::zero(); // same, with |r|^4 scaling
+    let mut mean_pair_r = 0.0f64;
+    let mut pair_count = 0usize;
+    let mut local_phi_no_g = 0.0f64;
+    let mut jerk = Vec3::zero();
+    let mut tidal = [[0.0f64; 3]; 3];
+    let vi = system.state.vel[body];
 
     if cfg.enable_gravity {
         for j in 0..3 {
@@ -3010,9 +3158,26 @@ fn compute_feature_vector(
                 continue;
             }
             let r_ji = system.state.pos[j] - system.state.pos[body];
-            let (inv_r3, inv_r4) = softened_inv_r3_r4(r_ji.norm_sq(), epsilon);
-            grav = grav + r_ji * (system.bodies[j].mass * inv_r3);
-            grav_r4 = grav_r4 + r_ji * (system.bodies[j].mass * inv_r4);
+            let (inv_r3, inv_r4, r) = softened_inv_r3_r4_r(r_ji.norm_sq(), epsilon);
+            let mass_j = system.bodies[j].mass;
+            grav = grav + r_ji * (mass_j * inv_r3);
+            grav_r4 = grav_r4 + r_ji * (mass_j * inv_r4);
+            if r > 0.0 {
+                mean_pair_r += r;
+                pair_count += 1;
+                local_phi_no_g += mass_j / r;
+                let inv_r = 1.0 / r;
+                let rh = r_ji * inv_r;
+                let rh_arr = [rh.x, rh.y, rh.z];
+                for a in 0..3 {
+                    for b in 0..3 {
+                        let delta = if a == b { 1.0 } else { 0.0 };
+                        tidal[a][b] += mass_j * (3.0 * rh_arr[a] * rh_arr[b] - delta) * inv_r3;
+                    }
+                }
+            }
+            let dv = system.state.vel[j] - vi;
+            jerk = jerk + dv * (mass_j * inv_r3);
         }
     }
 
@@ -3032,7 +3197,7 @@ fn compute_feature_vector(
                 }
                 // Use (r_i - r_j) to match the electrostatic field direction.
                 let r = system.state.pos[body] - system.state.pos[j];
-                let (inv_r3, inv_r4) = softened_inv_r3_r4(r.norm_sq(), epsilon);
+                let (inv_r3, inv_r4, _rr) = softened_inv_r3_r4_r(r.norm_sq(), epsilon);
                 let qj = system.bodies[j].charge;
                 e_basis = e_basis + r * (qj * inv_r3);
                 e_basis_r4 = e_basis_r4 + r * (qj * inv_r4);
@@ -3052,10 +3217,14 @@ fn compute_feature_vector(
     // Physical-field Lorentz terms (in acceleration units; includes constants).
     let lorentz_e = elec * cfg.constants.k_e;
     let lorentz_vxb = mag * cfg.constants.mu_0;
-
-    const R_GATE: f64 = 0.5;
-    let gate_close = (min_pair_distance(&system.state.pos) < R_GATE) as u8 as f64;
+    let gate_params = current_gate_params();
+    let r_gate = gate_params.r0;
+    let gate_close = (min_pair_distance(&system.state.pos) < r_gate) as u8 as f64;
     let gate_far = 1.0 - gate_close;
+    let smooth_w = gate_params.width.abs().max(1e-6);
+    let z = ((r_gate - min_pair_distance(&system.state.pos)) / smooth_w).clamp(-40.0, 40.0);
+    let gate_smooth_close = 1.0 / (1.0 + (-z).exp());
+    let gate_smooth_far = 1.0 - gate_smooth_close;
 
     let grav_close = grav * gate_close;
     let grav_far = grav * gate_far;
@@ -3063,6 +3232,36 @@ fn compute_feature_vector(
     let elec_far = elec * gate_far;
     let mag_close = mag * gate_close;
     let mag_far = mag * gate_far;
+    let grav_sclose = grav * gate_smooth_close;
+    let grav_sfar = grav * gate_smooth_far;
+    let elec_sclose = elec * gate_smooth_close;
+    let elec_sfar = elec * gate_smooth_far;
+    let mag_sclose = mag * gate_smooth_close;
+    let mag_sfar = mag * gate_smooth_far;
+
+    let c2 = 100.0;
+    let pn1_scale = ((vi.norm_sq() + local_phi_no_g) / c2).max(0.0);
+    let pn1_grav = grav * pn1_scale;
+    let mean_pair_r = if pair_count > 0 {
+        mean_pair_r / pair_count as f64
+    } else {
+        0.0
+    };
+    let yukawa_lambda = 1.0;
+    let yukawa_factor = if mean_pair_r.is_finite() {
+        (-mean_pair_r / yukawa_lambda).exp()
+    } else {
+        0.0
+    };
+    let yukawa_grav = grav * yukawa_factor;
+    let darwin_mag_corr = mag * (vi.norm() / c2.sqrt());
+    let vi_arr = [vi.x, vi.y, vi.z];
+    let tidal_v = Vec3::new(
+        tidal[0][0] * vi_arr[0] + tidal[0][1] * vi_arr[1] + tidal[0][2] * vi_arr[2],
+        tidal[1][0] * vi_arr[0] + tidal[1][1] * vi_arr[1] + tidal[1][2] * vi_arr[2],
+        tidal[2][0] * vi_arr[0] + tidal[2][1] * vi_arr[1] + tidal[2][2] * vi_arr[2],
+    );
+    let hamiltonian_flow = vi.cross(grav);
 
     let mut out = Vec::with_capacity(feature_names.len());
     for name in feature_names {
@@ -3093,24 +3292,62 @@ fn compute_feature_vector(
             "lorentz_vxb_z" => lorentz_vxb.z,
             "gate_close" => gate_close,
             "gate_far" => gate_far,
+            "gate_smooth_close" => gate_smooth_close,
+            "gate_smooth_far" => gate_smooth_far,
             "grav_close_x" => grav_close.x,
             "grav_close_y" => grav_close.y,
             "grav_close_z" => grav_close.z,
             "grav_far_x" => grav_far.x,
             "grav_far_y" => grav_far.y,
             "grav_far_z" => grav_far.z,
+            "grav_sclose_x" => grav_sclose.x,
+            "grav_sclose_y" => grav_sclose.y,
+            "grav_sclose_z" => grav_sclose.z,
+            "grav_sfar_x" => grav_sfar.x,
+            "grav_sfar_y" => grav_sfar.y,
+            "grav_sfar_z" => grav_sfar.z,
             "elec_close_x" => elec_close.x,
             "elec_close_y" => elec_close.y,
             "elec_close_z" => elec_close.z,
             "elec_far_x" => elec_far.x,
             "elec_far_y" => elec_far.y,
             "elec_far_z" => elec_far.z,
+            "elec_sclose_x" => elec_sclose.x,
+            "elec_sclose_y" => elec_sclose.y,
+            "elec_sclose_z" => elec_sclose.z,
+            "elec_sfar_x" => elec_sfar.x,
+            "elec_sfar_y" => elec_sfar.y,
+            "elec_sfar_z" => elec_sfar.z,
             "mag_close_x" => mag_close.x,
             "mag_close_y" => mag_close.y,
             "mag_close_z" => mag_close.z,
             "mag_far_x" => mag_far.x,
             "mag_far_y" => mag_far.y,
             "mag_far_z" => mag_far.z,
+            "mag_sclose_x" => mag_sclose.x,
+            "mag_sclose_y" => mag_sclose.y,
+            "mag_sclose_z" => mag_sclose.z,
+            "mag_sfar_x" => mag_sfar.x,
+            "mag_sfar_y" => mag_sfar.y,
+            "mag_sfar_z" => mag_sfar.z,
+            "pn1_grav_x" => pn1_grav.x,
+            "pn1_grav_y" => pn1_grav.y,
+            "pn1_grav_z" => pn1_grav.z,
+            "yukawa_grav_x" => yukawa_grav.x,
+            "yukawa_grav_y" => yukawa_grav.y,
+            "yukawa_grav_z" => yukawa_grav.z,
+            "darwin_mag_corr_x" => darwin_mag_corr.x,
+            "darwin_mag_corr_y" => darwin_mag_corr.y,
+            "darwin_mag_corr_z" => darwin_mag_corr.z,
+            "tidal_v_x" => tidal_v.x,
+            "tidal_v_y" => tidal_v.y,
+            "tidal_v_z" => tidal_v.z,
+            "jerk_x" => jerk.x,
+            "jerk_y" => jerk.y,
+            "jerk_z" => jerk.z,
+            "hamiltonian_flow_x" => hamiltonian_flow.x,
+            "hamiltonian_flow_y" => hamiltonian_flow.y,
+            "hamiltonian_flow_z" => hamiltonian_flow.z,
             _ => 0.0,
         };
         out.push(v);
@@ -3406,6 +3643,147 @@ fn parse_feature_library_kind(raw: &str) -> Option<FeatureLibraryKind> {
     }
 }
 
+fn family_feature_names(family: FeatureFamily) -> Vec<String> {
+    match family {
+        FeatureFamily::Newtonian => Vec::new(),
+        FeatureFamily::Pn1 => ["pn1_grav_x", "pn1_grav_y", "pn1_grav_z"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        FeatureFamily::Yukawa => ["yukawa_grav_x", "yukawa_grav_y", "yukawa_grav_z"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        FeatureFamily::DarwinLike => [
+            "darwin_mag_corr_x",
+            "darwin_mag_corr_y",
+            "darwin_mag_corr_z",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+        FeatureFamily::TidalInvariants => ["tidal_v_x", "tidal_v_y", "tidal_v_z"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        FeatureFamily::JerkAugmented => ["jerk_x", "jerk_y", "jerk_z"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        FeatureFamily::HamiltonianInvariants => [
+            "hamiltonian_flow_x",
+            "hamiltonian_flow_y",
+            "hamiltonian_flow_z",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+    }
+}
+
+fn smooth_gate_feature_names() -> Vec<String> {
+    let mut out = vec![
+        "gate_smooth_close".to_string(),
+        "gate_smooth_far".to_string(),
+    ];
+    for axis in ["x", "y", "z"] {
+        out.push(format!("grav_sclose_{axis}"));
+        out.push(format!("grav_sfar_{axis}"));
+        out.push(format!("elec_sclose_{axis}"));
+        out.push(format!("elec_sfar_{axis}"));
+        out.push(format!("mag_sclose_{axis}"));
+        out.push(format!("mag_sfar_{axis}"));
+    }
+    out
+}
+
+fn augment_library_features(
+    mut library: FeatureLibrary,
+    families: &FeatureFamilySet,
+    atlas_gate: AtlasGateMode,
+) -> FeatureLibrary {
+    for family in &families.families {
+        library.features.extend(family_feature_names(*family));
+    }
+    if matches!(atlas_gate, AtlasGateMode::Smooth) {
+        library.features.extend(smooth_gate_feature_names());
+    }
+    library.features.sort();
+    library.features.dedup();
+    library
+}
+
+fn feature_library_for_kind(kind: FeatureLibraryKind) -> FeatureLibrary {
+    match kind {
+        FeatureLibraryKind::DefaultPhysics => FeatureLibrary::default_physics(),
+        FeatureLibraryKind::ExtendedPhysics => FeatureLibrary::extended_physics(),
+        FeatureLibraryKind::EmFieldsLorentz => FeatureLibrary::em_fields_lorentz(),
+    }
+}
+
+fn feature_belongs_to_family(name: &str, family: FeatureFamily) -> bool {
+    match family {
+        FeatureFamily::Newtonian => {
+            name.starts_with("grav_")
+                || name.starts_with("elec_")
+                || name.starts_with("mag_")
+                || name.starts_with("lorentz_")
+                || name.starts_with("gate_")
+        }
+        FeatureFamily::Pn1 => name.starts_with("pn1_"),
+        FeatureFamily::Yukawa => name.starts_with("yukawa_"),
+        FeatureFamily::DarwinLike => name.starts_with("darwin_"),
+        FeatureFamily::TidalInvariants => name.starts_with("tidal_"),
+        FeatureFamily::JerkAugmented => name.starts_with("jerk_"),
+        FeatureFamily::HamiltonianInvariants => name.starts_with("hamiltonian_"),
+    }
+}
+
+fn compute_model_identifiability(
+    feature_names: &[String],
+    samples: &[Vec<f64>],
+    families: &FeatureFamilySet,
+) -> serde_json::Value {
+    let mut rows = Vec::new();
+    for family in &families.families {
+        let indices: Vec<usize> = feature_names
+            .iter()
+            .enumerate()
+            .filter_map(|(i, n)| feature_belongs_to_family(n, *family).then_some(i))
+            .collect();
+        let mut vals = Vec::new();
+        for row in samples {
+            for idx in &indices {
+                if let Some(v) = row.get(*idx) {
+                    vals.push(v.abs());
+                }
+            }
+        }
+        let mean_abs = if vals.is_empty() {
+            None
+        } else {
+            Some(vals.iter().sum::<f64>() / vals.len() as f64)
+        };
+        let p95_abs = if vals.is_empty() {
+            None
+        } else {
+            vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let idx = ((vals.len() - 1) as f64 * 0.95).round() as usize;
+            vals.get(idx).copied()
+        };
+        rows.push(serde_json::json!({
+            "family": family.as_str(),
+            "n_features": indices.len(),
+            "mean_abs_feature_value": mean_abs,
+            "p95_abs_feature_value": p95_abs
+        }));
+    }
+    serde_json::json!({
+        "version": "v1",
+        "families": rows,
+    })
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DiscoverySolver {
     Ga,
@@ -3507,6 +3885,233 @@ fn parse_model_family(raw: &str) -> Option<ModelFamilyChoice> {
         "global" => Some(ModelFamilyChoice::Global),
         "atlas" | "local" | "piecewise" => Some(ModelFamilyChoice::Atlas),
         _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+enum AtlasGateMode {
+    Binary,
+    Smooth,
+}
+
+impl AtlasGateMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            AtlasGateMode::Binary => "binary",
+            AtlasGateMode::Smooth => "smooth",
+        }
+    }
+}
+
+fn parse_atlas_gate_mode(raw: &str) -> Option<AtlasGateMode> {
+    match raw.trim().to_lowercase().as_str() {
+        "binary" | "hard" => Some(AtlasGateMode::Binary),
+        "smooth" | "sigmoid" => Some(AtlasGateMode::Smooth),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+enum RedundancyPruneMode {
+    Off,
+    Warn,
+    Strict,
+}
+
+impl RedundancyPruneMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            RedundancyPruneMode::Off => "off",
+            RedundancyPruneMode::Warn => "warn",
+            RedundancyPruneMode::Strict => "strict",
+        }
+    }
+}
+
+fn parse_redundancy_prune_mode(raw: &str) -> Option<RedundancyPruneMode> {
+    match raw.trim().to_lowercase().as_str() {
+        "off" => Some(RedundancyPruneMode::Off),
+        "warn" | "warning" => Some(RedundancyPruneMode::Warn),
+        "strict" | "drop" => Some(RedundancyPruneMode::Strict),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+enum SensitivityMode {
+    Off,
+    Report,
+    Gate,
+    Objective,
+}
+
+impl SensitivityMode {
+    fn as_str(self) -> &'static str {
+        match self {
+            SensitivityMode::Off => "off",
+            SensitivityMode::Report => "report",
+            SensitivityMode::Gate => "gate",
+            SensitivityMode::Objective => "objective",
+        }
+    }
+}
+
+fn parse_sensitivity_mode(raw: &str) -> Option<SensitivityMode> {
+    match raw.trim().to_lowercase().as_str() {
+        "off" => Some(SensitivityMode::Off),
+        "report" => Some(SensitivityMode::Report),
+        "gate" => Some(SensitivityMode::Gate),
+        "objective" | "weighted" => Some(SensitivityMode::Objective),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+enum SelectorPolicy {
+    NumericOnly,
+    LlmAssist,
+    LlmMathCreative,
+}
+
+impl SelectorPolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            SelectorPolicy::NumericOnly => "numeric_only",
+            SelectorPolicy::LlmAssist => "llm_assist",
+            SelectorPolicy::LlmMathCreative => "llm_math_creative",
+        }
+    }
+}
+
+fn parse_selector_policy(raw: &str) -> Option<SelectorPolicy> {
+    match raw.trim().to_lowercase().as_str() {
+        "numeric_only" | "numeric-only" | "numeric" => Some(SelectorPolicy::NumericOnly),
+        "llm_assist" | "llm-assist" | "assist" => Some(SelectorPolicy::LlmAssist),
+        "llm_math_creative" | "llm-math-creative" | "creative" | "math_creative" => {
+            Some(SelectorPolicy::LlmMathCreative)
+        }
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+enum FeatureFamily {
+    Newtonian,
+    Pn1,
+    Yukawa,
+    DarwinLike,
+    TidalInvariants,
+    JerkAugmented,
+    HamiltonianInvariants,
+}
+
+impl FeatureFamily {
+    fn as_str(self) -> &'static str {
+        match self {
+            FeatureFamily::Newtonian => "newtonian",
+            FeatureFamily::Pn1 => "pn1",
+            FeatureFamily::Yukawa => "yukawa",
+            FeatureFamily::DarwinLike => "darwin_like",
+            FeatureFamily::TidalInvariants => "tidal_invariants",
+            FeatureFamily::JerkAugmented => "jerk_augmented",
+            FeatureFamily::HamiltonianInvariants => "hamiltonian_invariants",
+        }
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct FeatureFamilySet {
+    families: Vec<FeatureFamily>,
+}
+
+impl FeatureFamilySet {
+    fn labels(&self) -> Vec<&'static str> {
+        self.families
+            .iter()
+            .copied()
+            .map(FeatureFamily::as_str)
+            .collect()
+    }
+}
+
+fn parse_feature_family_set(raw: &str) -> Option<FeatureFamilySet> {
+    let mut selected: std::collections::BTreeSet<FeatureFamily> = std::collections::BTreeSet::new();
+    for token in raw.split(',').map(|t| t.trim().to_lowercase()) {
+        if token.is_empty() {
+            continue;
+        }
+        if token == "mixed" {
+            for f in [
+                FeatureFamily::Newtonian,
+                FeatureFamily::Pn1,
+                FeatureFamily::Yukawa,
+                FeatureFamily::TidalInvariants,
+                FeatureFamily::JerkAugmented,
+                FeatureFamily::HamiltonianInvariants,
+            ] {
+                selected.insert(f);
+            }
+            continue;
+        }
+        let family = match token.as_str() {
+            "newtonian" => FeatureFamily::Newtonian,
+            "pn1" => FeatureFamily::Pn1,
+            "yukawa" => FeatureFamily::Yukawa,
+            "darwin_like" | "darwin-like" | "darwin" => FeatureFamily::DarwinLike,
+            "tidal_invariants" | "tidal-invariants" | "tidal" => FeatureFamily::TidalInvariants,
+            "jerk_augmented" | "jerk-augmented" | "jerk" => FeatureFamily::JerkAugmented,
+            "hamiltonian_invariants" | "hamiltonian-invariants" | "hamiltonian" => {
+                FeatureFamily::HamiltonianInvariants
+            }
+            _ => return None,
+        };
+        selected.insert(family);
+    }
+    if selected.is_empty() {
+        selected.insert(FeatureFamily::Newtonian);
+    }
+    Some(FeatureFamilySet {
+        families: selected.into_iter().collect(),
+    })
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct FactoryAdvancedSettings {
+    atlas_gate: AtlasGateMode,
+    gate_r0: f64,
+    gate_width: f64,
+    redundancy_prune: RedundancyPruneMode,
+    collinearity_threshold: f64,
+    sensitivity_mode: SensitivityMode,
+    sens_weight: f64,
+    sens_max_median_error: f64,
+    feature_families: FeatureFamilySet,
+    selector_policy: SelectorPolicy,
+}
+
+impl Default for FactoryAdvancedSettings {
+    fn default() -> Self {
+        Self {
+            atlas_gate: AtlasGateMode::Smooth,
+            gate_r0: 0.5,
+            gate_width: 0.08,
+            redundancy_prune: RedundancyPruneMode::Warn,
+            collinearity_threshold: 0.995,
+            sensitivity_mode: SensitivityMode::Objective,
+            sens_weight: 0.05,
+            sens_max_median_error: 0.35,
+            feature_families: FeatureFamilySet {
+                families: vec![
+                    FeatureFamily::Newtonian,
+                    FeatureFamily::Pn1,
+                    FeatureFamily::Yukawa,
+                    FeatureFamily::TidalInvariants,
+                    FeatureFamily::JerkAugmented,
+                    FeatureFamily::HamiltonianInvariants,
+                ],
+            },
+            selector_policy: SelectorPolicy::LlmMathCreative,
+        }
     }
 }
 
@@ -3708,6 +4313,63 @@ fn build_solver_meta(
     }
 }
 
+fn generate_elegant_equation_templates(
+    feature_names: &[String],
+    regime: &str,
+) -> Vec<(String, String)> {
+    let has = |name: &str| feature_names.iter().any(|f| f == name);
+    let mut out = Vec::new();
+
+    if has("grav_x") && has("grav_y") && has("grav_z") {
+        out.push((
+            "ax=+1.000000*grav_x ; ay=+1.000000*grav_y ; az=+1.000000*grav_z".to_string(),
+            "template=newtonian_core".to_string(),
+        ));
+    }
+    if has("pn1_grav_x") && has("pn1_grav_y") && has("pn1_grav_z") {
+        out.push((
+            "ax=+1.000000*grav_x +0.030000*pn1_grav_x ; ay=+1.000000*grav_y +0.030000*pn1_grav_y ; az=+1.000000*grav_z +0.030000*pn1_grav_z".to_string(),
+            "template=pn1_perturbation".to_string(),
+        ));
+    }
+    if has("yukawa_grav_x") && has("yukawa_grav_y") && has("yukawa_grav_z") {
+        out.push((
+            "ax=+0.950000*grav_x +0.080000*yukawa_grav_x ; ay=+0.950000*grav_y +0.080000*yukawa_grav_y ; az=+0.950000*grav_z +0.080000*yukawa_grav_z".to_string(),
+            "template=yukawa_screened".to_string(),
+        ));
+    }
+    if has("tidal_v_x") && has("tidal_v_y") && has("tidal_v_z") {
+        out.push((
+            "ax=+1.000000*grav_x +0.020000*tidal_v_x ; ay=+1.000000*grav_y +0.020000*tidal_v_y ; az=+1.000000*grav_z +0.020000*tidal_v_z".to_string(),
+            "template=tidal_linearized".to_string(),
+        ));
+    }
+    if has("jerk_x") && has("jerk_y") && has("jerk_z") {
+        out.push((
+            "ax=+1.000000*grav_x +0.010000*jerk_x ; ay=+1.000000*grav_y +0.010000*jerk_y ; az=+1.000000*grav_z +0.010000*jerk_z".to_string(),
+            "template=jerk_augmented".to_string(),
+        ));
+    }
+    if has("hamiltonian_flow_x") && has("hamiltonian_flow_y") && has("hamiltonian_flow_z") {
+        out.push((
+            "ax=+1.000000*grav_x +0.010000*hamiltonian_flow_x ; ay=+1.000000*grav_y +0.010000*hamiltonian_flow_y ; az=+1.000000*grav_z +0.010000*hamiltonian_flow_z".to_string(),
+            "template=hamiltonian_flow".to_string(),
+        ));
+    }
+    if regime != "gravity_only"
+        && has("darwin_mag_corr_x")
+        && has("darwin_mag_corr_y")
+        && has("darwin_mag_corr_z")
+    {
+        out.push((
+            "ax=+1.000000*grav_x +0.050000*darwin_mag_corr_x ; ay=+1.000000*grav_y +0.050000*darwin_mag_corr_y ; az=+1.000000*grav_z +0.050000*darwin_mag_corr_z".to_string(),
+            "template=darwin_like_correction".to_string(),
+        ));
+    }
+
+    out
+}
+
 fn parse_discovery_solver(name: &str) -> anyhow::Result<DiscoverySolver> {
     match name {
         "ga" => Ok(DiscoverySolver::Ga),
@@ -3870,12 +4532,25 @@ fn run_factory(
     claim_gate: ClaimGateProfile,
     seed_suite: SeedSuite,
     publish_report: bool,
+    advanced: FactoryAdvancedSettings,
 ) -> anyhow::Result<()> {
     fs::create_dir_all(&out_dir)?;
     let equation_search = policy.equation_search;
     let policy_effective = serde_json::json!({
         "version": "v2",
         "policy": policy.as_effective_json(),
+        "advanced": {
+            "atlas_gate": advanced.atlas_gate.as_str(),
+            "gate_r0": advanced.gate_r0,
+            "gate_width": advanced.gate_width,
+            "redundancy_prune": advanced.redundancy_prune.as_str(),
+            "collinearity_threshold": advanced.collinearity_threshold,
+            "sensitivity_mode": advanced.sensitivity_mode.as_str(),
+            "sens_weight": advanced.sens_weight,
+            "sens_max_median_error": advanced.sens_max_median_error,
+            "feature_families": advanced.feature_families.labels(),
+            "selector_policy": advanced.selector_policy.as_str(),
+        },
         "claim_gate": claim_gate,
         "seed_suite": {
             "name": seed_suite.as_str(),
@@ -3888,6 +4563,10 @@ fn run_factory(
         out_dir.join("policy_effective.json"),
         serde_json::to_string_pretty(&policy_effective)?,
     )?;
+    set_gate_params(GateParams {
+        r0: advanced.gate_r0,
+        width: advanced.gate_width,
+    });
     let mut next_ic: Option<InitialConditionSpec> = None;
     let mut next_manual_equation_text: Option<String> = None;
     let llm_mode = parse_llm_mode(&llm_mode)?;
@@ -3966,11 +4645,12 @@ fn run_factory(
             "gravity_only"
         };
         let ic_bounds = default_ic_bounds();
-        let pre_ic_feature_names = match current_library {
-            FeatureLibraryKind::DefaultPhysics => FeatureLibrary::default_physics().features,
-            FeatureLibraryKind::ExtendedPhysics => FeatureLibrary::extended_physics().features,
-            FeatureLibraryKind::EmFieldsLorentz => FeatureLibrary::em_fields_lorentz().features,
-        };
+        let pre_ic_feature_names = augment_library_features(
+            feature_library_for_kind(current_library),
+            &advanced.feature_families,
+            advanced.atlas_gate,
+        )
+        .features;
         let active_ic_models = if policy.active_ic_disagreement {
             collect_active_ic_models(
                 &pre_ic_feature_names,
@@ -4304,12 +4984,21 @@ fn run_factory(
         let mut sidecar_file = fs::File::create(&sidecar_path)?;
         write_sidecar(&mut sidecar_file, &sidecar)?;
 
-        let library = match current_library {
-            FeatureLibraryKind::DefaultPhysics => FeatureLibrary::default_physics(),
-            FeatureLibraryKind::ExtendedPhysics => FeatureLibrary::extended_physics(),
-            FeatureLibraryKind::EmFieldsLorentz => FeatureLibrary::em_fields_lorentz(),
-        };
+        let library = augment_library_features(
+            feature_library_for_kind(current_library),
+            &advanced.feature_families,
+            advanced.atlas_gate,
+        );
         let vector_data = build_vector_dataset(&result, &cfg, &library.features, None);
+        let model_identifiability = compute_model_identifiability(
+            &vector_data.feature_names,
+            &vector_data.samples,
+            &advanced.feature_families,
+        );
+        fs::write(
+            run_dir.join("model_identifiability.json"),
+            serde_json::to_string_pretty(&model_identifiability)?,
+        )?;
         let [dataset_x, dataset_y, dataset_z] = component_datasets(&vector_data);
         let disc_cfg = DiscoveryConfig {
             runs,
@@ -4351,14 +5040,43 @@ fn run_factory(
             regime,
             current_rollout,
         );
+        let mut selector_trace: Vec<String> = Vec::new();
+        if matches!(advanced.selector_policy, SelectorPolicy::LlmMathCreative) {
+            for (eq_text, template_tag) in
+                generate_elegant_equation_templates(&vector_data.feature_names, regime)
+            {
+                append_manual_vector_candidate_from_equation_text(
+                    &mut vector_candidates,
+                    &eq_text,
+                    &dataset_x,
+                    &dataset_y,
+                    &dataset_z,
+                    &vector_data.feature_names,
+                    &result,
+                    &cfg,
+                    regime,
+                    current_rollout,
+                    vec![
+                        "source=selector_template".to_string(),
+                        template_tag.clone(),
+                        "selector_policy=llm_math_creative".to_string(),
+                    ],
+                );
+                selector_trace.push(format!("template_accept:{template_tag}"));
+            }
+        }
         let mut atlas_candidate_count = 0usize;
         if matches!(policy.model_family, ModelFamily::Atlas) {
-            let close_x = filter_dataset_by_gate(&dataset_x, "gate_close");
-            let close_y = filter_dataset_by_gate(&dataset_y, "gate_close");
-            let close_z = filter_dataset_by_gate(&dataset_z, "gate_close");
-            let far_x = filter_dataset_by_gate(&dataset_x, "gate_far");
-            let far_y = filter_dataset_by_gate(&dataset_y, "gate_far");
-            let far_z = filter_dataset_by_gate(&dataset_z, "gate_far");
+            let (close_gate_feature, far_gate_feature) = match advanced.atlas_gate {
+                AtlasGateMode::Binary => ("gate_close", "gate_far"),
+                AtlasGateMode::Smooth => ("gate_smooth_close", "gate_smooth_far"),
+            };
+            let close_x = filter_dataset_by_gate(&dataset_x, close_gate_feature);
+            let close_y = filter_dataset_by_gate(&dataset_y, close_gate_feature);
+            let close_z = filter_dataset_by_gate(&dataset_z, close_gate_feature);
+            let far_x = filter_dataset_by_gate(&dataset_x, far_gate_feature);
+            let far_y = filter_dataset_by_gate(&dataset_y, far_gate_feature);
+            let far_z = filter_dataset_by_gate(&dataset_z, far_gate_feature);
             if let (
                 Some(dataset_close_x),
                 Some(dataset_close_y),
@@ -4405,6 +5123,7 @@ fn run_factory(
                     &topk_far_x.entries,
                     &topk_far_y.entries,
                     &topk_far_z.entries,
+                    advanced.atlas_gate,
                 );
                 atlas_candidate_count = atlas.len();
                 vector_candidates.append(&mut atlas);
@@ -4432,6 +5151,7 @@ fn run_factory(
                     "kind=carried_next_manual_equation_text".to_string(),
                 ],
             );
+            selector_trace.push("carry_manual_equation=accepted".to_string());
         }
 
         // Equation-GA (lightweight): treat equations themselves as a population across iterations.
@@ -4483,8 +5203,12 @@ fn run_factory(
             });
             if parents.is_empty() {
                 if let Some(best_seed) = vector_candidates.iter().min_by(|a, b| {
-                    metrics_sort_key(&a.metrics)
-                        .partial_cmp(&metrics_sort_key(&b.metrics))
+                    candidate_sort_key(a, advanced.sensitivity_mode, advanced.sens_weight)
+                        .partial_cmp(&candidate_sort_key(
+                            b,
+                            advanced.sensitivity_mode,
+                            advanced.sens_weight,
+                        ))
                         .unwrap_or(std::cmp::Ordering::Equal)
                 }) {
                     parents.push((
@@ -4559,6 +5283,122 @@ fn run_factory(
                 parent_used += 1;
             }
         }
+
+        let original_candidates = vector_candidates.clone();
+        let mut quality_audit: Vec<CandidateQualityAudit> = Vec::new();
+        let mut filtered_candidates: Vec<CandidateSummary> = Vec::new();
+        for mut candidate in vector_candidates.into_iter() {
+            let mut drop_reasons: Vec<String> = Vec::new();
+            let mut redundancy_flags = Vec::new();
+            let mut max_abs_corr = None;
+            let mut sensitivity_med = None;
+
+            if let Some(model) = vector_model_from_equation_text(&candidate.equation_text) {
+                redundancy_flags = redundancy_flags_for_model(&model);
+                max_abs_corr = max_abs_feature_corr_for_model(
+                    &model,
+                    &vector_data.feature_names,
+                    &vector_data.samples,
+                );
+                if !redundancy_flags.is_empty() {
+                    candidate
+                        .notes
+                        .push(format!("redundancy_flags={}", redundancy_flags.join(" | ")));
+                }
+                if let Some(corr) = max_abs_corr {
+                    candidate
+                        .notes
+                        .push(format!("max_abs_feature_corr={corr:.6}"));
+                }
+                if !matches!(advanced.sensitivity_mode, SensitivityMode::Off) {
+                    let sens = sensitivity_eval(
+                        &model,
+                        &vector_data.feature_names,
+                        &result,
+                        &cfg,
+                        current_rollout,
+                        1e-6,
+                        1e-6,
+                    );
+                    sensitivity_med = sens.relative_error_median;
+                    if let Some(v) = sensitivity_med {
+                        candidate
+                            .notes
+                            .push(format!("sensitivity_median_rel_err={v:.6}"));
+                    }
+                    if let Some(v) = sens.ftle_observed {
+                        candidate.notes.push(format!("sensitivity_ftle_obs={v:.6}"));
+                    }
+                }
+            }
+
+            if matches!(advanced.redundancy_prune, RedundancyPruneMode::Strict)
+                && !redundancy_flags.is_empty()
+            {
+                drop_reasons.push("strict_redundancy".to_string());
+            }
+            if matches!(advanced.redundancy_prune, RedundancyPruneMode::Strict)
+                && max_abs_corr
+                    .map(|v| v >= advanced.collinearity_threshold)
+                    .unwrap_or(false)
+            {
+                drop_reasons.push("strict_collinearity".to_string());
+            }
+            if matches!(advanced.sensitivity_mode, SensitivityMode::Gate)
+                && sensitivity_med
+                    .map(|v| v > advanced.sens_max_median_error)
+                    .unwrap_or(false)
+            {
+                drop_reasons.push("sensitivity_gate".to_string());
+            }
+
+            let dropped = !drop_reasons.is_empty();
+            quality_audit.push(CandidateQualityAudit {
+                candidate_id: candidate.id,
+                equation_text: candidate.equation_text.clone(),
+                redundancy_flags: redundancy_flags.clone(),
+                max_abs_feature_corr: max_abs_corr,
+                sensitivity_median_relative_error: sensitivity_med,
+                dropped,
+                drop_reasons: drop_reasons.clone(),
+            });
+            if dropped {
+                selector_trace.push(format!(
+                    "candidate_drop:id={} reasons={}",
+                    candidate.id,
+                    drop_reasons.join(",")
+                ));
+                continue;
+            }
+            filtered_candidates.push(candidate);
+        }
+        if filtered_candidates.is_empty() {
+            selector_trace
+                .push("all_candidates_dropped_by_filters=fallback_to_unfiltered".to_string());
+            filtered_candidates = original_candidates;
+        }
+        vector_candidates = filtered_candidates;
+        vector_candidates.sort_by(|a, b| {
+            candidate_sort_key(a, advanced.sensitivity_mode, advanced.sens_weight)
+                .partial_cmp(&candidate_sort_key(
+                    b,
+                    advanced.sensitivity_mode,
+                    advanced.sens_weight,
+                ))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (id, c) in vector_candidates.iter_mut().enumerate() {
+            c.id = id;
+        }
+        fs::write(
+            run_dir.join("redundancy_audit.json"),
+            serde_json::to_string_pretty(&quality_audit)?,
+        )?;
+        fs::write(
+            run_dir.join("sensitivity_candidate_audit.json"),
+            serde_json::to_string_pretty(&quality_audit)?,
+        )?;
+
         let mut trace_written = false;
 
         let sim_summary = build_sim_summary(&result, &cfg, current_rollout, Some(steps), Some(dt));
@@ -4641,6 +5481,21 @@ fn run_factory(
         judge_input
             .notes
             .push(format!("sensitivity_eval={}", policy.sensitivity_eval));
+        judge_input.notes.push(format!(
+            "selector_policy={}",
+            advanced.selector_policy.as_str()
+        ));
+        judge_input
+            .notes
+            .push(format!("atlas_gate={}", advanced.atlas_gate.as_str()));
+        judge_input.notes.push(format!(
+            "sensitivity_mode={}",
+            advanced.sensitivity_mode.as_str()
+        ));
+        judge_input.notes.push(format!(
+            "feature_families={}",
+            advanced.feature_families.labels().join(",")
+        ));
         judge_input
             .notes
             .push(format!("claim_gate={}", claim_gate.as_str()));
@@ -4676,7 +5531,10 @@ fn run_factory(
         )?;
         let mut judge_prompt = None;
         let mut judge_response = None;
-        let judge = if let Some(client) = llm_client.as_ref() {
+        let judge = if matches!(advanced.selector_policy, SelectorPolicy::NumericOnly) {
+            selector_trace.push("llm_judge=skipped_numeric_only".to_string());
+            None
+        } else if let Some(client) = llm_client.as_ref() {
             match client.judge_candidates(&judge_input) {
                 Ok(result) => {
                     judge_prompt = Some(result.prompt);
@@ -4722,24 +5580,44 @@ fn run_factory(
         // This lets the LLM "write math" while numeric scoring still decides whether it helps.
         if let Some(j) = judge.as_ref() {
             if let Some(eq_text) = j.recommendations.next_manual_equation_text.as_deref() {
-                append_manual_vector_candidate_from_equation_text(
-                    &mut vector_candidates,
-                    eq_text,
-                    &dataset_x,
-                    &dataset_y,
-                    &dataset_z,
-                    &vector_data.feature_names,
-                    &result,
-                    &cfg,
-                    regime,
-                    current_rollout,
-                    vec![
-                        "source=llm".to_string(),
-                        "kind=judge_next_manual_equation_text_same_iter".to_string(),
-                    ],
-                );
+                if !matches!(advanced.selector_policy, SelectorPolicy::NumericOnly) {
+                    append_manual_vector_candidate_from_equation_text(
+                        &mut vector_candidates,
+                        eq_text,
+                        &dataset_x,
+                        &dataset_y,
+                        &dataset_z,
+                        &vector_data.feature_names,
+                        &result,
+                        &cfg,
+                        regime,
+                        current_rollout,
+                        vec![
+                            "source=llm".to_string(),
+                            "kind=judge_next_manual_equation_text_same_iter".to_string(),
+                        ],
+                    );
+                    selector_trace.push("judge_manual_equation=accepted".to_string());
+                }
             }
         }
+
+        vector_candidates.sort_by(|a, b| {
+            candidate_sort_key(a, advanced.sensitivity_mode, advanced.sens_weight)
+                .partial_cmp(&candidate_sort_key(
+                    b,
+                    advanced.sensitivity_mode,
+                    advanced.sens_weight,
+                ))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (id, c) in vector_candidates.iter_mut().enumerate() {
+            c.id = id;
+        }
+        fs::write(
+            run_dir.join("selector_trace.json"),
+            serde_json::to_string_pretty(&selector_trace)?,
+        )?;
 
         update_equation_search_archive(
             &mut equation_search_archive,
@@ -4757,8 +5635,12 @@ fn run_factory(
 
         // Write a rollout trace for the best (numerically) candidate after all candidate injection.
         if let Some(best) = vector_candidates.iter().min_by(|a, b| {
-            metrics_sort_key(&a.metrics)
-                .partial_cmp(&metrics_sort_key(&b.metrics))
+            candidate_sort_key(a, advanced.sensitivity_mode, advanced.sens_weight)
+                .partial_cmp(&candidate_sort_key(
+                    b,
+                    advanced.sensitivity_mode,
+                    advanced.sens_weight,
+                ))
                 .unwrap_or(std::cmp::Ordering::Equal)
         }) {
             if let Some(best_model) = vector_model_from_equation_text(&best.equation_text) {
@@ -4785,8 +5667,12 @@ fn run_factory(
         );
         let mut grid_topk = vector_candidates.clone();
         grid_topk.sort_by(|a, b| {
-            metrics_sort_key(&a.metrics)
-                .partial_cmp(&metrics_sort_key(&b.metrics))
+            candidate_sort_key(a, advanced.sensitivity_mode, advanced.sens_weight)
+                .partial_cmp(&candidate_sort_key(
+                    b,
+                    advanced.sensitivity_mode,
+                    advanced.sens_weight,
+                ))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         if grid_topk.len() > 3 {
@@ -4901,8 +5787,12 @@ fn run_factory(
             format_opt_f64(sim_summary.mean_abs_accel_ratio_em_over_grav)
         ));
         if let Some(best_vec) = vector_candidates.iter().min_by(|a, b| {
-            metrics_sort_key(&a.metrics)
-                .partial_cmp(&metrics_sort_key(&b.metrics))
+            candidate_sort_key(a, advanced.sensitivity_mode, advanced.sens_weight)
+                .partial_cmp(&candidate_sort_key(
+                    b,
+                    advanced.sensitivity_mode,
+                    advanced.sens_weight,
+                ))
                 .unwrap_or(std::cmp::Ordering::Equal)
         }) {
             md.push_str(&format!(
@@ -4987,15 +5877,19 @@ fn run_factory(
         };
         let mut candidates_sorted = vector_candidates.clone();
         candidates_sorted.sort_by(|a, b| {
-            metrics_sort_key(&a.metrics)
-                .partial_cmp(&metrics_sort_key(&b.metrics))
+            candidate_sort_key(a, advanced.sensitivity_mode, advanced.sens_weight)
+                .partial_cmp(&candidate_sort_key(
+                    b,
+                    advanced.sensitivity_mode,
+                    advanced.sens_weight,
+                ))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Update equation-GA state for the next iteration: keep a small elite set and a parent.
         // We deduplicate by a normalized equation string so repeated identical models don't crowd out diversity.
         {
-            let mut elite_map: std::collections::HashMap<String, CandidateMetrics> =
+            let mut elite_map: std::collections::HashMap<String, CandidateSummary> =
                 std::collections::HashMap::new();
             for c in &vector_candidates {
                 let Some(norm) = normalize_equation_text_for_features(
@@ -5004,24 +5898,39 @@ fn run_factory(
                 ) else {
                     continue;
                 };
-                let m = c.metrics.clone();
-                let key_new = metrics_sort_key(&m);
+                let key_new =
+                    candidate_sort_key(c, advanced.sensitivity_mode, advanced.sens_weight);
                 let replace = match elite_map.get(&norm) {
-                    Some(existing) => key_new < metrics_sort_key(existing),
+                    Some(existing) => {
+                        key_new
+                            < candidate_sort_key(
+                                existing,
+                                advanced.sensitivity_mode,
+                                advanced.sens_weight,
+                            )
+                    }
                     None => true,
                 };
                 if replace {
-                    elite_map.insert(norm, m);
+                    elite_map.insert(norm, c.clone());
                 }
             }
-            let mut elites: Vec<(String, CandidateMetrics)> = elite_map.into_iter().collect();
+            let mut elites: Vec<(String, CandidateSummary)> = elite_map.into_iter().collect();
             elites.sort_by(|a, b| {
-                metrics_sort_key(&a.1)
-                    .partial_cmp(&metrics_sort_key(&b.1))
+                candidate_sort_key(&a.1, advanced.sensitivity_mode, advanced.sens_weight)
+                    .partial_cmp(&candidate_sort_key(
+                        &b.1,
+                        advanced.sensitivity_mode,
+                        advanced.sens_weight,
+                    ))
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
             equation_ga_parent = elites.first().map(|(eq, _)| eq.clone());
-            previous_iteration_elites = elites.into_iter().take(3).collect();
+            previous_iteration_elites = elites
+                .into_iter()
+                .take(3)
+                .map(|(eq, cand)| (eq, cand.metrics))
+                .collect();
         }
 
         let top_candidates: Vec<FactoryEvaluationCandidate> = candidates_sorted
@@ -5117,6 +6026,34 @@ fn run_factory(
     eval_notes.push(format!("factory_policy={}", policy.kind.as_str()));
     eval_notes.push(format!("model_family={}", policy.model_family.as_str()));
     eval_notes.push(format!("sensitivity_eval={}", policy.sensitivity_eval));
+    eval_notes.push(format!("atlas_gate={}", advanced.atlas_gate.as_str()));
+    eval_notes.push(format!("gate_r0={}", advanced.gate_r0));
+    eval_notes.push(format!("gate_width={}", advanced.gate_width));
+    eval_notes.push(format!(
+        "redundancy_prune={}",
+        advanced.redundancy_prune.as_str()
+    ));
+    eval_notes.push(format!(
+        "collinearity_threshold={}",
+        advanced.collinearity_threshold
+    ));
+    eval_notes.push(format!(
+        "sensitivity_mode={}",
+        advanced.sensitivity_mode.as_str()
+    ));
+    eval_notes.push(format!("sens_weight={}", advanced.sens_weight));
+    eval_notes.push(format!(
+        "sens_max_median_error={}",
+        advanced.sens_max_median_error
+    ));
+    eval_notes.push(format!(
+        "feature_families={}",
+        advanced.feature_families.labels().join(",")
+    ));
+    eval_notes.push(format!(
+        "selector_policy={}",
+        advanced.selector_policy.as_str()
+    ));
     eval_notes.push(format!("claim_gate={}", claim_gate.as_str()));
     eval_notes.push(format!("seed_suite={}", seed_suite.as_str()));
     eval_notes.push(format!("publish_report={}", publish_report));
@@ -6439,6 +7376,204 @@ struct BestFactoryCandidate {
     run_id: String,
     regime: String,
     candidate: FactoryEvaluationCandidate,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+struct CandidateQualityAudit {
+    candidate_id: usize,
+    equation_text: String,
+    redundancy_flags: Vec<String>,
+    max_abs_feature_corr: Option<f64>,
+    sensitivity_median_relative_error: Option<f64>,
+    dropped: bool,
+    drop_reasons: Vec<String>,
+}
+
+fn candidate_note_f64(notes: &[String], key: &str) -> Option<f64> {
+    let prefix = format!("{key}=");
+    notes.iter().find_map(|n| {
+        n.strip_prefix(&prefix)
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite())
+    })
+}
+
+fn candidate_sort_key(
+    candidate: &CandidateSummary,
+    mode: SensitivityMode,
+    sens_weight: f64,
+) -> (f64, f64, usize) {
+    let base_rollout = candidate.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
+    let rollout = if base_rollout.is_finite() {
+        base_rollout
+    } else {
+        f64::INFINITY
+    };
+    let sens = candidate_note_f64(&candidate.notes, "sensitivity_median_rel_err");
+    let weighted_rollout = match mode {
+        SensitivityMode::Objective => rollout + sens_weight * sens.unwrap_or(1.0),
+        _ => rollout,
+    };
+    let mse = if candidate.metrics.mse.is_finite() {
+        candidate.metrics.mse
+    } else {
+        f64::INFINITY
+    };
+    (weighted_rollout, mse, candidate.metrics.complexity)
+}
+
+fn axis_coeff_map(eq: &threebody_discover::Equation) -> std::collections::BTreeMap<String, f64> {
+    let mut m = std::collections::BTreeMap::new();
+    for t in &eq.terms {
+        if !t.coeff.is_finite() {
+            continue;
+        }
+        *m.entry(t.feature.clone()).or_insert(0.0) += t.coeff;
+    }
+    m
+}
+
+fn redundancy_flags_for_model(model: &VectorModel) -> Vec<String> {
+    fn axis_flags(coeffs: &std::collections::BTreeMap<String, f64>, axis: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for (prefix, close, far) in [
+            (
+                "grav",
+                format!("grav_close_{axis}"),
+                format!("grav_far_{axis}"),
+            ),
+            (
+                "elec",
+                format!("elec_close_{axis}"),
+                format!("elec_far_{axis}"),
+            ),
+            (
+                "mag",
+                format!("mag_close_{axis}"),
+                format!("mag_far_{axis}"),
+            ),
+            (
+                "grav_s",
+                format!("grav_sclose_{axis}"),
+                format!("grav_sfar_{axis}"),
+            ),
+            (
+                "elec_s",
+                format!("elec_sclose_{axis}"),
+                format!("elec_sfar_{axis}"),
+            ),
+            (
+                "mag_s",
+                format!("mag_sclose_{axis}"),
+                format!("mag_sfar_{axis}"),
+            ),
+        ] {
+            let base = if prefix.ends_with("_s") {
+                format!("{}_{}", &prefix[..prefix.len() - 2], axis)
+            } else {
+                format!("{prefix}_{axis}")
+            };
+            let c_close = coeffs.get(&close).copied();
+            let c_far = coeffs.get(&far).copied();
+            let c_base = coeffs.get(&base).copied();
+            if let (Some(cc), Some(cf), Some(cb)) = (c_close, c_far, c_base) {
+                if (cc + cf - cb).abs() <= 1e-6 {
+                    out.push(format!("exact_linear_combo:{axis}:{base}~{close}+{far}"));
+                } else {
+                    out.push(format!(
+                        "near_linear_combo:{axis}:{base}~{close}+{far}:delta={:.3e}",
+                        (cc + cf - cb).abs()
+                    ));
+                }
+            }
+        }
+        out
+    }
+    let mut flags = Vec::new();
+    flags.extend(axis_flags(&axis_coeff_map(&model.eq_x), "x"));
+    flags.extend(axis_flags(&axis_coeff_map(&model.eq_y), "y"));
+    flags.extend(axis_flags(&axis_coeff_map(&model.eq_z), "z"));
+    flags
+}
+
+fn max_abs_feature_corr_for_model(
+    model: &VectorModel,
+    feature_names: &[String],
+    samples: &[Vec<f64>],
+) -> Option<f64> {
+    if samples.len() < 4 {
+        return None;
+    }
+    let mut used: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for eq in [&model.eq_x, &model.eq_y, &model.eq_z] {
+        for t in &eq.terms {
+            used.insert(t.feature.clone());
+        }
+    }
+    let index: std::collections::HashMap<&str, usize> = feature_names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.as_str(), i))
+        .collect();
+    let used_idx: Vec<usize> = used
+        .iter()
+        .filter_map(|name| index.get(name.as_str()).copied())
+        .collect();
+    if used_idx.len() < 2 {
+        return None;
+    }
+
+    fn mean_std(xs: &[f64]) -> Option<(f64, f64)> {
+        if xs.len() < 2 {
+            return None;
+        }
+        let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+        let var = xs
+            .iter()
+            .map(|x| {
+                let d = x - mean;
+                d * d
+            })
+            .sum::<f64>()
+            / (xs.len() as f64 - 1.0);
+        Some((mean, var.sqrt()))
+    }
+
+    let mut max_corr = 0.0f64;
+    for i in 0..used_idx.len() {
+        for j in (i + 1)..used_idx.len() {
+            let xi = used_idx[i];
+            let xj = used_idx[j];
+            let mut a = Vec::with_capacity(samples.len());
+            let mut b = Vec::with_capacity(samples.len());
+            for row in samples {
+                if let (Some(&va), Some(&vb)) = (row.get(xi), row.get(xj)) {
+                    a.push(va);
+                    b.push(vb);
+                }
+            }
+            let Some((ma, sa)) = mean_std(&a) else {
+                continue;
+            };
+            let Some((mb, sb)) = mean_std(&b) else {
+                continue;
+            };
+            if sa <= 1e-12 || sb <= 1e-12 {
+                continue;
+            }
+            let cov = a
+                .iter()
+                .zip(&b)
+                .map(|(va, vb)| (va - ma) * (vb - mb))
+                .sum::<f64>()
+                / (a.len() as f64 - 1.0);
+            let corr = (cov / (sa * sb)).abs();
+            if corr.is_finite() {
+                max_corr = max_corr.max(corr);
+            }
+        }
+    }
+    Some(max_corr)
 }
 
 fn metrics_sort_key(metrics: &CandidateMetrics) -> (f64, f64, usize) {
@@ -8047,7 +9182,23 @@ fn feature_names_for_equation_text(equation_text: &str) -> Vec<String> {
         }
     }
     if uses_extended {
-        FeatureLibrary::extended_physics().features
+        let mixed_families = FeatureFamilySet {
+            families: vec![
+                FeatureFamily::Newtonian,
+                FeatureFamily::Pn1,
+                FeatureFamily::Yukawa,
+                FeatureFamily::DarwinLike,
+                FeatureFamily::TidalInvariants,
+                FeatureFamily::JerkAugmented,
+                FeatureFamily::HamiltonianInvariants,
+            ],
+        };
+        augment_library_features(
+            feature_library_for_kind(FeatureLibraryKind::ExtendedPhysics),
+            &mixed_families,
+            AtlasGateMode::Smooth,
+        )
+        .features
     } else {
         default.features
     }
@@ -8070,11 +9221,21 @@ fn normalize_equation_text_for_features(
 
 fn feature_pool_for_axis(feature_names: &[String], axis: char, regime: &str) -> Vec<String> {
     fn axis_ok(name: &str, axis: char) -> bool {
-        name == "gate_close" || name == "gate_far" || name.ends_with(&format!("_{axis}"))
+        name == "gate_close"
+            || name == "gate_far"
+            || name == "gate_smooth_close"
+            || name == "gate_smooth_far"
+            || name.ends_with(&format!("_{axis}"))
     }
     fn regime_ok(name: &str, regime: &str) -> bool {
         if regime == "gravity_only" {
-            name.starts_with("grav") || name.starts_with("gate")
+            name.starts_with("grav")
+                || name.starts_with("gate")
+                || name.starts_with("pn1_")
+                || name.starts_with("yukawa_")
+                || name.starts_with("tidal_")
+                || name.starts_with("jerk_")
+                || name.starts_with("hamiltonian_")
         } else {
             true
         }
@@ -10260,6 +11421,28 @@ mod tests {
     }
 
     #[test]
+    fn parse_advanced_factory_modes_and_families() {
+        assert_eq!(parse_atlas_gate_mode("binary"), Some(AtlasGateMode::Binary));
+        assert_eq!(parse_atlas_gate_mode("smooth"), Some(AtlasGateMode::Smooth));
+        assert_eq!(
+            parse_redundancy_prune_mode("strict"),
+            Some(RedundancyPruneMode::Strict)
+        );
+        assert_eq!(
+            parse_sensitivity_mode("objective"),
+            Some(SensitivityMode::Objective)
+        );
+        assert_eq!(
+            parse_selector_policy("llm_math_creative"),
+            Some(SelectorPolicy::LlmMathCreative)
+        );
+        let fam = parse_feature_family_set("newtonian,pn1,yukawa").expect("family parse");
+        assert!(fam.labels().contains(&"newtonian"));
+        assert!(fam.labels().contains(&"pn1"));
+        assert!(fam.labels().contains(&"yukawa"));
+    }
+
+    #[test]
     fn propose_equation_mutants_is_deterministic_and_axis_consistent() {
         let features = FeatureLibrary::default_physics().features;
         let parent = "ax=+1.000000*grav_x ; ay=+1.000000*grav_y ; az=0";
@@ -10269,15 +11452,118 @@ mod tests {
         for eq in &a {
             let [tx, ty, tz] = parse_vector_equation_terms(eq);
             for (_c, f) in &tx {
-                assert!(f == "gate_close" || f == "gate_far" || f.ends_with("_x"));
+                assert!(
+                    f == "gate_close"
+                        || f == "gate_far"
+                        || f == "gate_smooth_close"
+                        || f == "gate_smooth_far"
+                        || f.ends_with("_x")
+                );
             }
             for (_c, f) in &ty {
-                assert!(f == "gate_close" || f == "gate_far" || f.ends_with("_y"));
+                assert!(
+                    f == "gate_close"
+                        || f == "gate_far"
+                        || f == "gate_smooth_close"
+                        || f == "gate_smooth_far"
+                        || f.ends_with("_y")
+                );
             }
             for (_c, f) in &tz {
-                assert!(f == "gate_close" || f == "gate_far" || f.ends_with("_z"));
+                assert!(
+                    f == "gate_close"
+                        || f == "gate_far"
+                        || f == "gate_smooth_close"
+                        || f == "gate_smooth_far"
+                        || f.ends_with("_z")
+                );
             }
         }
+    }
+
+    #[test]
+    fn redundancy_flags_detect_exact_gated_linear_combo() {
+        let model = VectorModel {
+            eq_x: threebody_discover::Equation {
+                terms: vec![
+                    threebody_discover::equation::Term {
+                        feature: "grav_close_x".to_string(),
+                        coeff: 0.5,
+                    },
+                    threebody_discover::equation::Term {
+                        feature: "grav_far_x".to_string(),
+                        coeff: 0.5,
+                    },
+                    threebody_discover::equation::Term {
+                        feature: "grav_x".to_string(),
+                        coeff: 1.0,
+                    },
+                ],
+            },
+            eq_y: threebody_discover::Equation { terms: vec![] },
+            eq_z: threebody_discover::Equation { terms: vec![] },
+        };
+        let flags = redundancy_flags_for_model(&model);
+        assert!(flags.iter().any(|f| f.contains("exact_linear_combo:x")));
+    }
+
+    #[test]
+    fn smooth_gate_features_change_continuously_near_threshold() {
+        set_gate_params(GateParams {
+            r0: 0.5,
+            width: 0.05,
+        });
+        let cfg = Config::default();
+        let system_a = System::new(
+            [Body::new(1.0, 0.0); 3],
+            State::new(
+                [
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.49, 0.0, 0.0),
+                    Vec3::new(-1.0, 0.0, 0.0),
+                ],
+                [Vec3::zero(); 3],
+            ),
+        );
+        let system_b = System::new(
+            [Body::new(1.0, 0.0); 3],
+            State::new(
+                [
+                    Vec3::new(0.0, 0.0, 0.0),
+                    Vec3::new(0.51, 0.0, 0.0),
+                    Vec3::new(-1.0, 0.0, 0.0),
+                ],
+                [Vec3::zero(); 3],
+            ),
+        );
+        let names = vec![
+            "gate_smooth_close".to_string(),
+            "gate_smooth_far".to_string(),
+        ];
+        let f_a = compute_feature_vector(&system_a, 0, &cfg, &names);
+        let f_b = compute_feature_vector(&system_b, 0, &cfg, &names);
+        assert!(f_a[0] > f_b[0]);
+        assert!((f_a[0] - f_b[0]).abs() < 0.2);
+        assert!((f_a[0] + f_a[1] - 1.0).abs() < 1e-9);
+        assert!((f_b[0] + f_b[1] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn elegant_templates_include_non_newtonian_terms_when_available() {
+        let feats = vec![
+            "grav_x".to_string(),
+            "grav_y".to_string(),
+            "grav_z".to_string(),
+            "pn1_grav_x".to_string(),
+            "pn1_grav_y".to_string(),
+            "pn1_grav_z".to_string(),
+            "yukawa_grav_x".to_string(),
+            "yukawa_grav_y".to_string(),
+            "yukawa_grav_z".to_string(),
+        ];
+        let templates = generate_elegant_equation_templates(&feats, "gravity_only");
+        assert!(templates.iter().any(|(eq, _)| eq.contains("pn1_grav_x")));
+        assert!(templates.iter().any(|(eq, _)| eq.contains("yukawa_grav_x")));
     }
 
     #[test]
