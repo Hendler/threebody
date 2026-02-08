@@ -5,34 +5,37 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use threebody_core::config::{Config, IntegratorKind};
 use threebody_core::diagnostics::compute_diagnostics;
+use threebody_core::forces::{ForceConfig, compute_accel};
 use threebody_core::frames::to_barycentric;
-use threebody_core::forces::{compute_accel, ForceConfig};
-use threebody_core::integrators::{boris::Boris, implicit_midpoint::ImplicitMidpoint, leapfrog::Leapfrog, rk45::Rk45, Integrator};
+use threebody_core::integrators::{
+    Integrator, boris::Boris, implicit_midpoint::ImplicitMidpoint, leapfrog::Leapfrog, rk45::Rk45,
+};
 use threebody_core::math::vec3::Vec3;
 use threebody_core::output::csv::write_csv;
 use threebody_core::output::parse::{parse_header, require_columns};
 use threebody_core::output::sidecar::{build_sidecar, write_sidecar};
 use threebody_core::regime::compute_regime;
-use threebody_core::sim::{simulate, SimOptions};
+use threebody_core::sim::{SimOptions, simulate};
 use threebody_core::state::{Body, State, System};
 use threebody_discover::ga::DiscoveryConfig;
-use threebody_discover::library::FeatureLibrary;
 use threebody_discover::judge::{
-    CandidateMetrics, CandidateSummary, DatasetSummary, FeatureDescription, IcBounds, IcRequest, InitialConditionSpec,
-    JudgeInput, JudgeRecommendationsLite, JudgeResponse, Rubric, SimulationSummary,
+    CandidateMetrics, CandidateSummary, DatasetSummary, FeatureDescription, IcBounds, IcRequest,
+    InitialConditionSpec, JudgeInput, JudgeRecommendationsLite, JudgeResponse, Rubric,
+    SimulationSummary,
 };
+use threebody_discover::library::FeatureLibrary;
 use threebody_discover::llm::{AutoLlmClient, LlmClient, MockLlm, OpenAIClient};
 use threebody_discover::{
-    grid_search, lasso_path_search, run_search, stls_path_search, Dataset, FactoryEvaluationCandidate,
-    FactoryEvaluationInput, FactoryEvaluationIteration, FactoryEvaluationIterationJudge, FitnessHeuristic,
-    GaSolverSummary, LassoConfig, LassoSolverSummary, StlsConfig, StlsSolverSummary, DiscoverySolverSummary,
-    FACTORY_EVALUATION_VERSION,
+    Dataset, DiscoverySolverSummary, FACTORY_EVALUATION_VERSION, FactoryEvaluationCandidate,
+    FactoryEvaluationInput, FactoryEvaluationIteration, FactoryEvaluationIterationJudge,
+    FitnessHeuristic, GaSolverSummary, LassoConfig, LassoSolverSummary, StlsConfig,
+    StlsSolverSummary, grid_search, lasso_path_search, run_search, stls_path_search,
 };
 
 mod eval;
 mod predictability;
 
-use eval::{format_vector_model, rollout_metrics, rollout_trace, VectorModel};
+use eval::{VectorModel, format_vector_model, rollout_metrics, rollout_trace};
 
 #[derive(Parser)]
 #[command(name = "threebody-cli")]
@@ -340,6 +343,15 @@ enum Commands {
         /// Require a reachable OpenAI-compatible LLM (fail instead of falling back to mock).
         #[arg(long, default_value_t = false)]
         require_llm: bool,
+        /// Exploration constant C for equation-search UCT (higher explores more).
+        #[arg(long, default_value_t = 0.4)]
+        equation_search_uct_c: f64,
+        /// Number of top candidates per iteration to record in the equation archive.
+        #[arg(long, default_value_t = 12)]
+        equation_search_archive_topk: usize,
+        /// Number of archive equations to pick as MCTS parents per iteration.
+        #[arg(long, default_value_t = 2)]
+        equation_search_mcts_parents: usize,
     },
     /// Verify OpenAI-compatible LLM connectivity and JSON validity.
     LlmCheck {
@@ -402,20 +414,8 @@ fn main() -> anyhow::Result<()> {
             summary,
         } => {
             run_simulation(
-                config,
-                output,
-                steps,
-                dt,
-                mode,
-                preset,
-                ic,
-                integrator,
-                em,
-                no_em,
-                no_gravity,
-                format,
-                dry_run,
-                summary,
+                config, output, steps, dt, mode, preset, ic, integrator, em, no_em, no_gravity,
+                format, dry_run, summary,
             )?;
         }
         Commands::Run {
@@ -435,20 +435,8 @@ fn main() -> anyhow::Result<()> {
             summary,
         } => {
             run_simulation(
-                config,
-                output,
-                steps,
-                dt,
-                mode,
-                preset,
-                ic,
-                integrator,
-                em,
-                no_em,
-                no_gravity,
-                format,
-                dry_run,
-                summary,
+                config, output, steps, dt, mode, preset, ic, integrator, em, no_em, no_gravity,
+                format, dry_run, summary,
             )?;
         }
         Commands::Discover {
@@ -571,6 +559,9 @@ fn main() -> anyhow::Result<()> {
             model,
             openai_key_file,
             require_llm,
+            equation_search_uct_c,
+            equation_search_archive_topk,
+            equation_search_mcts_parents,
         } => {
             let solver_settings = DiscoverySolverSettings {
                 solver: parse_discovery_solver(&solver)?,
@@ -589,6 +580,11 @@ fn main() -> anyhow::Result<()> {
                     .unwrap_or_default(),
                 lasso_max_iter,
                 lasso_tol,
+            };
+            let equation_search = EquationSearchSettings {
+                uct_explore_c: equation_search_uct_c.max(0.0),
+                archive_update_topk: equation_search_archive_topk.max(1),
+                mcts_parent_limit: equation_search_mcts_parents.max(1),
             };
             run_factory(
                 out_dir,
@@ -613,9 +609,13 @@ fn main() -> anyhow::Result<()> {
                 model,
                 openai_key_file,
                 require_llm,
+                equation_search,
             )?;
         }
-        Commands::LlmCheck { model, openai_key_file } => {
+        Commands::LlmCheck {
+            model,
+            openai_key_file,
+        } => {
             run_llm_check(model, openai_key_file)?;
         }
         Commands::Findings {
@@ -753,7 +753,12 @@ fn run_llm_check(model: String, openai_key_file: Option<PathBuf>) -> anyhow::Res
     Ok(())
 }
 
-fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize, require_llm: bool) -> anyhow::Result<()> {
+fn run_quickstart(
+    out_dir: Option<PathBuf>,
+    steps: usize,
+    max_iters: usize,
+    require_llm: bool,
+) -> anyhow::Result<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     let out_dir = out_dir.unwrap_or_else(|| {
@@ -768,7 +773,10 @@ fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize, requ
     let config_path = out_dir.join("config.json");
 
     // Emit a starter config (so users can tweak constants/integrators if desired).
-    fs::write(&config_path, serde_json::to_string_pretty(&Config::default())?)?;
+    fs::write(
+        &config_path,
+        serde_json::to_string_pretty(&Config::default())?,
+    )?;
 
     let solver_settings = DiscoverySolverSettings {
         solver: DiscoverySolver::Stls,
@@ -809,6 +817,7 @@ fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize, requ
         llm_model,
         None,
         require_llm,
+        EquationSearchSettings::default(),
     )?;
 
     // Copy a single novice-friendly artifact to the quickstart root.
@@ -827,7 +836,10 @@ fn run_quickstart(out_dir: Option<PathBuf>, steps: usize, max_iters: usize, requ
     println!("Key outputs:");
     println!("- {}/RESULTS.md", out_dir.display());
     println!("- {}/RESULTS.pdf (if built)", out_dir.display());
-    println!("- {}/factory/ (evidence + per-iteration artifacts)", out_dir.display());
+    println!(
+        "- {}/factory/ (evidence + per-iteration artifacts)",
+        out_dir.display()
+    );
     Ok(())
 }
 
@@ -906,7 +918,10 @@ fn run_bench_em(
         BenchEmTemplate::NearCircular,
         BenchEmTemplate::NearCollisionSafe,
     ];
-    let patterns = [BenchChargePattern::Like, BenchChargePattern::AlternatingSigns];
+    let patterns = [
+        BenchChargePattern::Like,
+        BenchChargePattern::AlternatingSigns,
+    ];
 
     let mut cases = Vec::new();
     for template in templates {
@@ -1004,7 +1019,10 @@ fn run_bench_em(
         let (system, ic_spec) = bench_em_initial_conditions(case, seed + idx as u64)?;
         let result = simulate_with_cfg(system, &oracle_cfg, SimOptions { steps, dt });
 
-        fs::write(run_dir.join("config.json"), serde_json::to_string_pretty(&oracle_cfg)?)?;
+        fs::write(
+            run_dir.join("config.json"),
+            serde_json::to_string_pretty(&oracle_cfg)?,
+        )?;
         fs::write(
             run_dir.join("initial_conditions.json"),
             serde_json::to_string_pretty(&ic_spec)?,
@@ -1139,7 +1157,10 @@ fn run_bench_em(
         let mut md = String::new();
         md.push_str(&format!("# Bench-EM Case {}\n\n", run_id));
         md.push_str(&format!("- template: `{}`\n", case.template.as_str()));
-        md.push_str(&format!("- charge_pattern: `{}`\n", case.charge_pattern.as_str()));
+        md.push_str(&format!(
+            "- charge_pattern: `{}`\n",
+            case.charge_pattern.as_str()
+        ));
         md.push_str(&format!("- charge_scale: {}\n", case.charge_scale));
         md.push_str(&format!("- velocity_scale: {}\n", case.velocity_scale));
         md.push_str(&format!("- selected_solver: `{}`\n", selected_solver));
@@ -1262,7 +1283,9 @@ fn run_bench_em(
     let prior_best = find_best_prior_attempt(&results_dir, &eval_input_path, &prior_filter)?;
     let best_ic: Option<InitialConditionSpec> = current_best
         .as_ref()
-        .and_then(|b| fs::read_to_string(factory_dir.join(&b.run_id).join("initial_conditions.json")).ok())
+        .and_then(|b| {
+            fs::read_to_string(factory_dir.join(&b.run_id).join("initial_conditions.json")).ok()
+        })
         .and_then(|raw| serde_json::from_str(&raw).ok());
     let incumbent_on_best_run = (|| -> anyhow::Result<Option<IncumbentEvalOnBestRun>> {
         let (best, prior) = match (current_best.as_ref(), prior_best.as_ref()) {
@@ -1274,10 +1297,11 @@ fn run_bench_em(
             Ok(v) => v,
             Err(_) => return Ok(None),
         };
-        let incumbent_model = match vector_model_from_equation_text(&prior.best.candidate.equation_text) {
-            Some(v) => v,
-            None => return Ok(None),
-        };
+        let incumbent_model =
+            match vector_model_from_equation_text(&prior.best.candidate.equation_text) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
         let complexity = incumbent_model.eq_x.complexity()
             + incumbent_model.eq_y.complexity()
             + incumbent_model.eq_z.complexity();
@@ -1353,7 +1377,10 @@ fn run_bench_em(
         heldout,
         cases: &suite_cases,
     };
-    fs::write(out_dir.join("suite.json"), serde_json::to_string_pretty(&suite)?)?;
+    fs::write(
+        out_dir.join("suite.json"),
+        serde_json::to_string_pretty(&suite)?,
+    )?;
 
     // Update global best index for the results directory.
     update_best_results_index_best_effort(&results_dir);
@@ -1366,7 +1393,10 @@ fn run_bench_em(
     Ok(())
 }
 
-fn bench_em_initial_conditions(case: &BenchEmCase, seed: u64) -> anyhow::Result<(System, InitialConditionSpec)> {
+fn bench_em_initial_conditions(
+    case: &BenchEmCase,
+    seed: u64,
+) -> anyhow::Result<(System, InitialConditionSpec)> {
     let base_charge = 0.01;
     let q = base_charge * case.charge_scale;
     let charges = match case.charge_pattern {
@@ -1376,15 +1406,31 @@ fn bench_em_initial_conditions(case: &BenchEmCase, seed: u64) -> anyhow::Result<
 
     let (pos, vel) = match case.template {
         BenchEmTemplate::HeadOn => {
-            let pos = [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.8, 0.0)];
+            let pos = [
+                Vec3::new(-1.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, 1.8, 0.0),
+            ];
             let v = 0.3 * case.velocity_scale;
-            let vel = [Vec3::new(v, 0.0, 0.0), Vec3::new(-v, 0.0, 0.0), Vec3::zero()];
+            let vel = [
+                Vec3::new(v, 0.0, 0.0),
+                Vec3::new(-v, 0.0, 0.0),
+                Vec3::zero(),
+            ];
             (pos, vel)
         }
         BenchEmTemplate::HighAngMomentum => {
-            let pos = [Vec3::new(-0.9, 0.0, 0.0), Vec3::new(0.9, 0.0, 0.0), Vec3::new(0.0, 1.6, 0.0)];
+            let pos = [
+                Vec3::new(-0.9, 0.0, 0.0),
+                Vec3::new(0.9, 0.0, 0.0),
+                Vec3::new(0.0, 1.6, 0.0),
+            ];
             let v = 0.3 * case.velocity_scale;
-            let vel = [Vec3::new(0.0, v, 0.0), Vec3::new(0.0, -v, 0.0), Vec3::zero()];
+            let vel = [
+                Vec3::new(0.0, v, 0.0),
+                Vec3::new(0.0, -v, 0.0),
+                Vec3::zero(),
+            ];
             (pos, vel)
         }
         BenchEmTemplate::NearCircular => {
@@ -1403,9 +1449,17 @@ fn bench_em_initial_conditions(case: &BenchEmCase, seed: u64) -> anyhow::Result<
             (pos, vel)
         }
         BenchEmTemplate::NearCollisionSafe => {
-            let pos = [Vec3::new(-0.35, 0.0, 0.0), Vec3::new(0.35, 0.0, 0.0), Vec3::new(0.0, 1.2, 0.0)];
+            let pos = [
+                Vec3::new(-0.35, 0.0, 0.0),
+                Vec3::new(0.35, 0.0, 0.0),
+                Vec3::new(0.0, 1.2, 0.0),
+            ];
             let v = 0.3 * case.velocity_scale;
-            let vel = [Vec3::new(v, 0.0, 0.0), Vec3::new(-v, 0.0, 0.0), Vec3::zero()];
+            let vel = [
+                Vec3::new(v, 0.0, 0.0),
+                Vec3::new(-v, 0.0, 0.0),
+                Vec3::zero(),
+            ];
             (pos, vel)
         }
     };
@@ -1483,7 +1537,9 @@ fn run_findings(results_dir: PathBuf, out_tex: PathBuf, build_pdf: bool) -> anyh
         return Ok(());
     };
 
-    let tex_dir = out_tex.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let tex_dir = out_tex
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
     let tex_name = out_tex
         .file_name()
         .and_then(|s| s.to_str())
@@ -1557,7 +1613,14 @@ fn run_simulation(
     if format != "csv" {
         anyhow::bail!("unsupported format: {format}");
     }
-    let cfg = build_config(config_path, &mode, integrator_override, em, no_em, no_gravity)?;
+    let cfg = build_config(
+        config_path,
+        &mode,
+        integrator_override,
+        em,
+        no_em,
+        no_gravity,
+    )?;
     let system = if let Some(path) = ic_path {
         let json = fs::read_to_string(&path)?;
         let spec: InitialConditionSpec = serde_json::from_str(&json)?;
@@ -1646,7 +1709,11 @@ fn build_config(
     Ok(cfg)
 }
 
-fn simulate_with_cfg(system: System, cfg: &Config, options: SimOptions) -> threebody_core::sim::SimResult {
+fn simulate_with_cfg(
+    system: System,
+    cfg: &Config,
+    options: SimOptions,
+) -> threebody_core::sim::SimResult {
     let (integrator, encounter_integrator): (Box<dyn Integrator>, Option<Box<dyn Integrator>>) =
         match cfg.integrator.kind {
             IntegratorKind::Leapfrog => (Box::new(Leapfrog), None),
@@ -1654,22 +1721,44 @@ fn simulate_with_cfg(system: System, cfg: &Config, options: SimOptions) -> three
             IntegratorKind::Boris => (Box::new(Boris), None),
             IntegratorKind::ImplicitMidpoint => (Box::new(ImplicitMidpoint), None),
         };
-    simulate(system, cfg, integrator.as_ref(), encounter_integrator.as_deref(), options)
+    simulate(
+        system,
+        cfg,
+        integrator.as_ref(),
+        encounter_integrator.as_deref(),
+        options,
+    )
 }
 
 fn preset_system(name: &str) -> anyhow::Result<System> {
     match name {
         "two-body" => {
-            let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(0.0, 0.0)];
-            let pos = [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::zero()];
+            let bodies = [
+                Body::new(1.0, 0.0),
+                Body::new(1.0, 0.0),
+                Body::new(0.0, 0.0),
+            ];
+            let pos = [
+                Vec3::new(-0.5, 0.0, 0.0),
+                Vec3::new(0.5, 0.0, 0.0),
+                Vec3::zero(),
+            ];
             let v = (0.5_f64).sqrt();
-            let vel = [Vec3::new(0.0, v, 0.0), Vec3::new(0.0, -v, 0.0), Vec3::zero()];
+            let vel = [
+                Vec3::new(0.0, v, 0.0),
+                Vec3::new(0.0, -v, 0.0),
+                Vec3::zero(),
+            ];
             Ok(System::new(bodies, State::new(pos, vel)))
         }
         "three-body" => {
             // Lagrange equilateral solution (normalized): three equal masses at an equilateral triangle,
             // rotating about the center of mass. Assumes G=1, m=1, side length L=1 -> speed v = sqrt(G*m/L) = 1.
-            let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(1.0, 0.0)];
+            let bodies = [
+                Body::new(1.0, 0.0),
+                Body::new(1.0, 0.0),
+                Body::new(1.0, 0.0),
+            ];
             let r = 1.0 / 3.0_f64.sqrt(); // circumradius for side length 1
             let pos = [
                 Vec3::new(r, 0.0, 0.0),
@@ -1684,7 +1773,11 @@ fn preset_system(name: &str) -> anyhow::Result<System> {
             Ok(System::new(bodies, State::new(pos, vel)))
         }
         "static" => {
-            let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(1.0, 0.0)];
+            let bodies = [
+                Body::new(1.0, 0.0),
+                Body::new(1.0, 0.0),
+                Body::new(1.0, 0.0),
+            ];
             let pos = [Vec3::zero(); 3];
             let vel = [Vec3::zero(); 3];
             Ok(System::new(bodies, State::new(pos, vel)))
@@ -1729,7 +1822,10 @@ fn run_discovery(
         ..DiscoveryConfig::default()
     };
     let llm_client = if llm {
-        Some(OpenAIClient::from_env_or_file(&model, openai_key_file.as_deref())?)
+        Some(OpenAIClient::from_env_or_file(
+            &model,
+            openai_key_file.as_deref(),
+        )?)
     } else {
         None
     };
@@ -1755,9 +1851,9 @@ fn run_discovery(
     let sim_cfg = sidecar.config;
     sim_cfg.validate().map_err(anyhow::Error::msg)?;
 
-    let init = sidecar
-        .initial_state
-        .ok_or_else(|| anyhow::anyhow!("sidecar missing initial_state; rerun simulate to regenerate"))?;
+    let init = sidecar.initial_state.ok_or_else(|| {
+        anyhow::anyhow!("sidecar missing initial_state; rerun simulate to regenerate")
+    })?;
     let mut bodies = [Body::new(0.0, 0.0); 3];
     for i in 0..3 {
         bodies[i] = Body::new(init.mass[i], init.charge[i]);
@@ -1765,13 +1861,15 @@ fn run_discovery(
     let steps = load_steps_from_csv(&input, bodies, &sim_cfg)?;
     let result = threebody_core::sim::SimResult {
         steps,
-        encounter: sidecar.encounter.map(|e| threebody_core::sim::EncounterEvent {
-            step: e.step,
-            min_pair_dist: e.min_pair_dist,
-            epsilon_before: e.epsilon_before,
-            epsilon_after: e.epsilon_after,
-            substeps_used: e.substeps_used,
-        }),
+        encounter: sidecar
+            .encounter
+            .map(|e| threebody_core::sim::EncounterEvent {
+                step: e.step,
+                min_pair_dist: e.min_pair_dist,
+                epsilon_before: e.epsilon_before,
+                epsilon_after: e.epsilon_after,
+                substeps_used: e.substeps_used,
+            }),
         encounter_action: sidecar.encounter_action,
         warnings: sidecar.warnings.clone(),
         terminated_early: sidecar.terminated_early,
@@ -1779,7 +1877,11 @@ fn run_discovery(
         stats: sidecar.sim_stats,
     };
 
-    let regime = if sim_cfg.enable_em { "em_quasistatic" } else { "gravity_only" };
+    let regime = if sim_cfg.enable_em {
+        "em_quasistatic"
+    } else {
+        "gravity_only"
+    };
 
     let vector_data = build_vector_dataset(&result, &sim_cfg, &library.features, body);
     let [dataset_x, dataset_y, dataset_z] = component_datasets(&vector_data);
@@ -1826,15 +1928,27 @@ fn run_discovery(
     );
 
     let grid_x = grid_search(
-        &topk_x.entries.iter().map(|e| e.equation.clone()).collect::<Vec<_>>(),
+        &topk_x
+            .entries
+            .iter()
+            .map(|e| e.equation.clone())
+            .collect::<Vec<_>>(),
         &dataset_x,
     );
     let grid_y = grid_search(
-        &topk_y.entries.iter().map(|e| e.equation.clone()).collect::<Vec<_>>(),
+        &topk_y
+            .entries
+            .iter()
+            .map(|e| e.equation.clone())
+            .collect::<Vec<_>>(),
         &dataset_y,
     );
     let grid_z = grid_search(
-        &topk_z.entries.iter().map(|e| e.equation.clone()).collect::<Vec<_>>(),
+        &topk_z
+            .entries
+            .iter()
+            .map(|e| e.equation.clone())
+            .collect::<Vec<_>>(),
         &dataset_z,
     );
 
@@ -1860,25 +1974,32 @@ fn run_discovery(
     judge_input
         .notes
         .push(format!("fitness_heuristic={}", fitness.as_str()));
+    judge_input.notes.push(format!(
+        "discovery_solver={}",
+        discovery_solver_label(solver_settings.solver)
+    ));
     judge_input
         .notes
-        .push(format!("discovery_solver={}", discovery_solver_label(solver_settings.solver)));
-    judge_input.notes.push(format!("normalize={}", solver_settings.normalize));
+        .push(format!("normalize={}", solver_settings.normalize));
     match solver_settings.solver {
         DiscoverySolver::Ga => {
             judge_input.notes.push(format!("ga_runs={runs}"));
-            judge_input.notes.push(format!("ga_population={population}"));
-        }
-        DiscoverySolver::Stls => {
             judge_input
                 .notes
-                .push(format!("stls_ridge_lambda={}", solver_settings.stls_ridge_lambda));
+                .push(format!("ga_population={population}"));
+        }
+        DiscoverySolver::Stls => {
+            judge_input.notes.push(format!(
+                "stls_ridge_lambda={}",
+                solver_settings.stls_ridge_lambda
+            ));
             if solver_settings.stls_thresholds.is_empty() {
                 judge_input.notes.push("stls_thresholds=auto".to_string());
             } else {
-                judge_input
-                    .notes
-                    .push(format!("stls_thresholds={:?}", solver_settings.stls_thresholds));
+                judge_input.notes.push(format!(
+                    "stls_thresholds={:?}",
+                    solver_settings.stls_thresholds
+                ));
             }
         }
         DiscoverySolver::Lasso => {
@@ -1977,28 +2098,14 @@ fn run_discovery(
     Ok(())
 }
 
-fn load_steps_from_csv(input: &PathBuf, bodies: [Body; 3], cfg: &Config) -> anyhow::Result<Vec<threebody_core::sim::SimStep>> {
+fn load_steps_from_csv(
+    input: &PathBuf,
+    bodies: [Body; 3],
+    cfg: &Config,
+) -> anyhow::Result<Vec<threebody_core::sim::SimStep>> {
     const REQUIRED: [&str; 20] = [
-        "t",
-        "dt",
-        "r1_x",
-        "r1_y",
-        "r1_z",
-        "r2_x",
-        "r2_y",
-        "r2_z",
-        "r3_x",
-        "r3_y",
-        "r3_z",
-        "v1_x",
-        "v1_y",
-        "v1_z",
-        "v2_x",
-        "v2_y",
-        "v2_z",
-        "v3_x",
-        "v3_y",
-        "v3_z",
+        "t", "dt", "r1_x", "r1_y", "r1_z", "r2_x", "r2_y", "r2_z", "r3_x", "r3_y", "r3_z", "v1_x",
+        "v1_y", "v1_z", "v2_x", "v2_y", "v2_z", "v3_x", "v3_y", "v3_z",
     ];
 
     let file = fs::File::open(input)?;
@@ -2088,7 +2195,9 @@ fn build_judge_input_from_candidates(
         simulation,
         candidates,
         ic_bounds: default_ic_bounds(),
-        notes: vec!["LLM is supplemental; do not override numeric ranking without evidence.".to_string()],
+        notes: vec![
+            "LLM is supplemental; do not override numeric ranking without evidence.".to_string(),
+        ],
     }
 }
 
@@ -2161,7 +2270,10 @@ fn default_ic_bounds() -> IcBounds {
     }
 }
 
-fn sanitize_judge_recommendations(rec: &mut threebody_discover::JudgeRecommendations, bounds: &IcBounds) {
+fn sanitize_judge_recommendations(
+    rec: &mut threebody_discover::JudgeRecommendations,
+    bounds: &IcBounds,
+) {
     // 1) Drop invalid ICs (keeps `--require-llm` runs robust; the preset fallback still works).
     if let Some(spec) = rec.next_initial_conditions.as_ref() {
         if let Err(err) = system_from_ic(spec, bounds) {
@@ -2278,7 +2390,11 @@ fn ic_is_nearly_planar(spec: &InitialConditionSpec) -> bool {
         .all(|b| b.pos[2].abs() <= EPS && b.vel[2].abs() <= EPS)
 }
 
-fn force_nonplanar_ic(mut spec: InitialConditionSpec, bounds: &IcBounds, seed: u64) -> InitialConditionSpec {
+fn force_nonplanar_ic(
+    mut spec: InitialConditionSpec,
+    bounds: &IcBounds,
+    seed: u64,
+) -> InitialConditionSpec {
     if spec.bodies.len() != 3 {
         return spec;
     }
@@ -2301,12 +2417,28 @@ fn force_nonplanar_ic(mut spec: InitialConditionSpec, bounds: &IcBounds, seed: u
     let dvz = 0.10 * if seed % 3 == 0 { 1.0 } else { -1.0 };
 
     spec.bodies[0].pos[2] = clamp(spec.bodies[0].pos[2] + dz, bounds.pos_min, bounds.pos_max);
-    spec.bodies[1].pos[2] = clamp(spec.bodies[1].pos[2] - 0.5 * dz, bounds.pos_min, bounds.pos_max);
-    spec.bodies[2].pos[2] = clamp(spec.bodies[2].pos[2] - 0.5 * dz, bounds.pos_min, bounds.pos_max);
+    spec.bodies[1].pos[2] = clamp(
+        spec.bodies[1].pos[2] - 0.5 * dz,
+        bounds.pos_min,
+        bounds.pos_max,
+    );
+    spec.bodies[2].pos[2] = clamp(
+        spec.bodies[2].pos[2] - 0.5 * dz,
+        bounds.pos_min,
+        bounds.pos_max,
+    );
 
     spec.bodies[0].vel[2] = clamp(spec.bodies[0].vel[2] + dvz, bounds.vel_min, bounds.vel_max);
-    spec.bodies[1].vel[2] = clamp(spec.bodies[1].vel[2] - 0.5 * dvz, bounds.vel_min, bounds.vel_max);
-    spec.bodies[2].vel[2] = clamp(spec.bodies[2].vel[2] - 0.5 * dvz, bounds.vel_min, bounds.vel_max);
+    spec.bodies[1].vel[2] = clamp(
+        spec.bodies[1].vel[2] - 0.5 * dvz,
+        bounds.vel_min,
+        bounds.vel_max,
+    );
+    spec.bodies[2].vel[2] = clamp(
+        spec.bodies[2].vel[2] - 0.5 * dvz,
+        bounds.vel_min,
+        bounds.vel_max,
+    );
 
     if spec.notes.trim().is_empty() {
         spec.notes = "forced_nonplanar_z=true".to_string();
@@ -2317,7 +2449,7 @@ fn force_nonplanar_ic(mut spec: InitialConditionSpec, bounds: &IcBounds, seed: u
     spec
 }
 
-fn min_pair_distance(pos: &[Vec3; 3]) -> f64 {
+fn min_pair_distance(pos: &[Vec3]) -> f64 {
     let mut min = f64::INFINITY;
     for i in 0..3 {
         for j in (i + 1)..3 {
@@ -2383,9 +2515,21 @@ fn component_datasets(vec_data: &VectorDataset) -> [Dataset; 3] {
         targets_z.push(t[2]);
     }
     [
-        Dataset::new(vec_data.feature_names.clone(), vec_data.samples.clone(), targets_x),
-        Dataset::new(vec_data.feature_names.clone(), vec_data.samples.clone(), targets_y),
-        Dataset::new(vec_data.feature_names.clone(), vec_data.samples.clone(), targets_z),
+        Dataset::new(
+            vec_data.feature_names.clone(),
+            vec_data.samples.clone(),
+            targets_x,
+        ),
+        Dataset::new(
+            vec_data.feature_names.clone(),
+            vec_data.samples.clone(),
+            targets_y,
+        ),
+        Dataset::new(
+            vec_data.feature_names.clone(),
+            vec_data.samples.clone(),
+            targets_z,
+        ),
     ]
 }
 
@@ -2399,7 +2543,11 @@ fn compute_feature_vector(
         if r2 == 0.0 {
             return (0.0, 0.0);
         }
-        let soft2 = if epsilon == 0.0 { r2 } else { r2 + epsilon * epsilon };
+        let soft2 = if epsilon == 0.0 {
+            r2
+        } else {
+            r2 + epsilon * epsilon
+        };
         let r = soft2.sqrt();
         if r == 0.0 || !r.is_finite() {
             return (0.0, 0.0);
@@ -2542,36 +2690,64 @@ fn build_vector_candidates(
     regime: &str,
     rollout_integrator: RolloutIntegrator,
 ) -> Vec<CandidateSummary> {
-    let n = topk_x.len().min(topk_y.len()).min(topk_z.len()).min(3);
+    let nx = topk_x.len().min(3);
+    let ny = topk_y.len().min(3);
+    let nz = topk_z.len().min(3);
     let mut candidates = Vec::new();
-    for i in 0..n {
-        let model = VectorModel {
-            eq_x: topk_x[i].equation.clone(),
-            eq_y: topk_y[i].equation.clone(),
-            eq_z: topk_z[i].equation.clone(),
-        };
-        let mse = (topk_x[i].score + topk_y[i].score + topk_z[i].score) / 3.0;
-        let complexity = model.eq_x.complexity() + model.eq_y.complexity() + model.eq_z.complexity();
-        let (rmse, divergence_time) = rollout_metrics(&model, feature_names, result, cfg, rollout_integrator);
-        let mut flags = Vec::new();
-        flags.extend(stability_flags_for(&model.eq_x, regime));
-        flags.extend(stability_flags_for(&model.eq_y, regime));
-        flags.extend(stability_flags_for(&model.eq_z, regime));
-        flags.sort();
-        flags.dedup();
-        candidates.push(CandidateSummary {
-            id: i,
-            equation: model.eq_x.clone(),
-            equation_text: format_vector_model(&model),
-            metrics: CandidateMetrics {
-                mse,
-                complexity,
-                rollout_rmse: Some(rmse),
-                divergence_time,
-                stability_flags: flags,
-            },
-            notes: vec![],
-        });
+    let mut seen = std::collections::HashSet::new();
+
+    for ix in 0..nx {
+        for iy in 0..ny {
+            for iz in 0..nz {
+                let model = VectorModel {
+                    eq_x: topk_x[ix].equation.clone(),
+                    eq_y: topk_y[iy].equation.clone(),
+                    eq_z: topk_z[iz].equation.clone(),
+                };
+                let equation_text = format_vector_model(&model);
+                if !seen.insert(equation_text.clone()) {
+                    continue;
+                }
+
+                let mse = (topk_x[ix].score + topk_y[iy].score + topk_z[iz].score) / 3.0;
+                let complexity =
+                    model.eq_x.complexity() + model.eq_y.complexity() + model.eq_z.complexity();
+                let (rmse, divergence_time) =
+                    rollout_metrics(&model, feature_names, result, cfg, rollout_integrator);
+                let mut flags = Vec::new();
+                flags.extend(stability_flags_for(&model.eq_x, regime));
+                flags.extend(stability_flags_for(&model.eq_y, regime));
+                flags.extend(stability_flags_for(&model.eq_z, regime));
+                flags.sort();
+                flags.dedup();
+
+                candidates.push(CandidateSummary {
+                    id: candidates.len(),
+                    equation: model.eq_x.clone(),
+                    equation_text,
+                    metrics: CandidateMetrics {
+                        mse,
+                        complexity,
+                        rollout_rmse: Some(rmse),
+                        divergence_time,
+                        stability_flags: flags,
+                    },
+                    notes: vec![format!("component_ranks=x{ix},y{iy},z{iz}")],
+                });
+            }
+        }
+    }
+
+    candidates.sort_by(|a, b| {
+        metrics_sort_key(&a.metrics)
+            .partial_cmp(&metrics_sort_key(&b.metrics))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if candidates.len() > 3 {
+        candidates.truncate(3);
+    }
+    for (id, candidate) in candidates.iter_mut().enumerate() {
+        candidate.id = id;
     }
     candidates
 }
@@ -2593,9 +2769,14 @@ fn append_manual_vector_candidate_from_equation_text(
         return;
     };
 
-    let allowed: std::collections::HashSet<&str> = feature_names.iter().map(|s| s.as_str()).collect();
+    let allowed: std::collections::HashSet<&str> =
+        feature_names.iter().map(|s| s.as_str()).collect();
     let mut sanitized = model;
-    for eq in [&mut sanitized.eq_x, &mut sanitized.eq_y, &mut sanitized.eq_z] {
+    for eq in [
+        &mut sanitized.eq_x,
+        &mut sanitized.eq_y,
+        &mut sanitized.eq_z,
+    ] {
         eq.terms
             .retain(|t| t.coeff.is_finite() && allowed.contains(t.feature.as_str()));
     }
@@ -2604,8 +2785,10 @@ fn append_manual_vector_candidate_from_equation_text(
     let mse_y = threebody_discover::equation::score_equation(&sanitized.eq_y, dataset_y);
     let mse_z = threebody_discover::equation::score_equation(&sanitized.eq_z, dataset_z);
     let mse = (mse_x + mse_y + mse_z) / 3.0;
-    let complexity = sanitized.eq_x.complexity() + sanitized.eq_y.complexity() + sanitized.eq_z.complexity();
-    let (rmse, divergence_time) = rollout_metrics(&sanitized, feature_names, result, cfg, rollout_integrator);
+    let complexity =
+        sanitized.eq_x.complexity() + sanitized.eq_y.complexity() + sanitized.eq_z.complexity();
+    let (rmse, divergence_time) =
+        rollout_metrics(&sanitized, feature_names, result, cfg, rollout_integrator);
 
     let mut flags = Vec::new();
     flags.extend(stability_flags_for(&sanitized.eq_x, regime));
@@ -2701,10 +2884,18 @@ fn build_sim_summary(
         enable_em: true,
     };
 
-    let mean_abs_accel_grav = cfg.enable_gravity.then(|| mean_abs_accel(result, &grav_force_cfg)).flatten();
-    let mean_abs_accel_em = cfg.enable_em.then(|| mean_abs_accel(result, &em_force_cfg)).flatten();
+    let mean_abs_accel_grav = cfg
+        .enable_gravity
+        .then(|| mean_abs_accel(result, &grav_force_cfg))
+        .flatten();
+    let mean_abs_accel_em = cfg
+        .enable_em
+        .then(|| mean_abs_accel(result, &em_force_cfg))
+        .flatten();
     let mean_abs_accel_ratio_em_over_grav = match (mean_abs_accel_em, mean_abs_accel_grav) {
-        (Some(em), Some(grav)) if em.is_finite() && grav.is_finite() && grav > 0.0 => Some(em / grav),
+        (Some(em), Some(grav)) if em.is_finite() && grav.is_finite() && grav > 0.0 => {
+            Some(em / grav)
+        }
         _ => None,
     };
 
@@ -2765,11 +2956,14 @@ fn feature_library_kind_label(kind: FeatureLibraryKind) -> &'static str {
 
 fn parse_feature_library_kind(raw: &str) -> Option<FeatureLibraryKind> {
     match raw.trim().to_lowercase().as_str() {
-        "default" | "default_physics" | "default-physics" => Some(FeatureLibraryKind::DefaultPhysics),
-        "extended" | "extended_physics" | "extended-physics" => Some(FeatureLibraryKind::ExtendedPhysics),
-        "em_fields" | "em-fields" | "em_fields_lorentz" | "em-fields-lorentz" | "fields" | "lorentz" => {
-            Some(FeatureLibraryKind::EmFieldsLorentz)
+        "default" | "default_physics" | "default-physics" => {
+            Some(FeatureLibraryKind::DefaultPhysics)
         }
+        "extended" | "extended_physics" | "extended-physics" => {
+            Some(FeatureLibraryKind::ExtendedPhysics)
+        }
+        "em_fields" | "em-fields" | "em_fields_lorentz" | "em-fields-lorentz" | "fields"
+        | "lorentz" => Some(FeatureLibraryKind::EmFieldsLorentz),
         _ => None,
     }
 }
@@ -2791,6 +2985,23 @@ struct DiscoverySolverSettings {
     lasso_alphas: Vec<f64>, // empty => auto grid
     lasso_max_iter: usize,
     lasso_tol: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EquationSearchSettings {
+    uct_explore_c: f64,
+    archive_update_topk: usize,
+    mcts_parent_limit: usize,
+}
+
+impl Default for EquationSearchSettings {
+    fn default() -> Self {
+        Self {
+            uct_explore_c: 0.4,
+            archive_update_topk: 12,
+            mcts_parent_limit: 2,
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -3016,6 +3227,7 @@ fn run_factory(
     model: String,
     openai_key_file: Option<PathBuf>,
     require_llm: bool,
+    equation_search: EquationSearchSettings,
 ) -> anyhow::Result<()> {
     fs::create_dir_all(&out_dir)?;
     let mut next_ic: Option<InitialConditionSpec> = None;
@@ -3049,8 +3261,11 @@ fn run_factory(
         }
         kind
     };
-    let mut equation_ga_parent: Option<String> = incumbent.as_ref().map(|r| r.equation_text.clone());
+    let mut equation_ga_parent: Option<String> =
+        incumbent.as_ref().map(|r| r.equation_text.clone());
     let mut previous_iteration_elites: Vec<(String, CandidateMetrics)> = Vec::new();
+    let equation_search_archive_path = out_dir.join("equation_search_archive.json");
+    let mut equation_search_archive = load_equation_search_archive(&equation_search_archive_path);
 
     if require_llm {
         let Some(client) = llm_client.as_ref() else {
@@ -3076,14 +3291,24 @@ fn run_factory(
         if matches!(cfg.integrator.kind, IntegratorKind::Rk45) && cfg.integrator.adaptive {
             cfg.integrator.max_rejects = cfg.integrator.max_rejects.max(64);
         }
-        let regime = if cfg.enable_em { "em_quasistatic" } else { "gravity_only" };
+        let regime = if cfg.enable_em {
+            "em_quasistatic"
+        } else {
+            "gravity_only"
+        };
         let ic_bounds = default_ic_bounds();
-        let mut ic_notes = vec!["avoid close encounters".to_string(), "prefer bounded motion".to_string()];
+        let mut ic_notes = vec![
+            "avoid close encounters".to_string(),
+            "prefer bounded motion".to_string(),
+        ];
         if let Some(rec) = incumbent.as_ref() {
             ic_notes.extend(incumbent_prompt_notes(rec));
         }
         if !previous_iteration_elites.is_empty() {
-            ic_notes.push("PREV_ITER_ELITE_EQUATIONS (use these to pick ICs that distinguish models):".to_string());
+            ic_notes.push(
+                "PREV_ITER_ELITE_EQUATIONS (use these to pick ICs that distinguish models):"
+                    .to_string(),
+            );
             for (i, (eq, m)) in previous_iteration_elites.iter().take(3).enumerate() {
                 let eq = truncate_to_chars(&single_line(eq), 300);
                 ic_notes.push(format!(
@@ -3097,6 +3322,26 @@ fn run_factory(
             }
             ic_notes.push(
                 "IC_GOAL: propose initial conditions where these elite equations diverge in rollout so we can rank them."
+                    .to_string(),
+            );
+        }
+        if !equation_search_archive.nodes.is_empty() {
+            ic_notes.push("EQUATION_SEARCH_ARCHIVE_TOP (historically strong equations):".to_string());
+            for (rank, node) in top_equation_search_nodes(&equation_search_archive, 3)
+                .iter()
+                .enumerate()
+            {
+                ic_notes.push(format!(
+                    "ARCHIVE_{}: eq={} | best_score={:.6e} | visits={} | descriptor={}",
+                    rank + 1,
+                    truncate_to_chars(&single_line(&node.equation_text), 240),
+                    node.best_score,
+                    node.visits,
+                    node.descriptor.short_label()
+                ));
+            }
+            ic_notes.push(
+                "IC_GOAL: also generate conditions that can separate current contenders from these archive leaders."
                     .to_string(),
             );
         }
@@ -3151,7 +3396,13 @@ fn run_factory(
             base_notes: &[String],
             seed: u64,
             next_ic: &mut Option<InitialConditionSpec>,
-        ) -> anyhow::Result<(IcRequest, InitialConditionSpec, System, Option<String>, Option<String>)> {
+        ) -> anyhow::Result<(
+            IcRequest,
+            InitialConditionSpec,
+            System,
+            Option<String>,
+            Option<String>,
+        )> {
             let max_ic_attempts = if require_llm { 3 } else { 1 };
             let mut ic_prompt = None;
             let mut ic_response = None;
@@ -3160,7 +3411,8 @@ fn run_factory(
             for ic_attempt in 0..max_ic_attempts {
                 let mut attempt_notes = base_notes.to_vec();
                 if let Some(err) = last_err.as_ref() {
-                    attempt_notes.push(format!("previous_ic_validation_error={}", single_line(err)));
+                    attempt_notes
+                        .push(format!("previous_ic_validation_error={}", single_line(err)));
                 }
                 let ic_request = IcRequest {
                     bounds: ic_bounds.clone(),
@@ -3194,16 +3446,26 @@ fn run_factory(
 
                 let candidate = force_nonplanar_ic(candidate, ic_bounds, seed + ic_attempt as u64);
                 match system_from_ic(&candidate, ic_bounds) {
-                    Ok(system) => return Ok((ic_request, candidate, system, ic_prompt, ic_response)),
+                    Ok(system) => {
+                        return Ok((ic_request, candidate, system, ic_prompt, ic_response));
+                    }
                     Err(err) => {
                         if !require_llm {
                             eprintln!("IC validation failed ({err}); falling back to preset.");
-                            let spec = force_nonplanar_ic(initial_conditions_from_preset(preset)?, ic_bounds, seed);
+                            let spec = force_nonplanar_ic(
+                                initial_conditions_from_preset(preset)?,
+                                ic_bounds,
+                                seed,
+                            );
                             let system = system_from_ic(&spec, ic_bounds).unwrap_or_else(|_| {
                                 // Presets are assumed safe; if barycentric/min-dist checks fail for any reason,
                                 // keep going with the raw preset system.
                                 preset_system(preset).unwrap_or_else(|_| {
-                                    let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(1.0, 0.0)];
+                                    let bodies = [
+                                        Body::new(1.0, 0.0),
+                                        Body::new(1.0, 0.0),
+                                        Body::new(1.0, 0.0),
+                                    ];
                                     let pos = [Vec3::zero(); 3];
                                     let vel = [Vec3::zero(); 3];
                                     System::new(bodies, State::new(pos, vel))
@@ -3244,16 +3506,17 @@ fn run_factory(
                 attempt_notes.push(note.clone());
             }
             let attempt_seed = seed + iter as u64 + (sim_attempt as u64 - 1) * 1000;
-            let (ic_request, ic_spec, system, attempt_prompt, attempt_response) = pick_initial_conditions(
-                llm_client_ref,
-                require_llm,
-                &preset,
-                regime,
-                &ic_bounds,
-                &attempt_notes,
-                attempt_seed,
-                &mut next_ic,
-            )?;
+            let (ic_request, ic_spec, system, attempt_prompt, attempt_response) =
+                pick_initial_conditions(
+                    llm_client_ref,
+                    require_llm,
+                    &preset,
+                    regime,
+                    &ic_bounds,
+                    &attempt_notes,
+                    attempt_seed,
+                    &mut next_ic,
+                )?;
             ic_prompt = attempt_prompt.or(ic_prompt);
             ic_response = attempt_response.or(ic_response);
 
@@ -3287,7 +3550,10 @@ fn run_factory(
                 "previous_sim_failure: produced_steps={}, terminated_early={}, termination_reason={}",
                 produced_steps,
                 result.terminated_early,
-                result.termination_reason.clone().unwrap_or_else(|| "n/a".to_string())
+                result
+                    .termination_reason
+                    .clone()
+                    .unwrap_or_else(|| "n/a".to_string())
             ));
         }
 
@@ -3390,14 +3656,16 @@ fn run_factory(
         }
 
         // Equation-GA (lightweight): treat equations themselves as a population across iterations.
-        // We carry forward the current best (and recent elites) and try a few small, axis-consistent
-        // mutations. Everything is still scored numerically; the LLM is just another proposal source.
+        // We carry forward the current best (and recent elites), mix in MCTS archive parents,
+        // and try a few small, axis-consistent mutations.
+        let mut mcts_parent_labels: Vec<String> = Vec::new();
         {
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
             for c in &vector_candidates {
-                if let Some(norm) =
-                    normalize_equation_text_for_features(&c.equation_text, &vector_data.feature_names)
-                {
+                if let Some(norm) = normalize_equation_text_for_features(
+                    &c.equation_text,
+                    &vector_data.feature_names,
+                ) {
                     seen.insert(norm);
                 }
             }
@@ -3409,6 +3677,28 @@ fn run_factory(
             for (i, (eq, _m)) in previous_iteration_elites.iter().take(2).enumerate() {
                 parents.push((format!("equation_ga_elite_{}", i + 1), eq.clone()));
             }
+            for (parent_kind, parent_eq) in archive_select_parents_mcts(
+                &equation_search_archive,
+                &vector_data.feature_names,
+                &seen,
+                equation_search.mcts_parent_limit,
+                equation_search.uct_explore_c,
+            ) {
+                mcts_parent_labels.push(format!(
+                    "{}={}",
+                    parent_kind,
+                    truncate_to_chars(&single_line(&parent_eq), 120)
+                ));
+                parents.push((parent_kind, parent_eq));
+            }
+            let mut parent_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            parents.retain(|(_kind, eq)| {
+                let Some(norm) = normalize_equation_text_for_features(eq, &vector_data.feature_names)
+                else {
+                    return false;
+                };
+                parent_seen.insert(norm)
+            });
             if parents.is_empty() {
                 if let Some(best_seed) = vector_candidates.iter().min_by(|a, b| {
                     metrics_sort_key(&a.metrics)
@@ -3424,7 +3714,7 @@ fn run_factory(
 
             let mut parent_used = 0usize;
             for (parent_kind, parent_eq) in parents {
-                if parent_used >= 2 {
+                if parent_used >= 3 {
                     break;
                 }
                 let Some(parent_norm) =
@@ -3477,29 +3767,19 @@ fn run_factory(
                         vec![
                             "source=equation_ga".to_string(),
                             "kind=equation_ga_mutant".to_string(),
-                            format!("parent={}", truncate_to_chars(&single_line(&parent_norm), 120)),
+                            format!(
+                                "parent={}",
+                                truncate_to_chars(&single_line(&parent_norm), 120)
+                            ),
                         ],
                     );
                 }
                 parent_used += 1;
             }
         }
-        let grid_topk = grid_search(
-            &vector_candidates
-                .iter()
-                .map(|c| c.equation.clone())
-                .collect::<Vec<_>>(),
-            &dataset_x,
-        );
         let mut trace_written = false;
 
-        let sim_summary = build_sim_summary(
-            &result,
-            &cfg,
-            current_rollout,
-            Some(steps),
-            Some(dt),
-        );
+        let sim_summary = build_sim_summary(&result, &cfg, current_rollout, Some(steps), Some(dt));
         let dataset_summary = build_dataset_summary(
             &vector_data.feature_names,
             &library,
@@ -3518,42 +3798,80 @@ fn run_factory(
         judge_input
             .notes
             .push(format!("fitness_heuristic={}", current_fitness.as_str()));
-        judge_input
-            .notes
-            .push(format!("discovery_solver={}", discovery_solver_label(current_solver.solver)));
+        judge_input.notes.push(format!(
+            "discovery_solver={}",
+            discovery_solver_label(current_solver.solver)
+        ));
         judge_input
             .notes
             .push(format!("normalize={}", current_solver.normalize));
         match current_solver.solver {
             DiscoverySolver::Ga => {
                 judge_input.notes.push(format!("ga_runs={runs}"));
-                judge_input.notes.push(format!("ga_population={population}"));
+                judge_input
+                    .notes
+                    .push(format!("ga_population={population}"));
             }
             DiscoverySolver::Stls => {
-                judge_input.notes.push(format!("stls_ridge_lambda={}", current_solver.stls_ridge_lambda));
+                judge_input.notes.push(format!(
+                    "stls_ridge_lambda={}",
+                    current_solver.stls_ridge_lambda
+                ));
                 if current_solver.stls_thresholds.is_empty() {
                     judge_input.notes.push("stls_thresholds=auto".to_string());
                 } else {
-                    judge_input.notes.push(format!("stls_thresholds={:?}", current_solver.stls_thresholds));
+                    judge_input.notes.push(format!(
+                        "stls_thresholds={:?}",
+                        current_solver.stls_thresholds
+                    ));
                 }
             }
             DiscoverySolver::Lasso => {
-                judge_input.notes.push(format!("lasso_tol={}", current_solver.lasso_tol));
+                judge_input
+                    .notes
+                    .push(format!("lasso_tol={}", current_solver.lasso_tol));
                 if current_solver.lasso_alphas.is_empty() {
                     judge_input.notes.push("lasso_alphas=auto".to_string());
                 } else {
-                    judge_input.notes.push(format!("lasso_alphas={:?}", current_solver.lasso_alphas));
+                    judge_input
+                        .notes
+                        .push(format!("lasso_alphas={:?}", current_solver.lasso_alphas));
                 }
             }
         }
+        judge_input.notes.push(format!(
+            "rollout_integrator={}",
+            rollout_integrator_label(current_rollout)
+        ));
+        judge_input.notes.push(format!(
+            "feature_library={}",
+            feature_library_kind_label(current_library)
+        ));
         judge_input
             .notes
-            .push(format!("rollout_integrator={}", rollout_integrator_label(current_rollout)));
-        judge_input
-            .notes
-            .push(format!("feature_library={}", feature_library_kind_label(current_library)));
+            .push(format!(
+                "equation_search_policy=mcts_uct(c={})",
+                equation_search.uct_explore_c
+            ));
+        judge_input.notes.push(format!(
+            "equation_search_archive_nodes={}",
+            equation_search_archive.nodes.len()
+        ));
+        judge_input.notes.push(format!(
+            "equation_search_archive_total_updates={}",
+            equation_search_archive.total_updates
+        ));
+        if !mcts_parent_labels.is_empty() {
+            judge_input.notes.push(format!(
+                "equation_search_mcts_parents={}",
+                mcts_parent_labels.join(" || ")
+            ));
+        }
         let judge_input_path = run_dir.join("judge_input.json");
-        fs::write(&judge_input_path, serde_json::to_string_pretty(&judge_input)?)?;
+        fs::write(
+            &judge_input_path,
+            serde_json::to_string_pretty(&judge_input)?,
+        )?;
         let mut judge_prompt = None;
         let mut judge_response = None;
         let judge = if let Some(client) = llm_client.as_ref() {
@@ -3621,6 +3939,19 @@ fn run_factory(
             }
         }
 
+        update_equation_search_archive(
+            &mut equation_search_archive,
+            &vector_candidates,
+            &vector_data.feature_names,
+            iter + 1,
+            equation_search.archive_update_topk,
+        );
+        save_equation_search_archive(&equation_search_archive_path, &equation_search_archive)?;
+        fs::write(
+            out_dir.join("equation_search_report.md"),
+            render_equation_search_report_md(&equation_search_archive, equation_search, 24),
+        )?;
+
         // Write a rollout trace for the best (numerically) candidate after all candidate injection.
         if let Some(best) = vector_candidates.iter().min_by(|a, b| {
             metrics_sort_key(&a.metrics)
@@ -3646,15 +3977,33 @@ fn run_factory(
         let solver_meta = build_solver_meta(
             &current_solver,
             current_fitness,
-            matches!(current_solver.solver, DiscoverySolver::Ga).then_some((runs, population, ga_seed)),
+            matches!(current_solver.solver, DiscoverySolver::Ga)
+                .then_some((runs, population, ga_seed)),
         );
+        let mut grid_topk = vector_candidates.clone();
+        grid_topk.sort_by(|a, b| {
+            metrics_sort_key(&a.metrics)
+                .partial_cmp(&metrics_sort_key(&b.metrics))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if grid_topk.len() > 3 {
+            grid_topk.truncate(3);
+        }
         let discovery_json = serde_json::to_string_pretty(&serde_json::json!({
             "solver": &solver_meta,
             "top3_x": topk_x.entries,
             "top3_y": topk_y.entries,
             "top3_z": topk_z.entries,
             "vector_candidates": vector_candidates,
-            "grid_top3": grid_topk.entries,
+            "grid_top3": grid_topk,
+            "equation_search": {
+                "policy": format!("mcts_uct(c={})", equation_search.uct_explore_c),
+                "archive_nodes": equation_search_archive.nodes.len(),
+                "archive_total_updates": equation_search_archive.total_updates,
+                "mcts_parent_labels": mcts_parent_labels.clone(),
+                "archive_update_topk": equation_search.archive_update_topk,
+                "mcts_parent_limit": equation_search.mcts_parent_limit,
+            },
         }))?;
         fs::write(&discovery_out, discovery_json)?;
 
@@ -3670,7 +4019,7 @@ fn run_factory(
             solver: SolverMeta,
             discovery_top3: Vec<threebody_discover::EquationScore>,
             vector_candidates: Vec<CandidateSummary>,
-            grid_top3: Vec<threebody_discover::EquationScore>,
+            grid_top3: Vec<CandidateSummary>,
             judge: Option<JudgeResponse>,
             llm_mode: String,
             llm_model: Option<String>,
@@ -3690,10 +4039,14 @@ fn run_factory(
             solver: solver_meta,
             discovery_top3: topk_x.entries.clone(),
             vector_candidates: vector_candidates.clone(),
-            grid_top3: grid_topk.entries.clone(),
+            grid_top3: grid_topk.clone(),
             judge: judge.clone(),
             llm_mode: llm_mode_label(llm_mode).to_string(),
-            llm_model: if matches!(llm_mode, LlmMode::OpenAI) { Some(model.clone()) } else { None },
+            llm_model: if matches!(llm_mode, LlmMode::OpenAI) {
+                Some(model.clone())
+            } else {
+                None
+            },
             fitness_heuristic: current_fitness.as_str().to_string(),
             rollout_integrator: rollout_integrator_label(current_rollout).to_string(),
             rollout_trace: if trace_written {
@@ -3714,7 +4067,10 @@ fn run_factory(
         ));
         md.push_str(&format!("- Steps: {}\n", sim_summary.steps));
         md.push_str(&format!("- Energy drift: {:?}\n", sim_summary.energy_drift));
-        md.push_str(&format!("- Min pair dist: {:?}\n", sim_summary.min_pair_dist));
+        md.push_str(&format!(
+            "- Min pair dist: {:?}\n",
+            sim_summary.min_pair_dist
+        ));
         md.push_str(&format!(
             "- mean_abs_accel_grav: {}\n",
             format_opt_f64(sim_summary.mean_abs_accel_grav)
@@ -3734,8 +4090,7 @@ fn run_factory(
         }) {
             md.push_str(&format!(
                 "- Best vector model: mse={:.6}, rollout_rmse={:?}\n",
-                best_vec.metrics.mse,
-                best_vec.metrics.rollout_rmse
+                best_vec.metrics.mse, best_vec.metrics.rollout_rmse
             ));
             md.push_str(&format!("  eq: {}\n", best_vec.equation_text));
         }
@@ -3744,30 +4099,65 @@ fn run_factory(
             md.push_str(&format!("{}\n", j.summary));
             md.push_str(&format!("Ranking: {:?}\n", j.ranking));
         }
+        md.push_str("\n## Equation Search\n");
+        md.push_str(&format!(
+            "- policy: mcts_uct(c={})\n",
+            equation_search.uct_explore_c
+        ));
+        md.push_str(&format!(
+            "- archive_nodes: {}\n",
+            equation_search_archive.nodes.len()
+        ));
+        md.push_str(&format!(
+            "- archive_total_updates: {}\n",
+            equation_search_archive.total_updates
+        ));
+        if !mcts_parent_labels.is_empty() {
+            md.push_str(&format!(
+                "- mcts_parents: {}\n",
+                mcts_parent_labels.join(" || ")
+            ));
+        }
+        if let Some(top_node) = top_equation_search_nodes(&equation_search_archive, 1)
+            .into_iter()
+            .next()
+        {
+            md.push_str(&format!(
+                "- archive_best_score: {:.6e} (visits={})\n",
+                top_node.best_score, top_node.visits
+            ));
+            md.push_str(&format!(
+                "- archive_best_eq: {}\n",
+                truncate_to_chars(&single_line(&top_node.equation_text), 220)
+            ));
+        }
         fs::write(run_dir.join("report.md"), md)?;
 
         let solver_summary = DiscoverySolverSummary {
             name: discovery_solver_label(current_solver.solver).to_string(),
             normalize: current_solver.normalize,
             fitness_heuristic: current_fitness.as_str().to_string(),
-            stls: matches!(current_solver.solver, DiscoverySolver::Stls).then(|| StlsSolverSummary {
-                auto_thresholds: current_solver.stls_thresholds.is_empty(),
-                thresholds: current_solver.stls_thresholds.clone(),
-                ridge_lambda: current_solver.stls_ridge_lambda,
-                max_iter: current_solver.stls_max_iter,
+            stls: matches!(current_solver.solver, DiscoverySolver::Stls).then(|| {
+                StlsSolverSummary {
+                    auto_thresholds: current_solver.stls_thresholds.is_empty(),
+                    thresholds: current_solver.stls_thresholds.clone(),
+                    ridge_lambda: current_solver.stls_ridge_lambda,
+                    max_iter: current_solver.stls_max_iter,
+                }
             }),
-            lasso: matches!(current_solver.solver, DiscoverySolver::Lasso).then(|| LassoSolverSummary {
-                auto_alphas: current_solver.lasso_alphas.is_empty(),
-                alphas: current_solver.lasso_alphas.clone(),
-                max_iter: current_solver.lasso_max_iter,
-                tol: current_solver.lasso_tol,
+            lasso: matches!(current_solver.solver, DiscoverySolver::Lasso).then(|| {
+                LassoSolverSummary {
+                    auto_alphas: current_solver.lasso_alphas.is_empty(),
+                    alphas: current_solver.lasso_alphas.clone(),
+                    max_iter: current_solver.lasso_max_iter,
+                    tol: current_solver.lasso_tol,
+                }
             }),
-            ga: matches!(current_solver.solver, DiscoverySolver::Ga)
-                .then(|| GaSolverSummary {
-                    runs,
-                    population,
-                    seed: ga_seed,
-                }),
+            ga: matches!(current_solver.solver, DiscoverySolver::Ga).then(|| GaSolverSummary {
+                runs,
+                population,
+                seed: ga_seed,
+            }),
         };
         let mut candidates_sorted = vector_candidates.clone();
         candidates_sorted.sort_by(|a, b| {
@@ -3779,11 +4169,13 @@ fn run_factory(
         // Update equation-GA state for the next iteration: keep a small elite set and a parent.
         // We deduplicate by a normalized equation string so repeated identical models don't crowd out diversity.
         {
-            let mut elite_map: std::collections::HashMap<String, CandidateMetrics> = std::collections::HashMap::new();
+            let mut elite_map: std::collections::HashMap<String, CandidateMetrics> =
+                std::collections::HashMap::new();
             for c in &vector_candidates {
-                let Some(norm) =
-                    normalize_equation_text_for_features(&c.equation_text, &vector_data.feature_names)
-                else {
+                let Some(norm) = normalize_equation_text_for_features(
+                    &c.equation_text,
+                    &vector_data.feature_names,
+                ) else {
                     continue;
                 };
                 let m = c.metrics.clone();
@@ -3830,7 +4222,11 @@ fn run_factory(
             judge: judge_summary,
         });
 
-        println!("Factory iteration {} complete -> {}", iter + 1, run_dir.display());
+        println!(
+            "Factory iteration {} complete -> {}",
+            iter + 1,
+            run_dir.display()
+        );
         if let Some(j) = judge.as_ref() {
             println!("LLM summary: {}", j.summary);
         }
@@ -3876,6 +4272,12 @@ fn run_factory(
         }
     }
 
+    save_equation_search_archive(&equation_search_archive_path, &equation_search_archive)?;
+    fs::write(
+        out_dir.join("equation_search_report.md"),
+        render_equation_search_report_md(&equation_search_archive, equation_search, 32),
+    )?;
+
     let mut eval_notes = Vec::new();
     eval_notes.push(format!("max_iters={}", max_iters));
     eval_notes.push(format!("steps={}", steps));
@@ -3886,6 +4288,26 @@ fn run_factory(
     eval_notes.push(format!("auto={}", auto));
     eval_notes.push(format!("feature_library={}", feature_library_trimmed));
     eval_notes.push(format!("llm_mode={}", llm_mode_label(llm_mode)));
+    eval_notes.push(format!(
+        "equation_search_policy=mcts_uct(c={})",
+        equation_search.uct_explore_c
+    ));
+    eval_notes.push(format!(
+        "equation_search_archive_topk={}",
+        equation_search.archive_update_topk
+    ));
+    eval_notes.push(format!(
+        "equation_search_mcts_parents={}",
+        equation_search.mcts_parent_limit
+    ));
+    eval_notes.push(format!(
+        "equation_search_archive_nodes={}",
+        equation_search_archive.nodes.len()
+    ));
+    eval_notes.push(format!(
+        "equation_search_archive_total_updates={}",
+        equation_search_archive.total_updates
+    ));
     if matches!(llm_mode, LlmMode::OpenAI | LlmMode::Auto) {
         eval_notes.push(format!("llm_model={}", model));
     }
@@ -3899,10 +4321,16 @@ fn run_factory(
 
     let current_best = best_candidate_from_eval_input(&eval_input);
     let prior_filter = PriorAttemptFilter::from_notes(&eval_input.notes);
-    let prior_best = find_best_prior_attempt(std::path::Path::new("results"), &eval_input_path, &prior_filter)?;
+    let prior_best = find_best_prior_attempt(
+        std::path::Path::new("results"),
+        &eval_input_path,
+        &prior_filter,
+    )?;
     let best_ic: Option<InitialConditionSpec> = current_best
         .as_ref()
-        .and_then(|b| fs::read_to_string(out_dir.join(&b.run_id).join("initial_conditions.json")).ok())
+        .and_then(|b| {
+            fs::read_to_string(out_dir.join(&b.run_id).join("initial_conditions.json")).ok()
+        })
         .and_then(|raw| serde_json::from_str(&raw).ok());
     let incumbent_on_best_run = (|| -> anyhow::Result<Option<IncumbentEvalOnBestRun>> {
         let (best, prior) = match (current_best.as_ref(), prior_best.as_ref()) {
@@ -3923,11 +4351,14 @@ fn run_factory(
             .and_then(|sim| parse_rollout_integrator(&sim.rollout_integrator).ok())
             .unwrap_or(RolloutIntegrator::Euler);
 
-        let incumbent_model = match vector_model_from_equation_text(&prior.best.candidate.equation_text) {
-            Some(v) => v,
-            None => return Ok(None),
-        };
-        let complexity = incumbent_model.eq_x.complexity() + incumbent_model.eq_y.complexity() + incumbent_model.eq_z.complexity();
+        let incumbent_model =
+            match vector_model_from_equation_text(&prior.best.candidate.equation_text) {
+                Some(v) => v,
+                None => return Ok(None),
+            };
+        let complexity = incumbent_model.eq_x.complexity()
+            + incumbent_model.eq_y.complexity()
+            + incumbent_model.eq_z.complexity();
         let feature_names = feature_names_for_equation_text(&prior.best.candidate.equation_text);
         let (rmse, div) = rollout_metrics(
             &incumbent_model,
@@ -3948,7 +4379,10 @@ fn run_factory(
         .as_ref()
         .and_then(|best| compute_benchmark_eval_v1(out_dir.as_path(), best, incumbent_bucket).ok());
     if let Some(b) = benchmark_eval.as_ref() {
-        let _ = fs::write(out_dir.join("benchmark_eval.json"), serde_json::to_string_pretty(b)?);
+        let _ = fs::write(
+            out_dir.join("benchmark_eval.json"),
+            serde_json::to_string_pretty(b)?,
+        );
     }
 
     #[derive(serde::Serialize)]
@@ -3996,11 +4430,20 @@ fn run_factory(
     let delta = match (current_best.as_ref(), prior_best.as_ref()) {
         (Some(c), Some(p)) => {
             let curr_roll = c.candidate.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
-            let prior_roll = p.best.candidate.metrics.rollout_rmse.unwrap_or(f64::INFINITY);
-            let rollout_rmse = (curr_roll.is_finite() && prior_roll.is_finite()).then_some(curr_roll - prior_roll);
-            let mse = (c.candidate.metrics.mse.is_finite() && p.best.candidate.metrics.mse.is_finite())
-                .then_some(c.candidate.metrics.mse - p.best.candidate.metrics.mse);
-            let complexity = Some(c.candidate.metrics.complexity as i64 - p.best.candidate.metrics.complexity as i64);
+            let prior_roll = p
+                .best
+                .candidate
+                .metrics
+                .rollout_rmse
+                .unwrap_or(f64::INFINITY);
+            let rollout_rmse =
+                (curr_roll.is_finite() && prior_roll.is_finite()).then_some(curr_roll - prior_roll);
+            let mse = (c.candidate.metrics.mse.is_finite()
+                && p.best.candidate.metrics.mse.is_finite())
+            .then_some(c.candidate.metrics.mse - p.best.candidate.metrics.mse);
+            let complexity = Some(
+                c.candidate.metrics.complexity as i64 - p.best.candidate.metrics.complexity as i64,
+            );
             Some(HistoryDelta {
                 rollout_rmse,
                 mse,
@@ -4011,7 +4454,8 @@ fn run_factory(
     };
     let history = EvaluationHistory {
         version: "v1".to_string(),
-        comparator: "rollout_rmse -> mse -> complexity (prior filtered by steps/dt when present)".to_string(),
+        comparator: "rollout_rmse -> mse -> complexity (prior filtered by steps/dt when present)"
+            .to_string(),
         current: current_attempt,
         prior_best: prior_attempt,
         delta,
@@ -4049,7 +4493,8 @@ fn run_factory(
                 fs::write(out_dir.join("evaluation_error.txt"), err.to_string())?;
                 let fallback = MockLlm.explain_factory_evaluation(&eval_input)?;
                 prompt_text = fallback.prompt;
-                raw_md.push_str("<!-- WARNING: LLM evaluation failed; using local fallback. -->\n\n");
+                raw_md
+                    .push_str("<!-- WARNING: LLM evaluation failed; using local fallback. -->\n\n");
                 raw_md.push_str(&fallback.value);
             }
         }
@@ -4336,7 +4781,14 @@ fn compute_benchmark_eval_v1(
 
     for (case_name, ic_spec) in suite.into_iter() {
         let system = system_from_ic(&ic_spec, &bounds)?;
-        let result = simulate_with_cfg(system, &cfg, SimOptions { steps: bucket.steps, dt: bucket.dt });
+        let result = simulate_with_cfg(
+            system,
+            &cfg,
+            SimOptions {
+                steps: bucket.steps,
+                dt: bucket.dt,
+            },
+        );
         let sim_summary = build_sim_summary(
             &result,
             &cfg,
@@ -4347,7 +4799,8 @@ fn compute_benchmark_eval_v1(
 
         let usable = !result.terminated_early && result.steps.len() == bucket.steps + 1;
         let (rollout_rmse, divergence_time) = if usable {
-            let (rmse, div) = rollout_metrics(&model, &feature_names, &result, &cfg, rollout_integrator);
+            let (rmse, div) =
+                rollout_metrics(&model, &feature_names, &result, &cfg, rollout_integrator);
             if rmse.is_finite() {
                 rmses.push(rmse);
             }
@@ -4417,9 +4870,363 @@ struct BestFactoryCandidate {
 
 fn metrics_sort_key(metrics: &CandidateMetrics) -> (f64, f64, usize) {
     let rollout_rmse = metrics.rollout_rmse.unwrap_or(f64::INFINITY);
-    let rollout_rmse = if rollout_rmse.is_finite() { rollout_rmse } else { f64::INFINITY };
-    let mse = if metrics.mse.is_finite() { metrics.mse } else { f64::INFINITY };
+    let rollout_rmse = if rollout_rmse.is_finite() {
+        rollout_rmse
+    } else {
+        f64::INFINITY
+    };
+    let mse = if metrics.mse.is_finite() {
+        metrics.mse
+    } else {
+        f64::INFINITY
+    };
     (rollout_rmse, mse, metrics.complexity)
+}
+
+const EQUATION_SEARCH_ARCHIVE_VERSION: &str = "v1";
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+struct EquationDescriptor {
+    total_terms: usize,
+    nonzero_components: usize,
+    uses_gravity_basis: bool,
+    uses_electric_basis: bool,
+    uses_magnetic_basis: bool,
+    uses_lorentz_field_basis: bool,
+    uses_gates: bool,
+}
+
+impl EquationDescriptor {
+    fn from_equation_text(equation_text: &str) -> Self {
+        let [tx, ty, tz] = parse_vector_equation_terms(equation_text);
+        let nonzero_components = [tx.is_empty(), ty.is_empty(), tz.is_empty()]
+            .iter()
+            .filter(|&&empty| !empty)
+            .count();
+        let mut total_terms = 0usize;
+        let mut uses_gravity_basis = false;
+        let mut uses_electric_basis = false;
+        let mut uses_magnetic_basis = false;
+        let mut uses_lorentz_field_basis = false;
+        let mut uses_gates = false;
+
+        for (_coeff, feature) in tx.into_iter().chain(ty).chain(tz) {
+            total_terms += 1;
+            uses_gravity_basis |= feature.starts_with("grav_");
+            uses_electric_basis |= feature.starts_with("elec_");
+            uses_magnetic_basis |= feature.starts_with("mag_");
+            uses_lorentz_field_basis |= feature.starts_with("lorentz_");
+            uses_gates |= feature.starts_with("gate_");
+        }
+
+        Self {
+            total_terms,
+            nonzero_components,
+            uses_gravity_basis,
+            uses_electric_basis,
+            uses_magnetic_basis,
+            uses_lorentz_field_basis,
+            uses_gates,
+        }
+    }
+
+    fn short_label(&self) -> String {
+        let mut bases = Vec::new();
+        if self.uses_gravity_basis {
+            bases.push("grav");
+        }
+        if self.uses_electric_basis {
+            bases.push("elec");
+        }
+        if self.uses_magnetic_basis {
+            bases.push("mag");
+        }
+        if self.uses_lorentz_field_basis {
+            bases.push("lorentz");
+        }
+        if self.uses_gates {
+            bases.push("gate");
+        }
+        format!(
+            "terms={},nonzero_axes={},bases={}",
+            self.total_terms,
+            self.nonzero_components,
+            if bases.is_empty() {
+                "none".to_string()
+            } else {
+                bases.join("|")
+            }
+        )
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+struct EquationSearchNode {
+    equation_text: String,
+    visits: usize,
+    mean_score: f64,
+    best_score: f64,
+    last_seen_iter: usize,
+    improvements: usize,
+    descriptor: EquationDescriptor,
+    source_counts: std::collections::BTreeMap<String, usize>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+struct EquationSearchArchive {
+    version: String,
+    total_updates: usize,
+    nodes: Vec<EquationSearchNode>,
+}
+
+impl Default for EquationSearchArchive {
+    fn default() -> Self {
+        Self {
+            version: EQUATION_SEARCH_ARCHIVE_VERSION.to_string(),
+            total_updates: 0,
+            nodes: Vec::new(),
+        }
+    }
+}
+
+fn candidate_scalar_score(metrics: &CandidateMetrics) -> f64 {
+    let (rollout_rmse, mse, complexity) = metrics_sort_key(metrics);
+    if !rollout_rmse.is_finite() || !mse.is_finite() {
+        return f64::INFINITY;
+    }
+    let mse_term = (1.0 + mse.max(0.0)).ln();
+    rollout_rmse + 0.1 * mse_term + (complexity as f64) * 1e-3
+}
+
+fn source_from_notes(notes: &[String]) -> String {
+    for note in notes {
+        if let Some(rest) = note.strip_prefix("source=") {
+            let label = rest.trim();
+            if !label.is_empty() {
+                return label.to_string();
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
+fn load_equation_search_archive(path: &std::path::Path) -> EquationSearchArchive {
+    if !path.exists() {
+        return EquationSearchArchive::default();
+    }
+    let raw = match fs::read_to_string(path) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!(
+                "failed to read equation search archive {}: {}",
+                path.display(),
+                err
+            );
+            return EquationSearchArchive::default();
+        }
+    };
+    let mut archive: EquationSearchArchive = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!(
+                "failed to parse equation search archive {}: {}",
+                path.display(),
+                err
+            );
+            return EquationSearchArchive::default();
+        }
+    };
+    if archive.version != EQUATION_SEARCH_ARCHIVE_VERSION {
+        eprintln!(
+            "equation search archive version mismatch (found {}, expected {}), continuing with defaults where needed",
+            archive.version,
+            EQUATION_SEARCH_ARCHIVE_VERSION
+        );
+        archive.version = EQUATION_SEARCH_ARCHIVE_VERSION.to_string();
+    }
+    archive
+}
+
+fn save_equation_search_archive(
+    path: &std::path::Path,
+    archive: &EquationSearchArchive,
+) -> anyhow::Result<()> {
+    fs::write(path, serde_json::to_string_pretty(archive)?)?;
+    Ok(())
+}
+
+fn update_equation_search_archive(
+    archive: &mut EquationSearchArchive,
+    candidates: &[CandidateSummary],
+    feature_names: &[String],
+    iteration: usize,
+    max_candidates: usize,
+) {
+    let mut ordered = candidates.iter().collect::<Vec<_>>();
+    ordered.sort_by(|a, b| {
+        metrics_sort_key(&a.metrics)
+            .partial_cmp(&metrics_sort_key(&b.metrics))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    for candidate in ordered.into_iter().take(max_candidates.max(1)) {
+        let score = candidate_scalar_score(&candidate.metrics);
+        if !score.is_finite() {
+            continue;
+        }
+        let normalized = normalize_equation_text_for_features(&candidate.equation_text, feature_names)
+            .unwrap_or_else(|| candidate.equation_text.clone());
+        let descriptor = EquationDescriptor::from_equation_text(&normalized);
+        let source = source_from_notes(&candidate.notes);
+        archive.total_updates += 1;
+
+        if let Some(node) = archive
+            .nodes
+            .iter_mut()
+            .find(|node| node.equation_text == normalized)
+        {
+            let prior_best = node.best_score;
+            node.visits += 1;
+            node.mean_score += (score - node.mean_score) / node.visits as f64;
+            if score + 1e-12 < prior_best {
+                node.best_score = score;
+                node.improvements += 1;
+            }
+            node.last_seen_iter = iteration;
+            node.descriptor = descriptor;
+            *node.source_counts.entry(source).or_insert(0) += 1;
+        } else {
+            let mut source_counts = std::collections::BTreeMap::new();
+            source_counts.insert(source, 1);
+            archive.nodes.push(EquationSearchNode {
+                equation_text: normalized,
+                visits: 1,
+                mean_score: score,
+                best_score: score,
+                last_seen_iter: iteration,
+                improvements: 0,
+                descriptor,
+                source_counts,
+            });
+        }
+    }
+
+    archive.nodes.sort_by(|a, b| {
+        a.best_score
+            .partial_cmp(&b.best_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.mean_score
+                    .partial_cmp(&b.mean_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| b.visits.cmp(&a.visits))
+    });
+    if archive.nodes.len() > 512 {
+        archive.nodes.truncate(512);
+    }
+}
+
+fn mcts_uct_score(node: &EquationSearchNode, total_visits: usize, explore_c: f64) -> f64 {
+    if !node.best_score.is_finite() {
+        return f64::NEG_INFINITY;
+    }
+    let exploit = 1.0 / (1.0 + node.best_score.max(0.0));
+    let explore = ((total_visits.max(1) as f64).ln() / (node.visits as f64 + 1.0)).sqrt();
+    exploit + explore_c * explore
+}
+
+fn archive_select_parents_mcts(
+    archive: &EquationSearchArchive,
+    feature_names: &[String],
+    seen: &std::collections::HashSet<String>,
+    max_parents: usize,
+    explore_c: f64,
+) -> Vec<(String, String)> {
+    let total_visits = archive.nodes.iter().map(|n| n.visits.max(1)).sum::<usize>();
+    let mut scored = Vec::new();
+    for node in &archive.nodes {
+        let Some(norm) = normalize_equation_text_for_features(&node.equation_text, feature_names) else {
+            continue;
+        };
+        if seen.contains(&norm) {
+            continue;
+        }
+        let uct = mcts_uct_score(node, total_visits, explore_c);
+        if uct.is_finite() {
+            scored.push((uct, norm));
+        }
+    }
+
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored
+        .into_iter()
+        .take(max_parents)
+        .enumerate()
+        .map(|(rank, (_uct, equation_text))| {
+            (format!("equation_mcts_uct_rank{}", rank + 1), equation_text)
+        })
+        .collect()
+}
+
+fn top_equation_search_nodes(archive: &EquationSearchArchive, k: usize) -> Vec<&EquationSearchNode> {
+    archive.nodes.iter().take(k).collect()
+}
+
+fn render_equation_search_report_md(
+    archive: &EquationSearchArchive,
+    settings: EquationSearchSettings,
+    max_rows: usize,
+) -> String {
+    let mut md = String::new();
+    md.push_str("# Equation Search Report\n\n");
+    md.push_str(&format!("- version: {}\n", archive.version));
+    md.push_str(&format!(
+        "- policy: mcts_uct(c={}), exploit=1/(1+best_score)\n",
+        settings.uct_explore_c
+    ));
+    md.push_str(&format!(
+        "- archive_update_topk: {}\n",
+        settings.archive_update_topk
+    ));
+    md.push_str(&format!(
+        "- mcts_parent_limit: {}\n",
+        settings.mcts_parent_limit
+    ));
+    md.push_str(&format!("- total_updates: {}\n", archive.total_updates));
+    md.push_str(&format!("- node_count: {}\n", archive.nodes.len()));
+    md.push_str("\n## Top Equations\n");
+    if archive.nodes.is_empty() {
+        md.push_str("No equations recorded yet.\n");
+        return md;
+    }
+    for (rank, node) in archive.nodes.iter().take(max_rows).enumerate() {
+        let source_summary = if node.source_counts.is_empty() {
+            "unknown=0".to_string()
+        } else {
+            node.source_counts
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        md.push_str(&format!(
+            "{}. best_score={:.6e}, mean_score={:.6e}, visits={}, improvements={}, last_iter={}, descriptor={}, sources={}\n",
+            rank + 1,
+            node.best_score,
+            node.mean_score,
+            node.visits,
+            node.improvements,
+            node.last_seen_iter,
+            node.descriptor.short_label(),
+            source_summary
+        ));
+        md.push_str(&format!(
+            "   eq: {}\n",
+            truncate_to_chars(&single_line(&node.equation_text), 220)
+        ));
+    }
+    md
 }
 
 fn best_record_sort_key(record: &BestRecord) -> (f64, f64, usize) {
@@ -4429,8 +5236,16 @@ fn best_record_sort_key(record: &BestRecord) -> (f64, f64, usize) {
         .and_then(|b| b.rmse_mean)
         .or(record.metrics.rollout_rmse)
         .unwrap_or(f64::INFINITY);
-    let rollout_rmse = if rollout_rmse.is_finite() { rollout_rmse } else { f64::INFINITY };
-    let mse = if record.metrics.mse.is_finite() { record.metrics.mse } else { f64::INFINITY };
+    let rollout_rmse = if rollout_rmse.is_finite() {
+        rollout_rmse
+    } else {
+        f64::INFINITY
+    };
+    let mse = if record.metrics.mse.is_finite() {
+        record.metrics.mse
+    } else {
+        f64::INFINITY
+    };
     (rollout_rmse, mse, record.metrics.complexity)
 }
 
@@ -4558,7 +5373,10 @@ fn find_best_prior_attempt(
         let key = metrics_sort_key(&best.candidate.metrics);
         if best_key.map_or(true, |bk| key < bk) {
             best_key = Some(key);
-            let factory_dir = path.parent().unwrap_or_else(|| std::path::Path::new(".")).to_path_buf();
+            let factory_dir = path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .to_path_buf();
             best_prior = Some(PriorAttemptBest {
                 factory_dir,
                 eval_input_path: path,
@@ -4669,7 +5487,10 @@ fn bucket_from_notes(notes: &[String]) -> Option<BucketKey> {
     Some(BucketKey { steps, dt })
 }
 
-fn collect_factory_eval_input_paths(root: &std::path::Path, out: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+fn collect_factory_eval_input_paths(
+    root: &std::path::Path,
+    out: &mut Vec<PathBuf>,
+) -> anyhow::Result<()> {
     if !root.exists() {
         return Ok(());
     }
@@ -4734,20 +5555,25 @@ fn best_record_from_eval_input_path(path: &std::path::Path) -> Option<BestRecord
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf();
 
-    let ic: Option<InitialConditionSpec> = fs::read_to_string(factory_dir.join(&best.run_id).join("initial_conditions.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str(&raw).ok());
+    let ic: Option<InitialConditionSpec> = fs::read_to_string(
+        factory_dir
+            .join(&best.run_id)
+            .join("initial_conditions.json"),
+    )
+    .ok()
+    .and_then(|raw| serde_json::from_str(&raw).ok());
 
-    let benchmark: Option<BenchmarkAggregate> = fs::read_to_string(factory_dir.join("benchmark_eval.json"))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<BenchmarkEvalV1>(&raw).ok())
-        .and_then(|bm| {
-            if bm.bucket.matches(&bucket) && bm.regime == best.regime {
-                Some(bm.aggregate)
-            } else {
-                None
-            }
-        });
+    let benchmark: Option<BenchmarkAggregate> =
+        fs::read_to_string(factory_dir.join("benchmark_eval.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_str::<BenchmarkEvalV1>(&raw).ok())
+            .and_then(|bm| {
+                if bm.bucket.matches(&bucket) && bm.regime == best.regime {
+                    Some(bm.aggregate)
+                } else {
+                    None
+                }
+            });
 
     Some(BestRecord {
         bucket,
@@ -4779,7 +5605,9 @@ fn scan_best_results(results_root: &std::path::Path) -> anyhow::Result<BestResul
             .position(|e| e.bucket.matches(&record.bucket));
         if let Some(idx) = existing_idx {
             let existing_key = best_record_sort_key(&buckets[idx]);
-            if key < existing_key || (key == existing_key && record.eval_input_path < buckets[idx].eval_input_path) {
+            if key < existing_key
+                || (key == existing_key && record.eval_input_path < buckets[idx].eval_input_path)
+            {
                 buckets[idx] = record;
             }
         } else {
@@ -4791,7 +5619,12 @@ fn scan_best_results(results_root: &std::path::Path) -> anyhow::Result<BestResul
         a.bucket
             .steps
             .cmp(&b.bucket.steps)
-            .then_with(|| a.bucket.dt.partial_cmp(&b.bucket.dt).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                a.bucket
+                    .dt
+                    .partial_cmp(&b.bucket.dt)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .then_with(|| a.eval_input_path.cmp(&b.eval_input_path))
     });
 
@@ -4824,7 +5657,9 @@ fn render_best_results_md(index: &BestResultsIndexV1, progress: &[BucketProgress
     md.push_str(&format!("Last updated: `{}`\n\n", index.updated_at_utc));
 
     md.push_str("## Executive Summary\n\n");
-    md.push_str("- This file is the single top-level place to see the best discovered equations so far.\n");
+    md.push_str(
+        "- This file is the single top-level place to see the best discovered equations so far.\n",
+    );
     md.push_str("- Comparator: minimize `benchmark_rmse_mean` (when present), else `rollout_rmse`, then `mse` (complexity only breaks ties).\n");
     md.push_str("- Buckets: grouped by `(steps, dt)` to avoid apples-to-oranges comparisons.\n");
     md.push_str("- Safety: runs are skipped if the oracle simulation terminated early or did not reach `steps+1` samples.\n");
@@ -4834,18 +5669,20 @@ fn render_best_results_md(index: &BestResultsIndexV1, progress: &[BucketProgress
     }
     md.push_str("\nTracked buckets:\n");
     for rec in &index.buckets {
-        md.push_str(&format!("- steps={}, dt={}\n", rec.bucket.steps, rec.bucket.dt));
+        md.push_str(&format!(
+            "- steps={}, dt={}\n",
+            rec.bucket.steps, rec.bucket.dt
+        ));
     }
 
-    let highlight = index
-        .buckets
-        .iter()
-        .max_by(|a, b| a.bucket.steps.cmp(&b.bucket.steps).then_with(|| {
+    let highlight = index.buckets.iter().max_by(|a, b| {
+        a.bucket.steps.cmp(&b.bucket.steps).then_with(|| {
             a.bucket
                 .dt
                 .partial_cmp(&b.bucket.dt)
                 .unwrap_or(std::cmp::Ordering::Equal)
-        }));
+        })
+    });
     if let Some(best) = highlight {
         md.push_str("\n## Most Realistic / Longest-Horizon Bucket (Largest steps)\n\n");
         md.push_str(&format!(
@@ -4880,7 +5717,10 @@ fn render_best_results_md(index: &BestResultsIndexV1, progress: &[BucketProgress
 
     md.push_str("\n## Current Incumbents\n\n");
     for rec in &index.buckets {
-        md.push_str(&format!("### steps={}, dt={}\n\n", rec.bucket.steps, rec.bucket.dt));
+        md.push_str(&format!(
+            "### steps={}, dt={}\n\n",
+            rec.bucket.steps, rec.bucket.dt
+        ));
         if let Some(bm) = rec.benchmark.as_ref() {
             md.push_str(&format!(
                 "- Benchmark: rmse_mean={}, rmse_max={}, rollout_integrator={}, suite_id={}\n",
@@ -5012,7 +5852,8 @@ fn compute_bucket_progress(
 
         // Also compute a small "equation hall of fame" for this bucket: best attempt per unique equation.
         // This makes it easy for humans (and downstream tools) to see what different math was actually tried.
-        let mut unique: std::collections::HashMap<String, BestRecord> = std::collections::HashMap::new();
+        let mut unique: std::collections::HashMap<String, BestRecord> =
+            std::collections::HashMap::new();
         for mut rec in bucket_records.clone() {
             let feature_names = feature_names_for_equation_text(&rec.equation_text);
             let norm = normalize_equation_text_for_features(&rec.equation_text, &feature_names)
@@ -5045,10 +5886,12 @@ fn compute_bucket_progress(
         });
     }
     out.sort_by(|a, b| {
-        a.bucket
-            .steps
-            .cmp(&b.bucket.steps)
-            .then_with(|| a.bucket.dt.partial_cmp(&b.bucket.dt).unwrap_or(std::cmp::Ordering::Equal))
+        a.bucket.steps.cmp(&b.bucket.steps).then_with(|| {
+            a.bucket
+                .dt
+                .partial_cmp(&b.bucket.dt)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     });
     Ok(out)
 }
@@ -5062,7 +5905,10 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
     tex.push_str("\\usepackage{longtable}\n");
     tex.push_str("\\usepackage{hyperref}\n");
     tex.push_str("\\title{Threebody: Best Discovered Equations (Auto-Generated)}\n");
-    tex.push_str(&format!("\\date{{{}}}\n", escape_latex(&index.updated_at_utc)));
+    tex.push_str(&format!(
+        "\\date{{{}}}\n",
+        escape_latex(&index.updated_at_utc)
+    ));
     tex.push_str("\\begin{document}\n");
     tex.push_str("\\maketitle\n\n");
 
@@ -5071,7 +5917,9 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
     tex.push_str(
         "Comparator: minimize benchmark\\_rmse\\_mean (when available), else rollout\\_rmse, then mse (complexity only breaks ties).\\\\\n",
     );
-    tex.push_str("Buckets are grouped by (steps, dt) to avoid apples-to-oranges comparisons.\\\\\n\n");
+    tex.push_str(
+        "Buckets are grouped by (steps, dt) to avoid apples-to-oranges comparisons.\\\\\n\n",
+    );
     tex.push_str("Safety: runs are skipped if the oracle simulation terminated early or did not reach the requested horizon.\\\\\n\n");
     tex.push_str(
         "For each bucket, we also embed small excerpts from the run’s evaluation logs (executive summary + optional LLM narrative) to aid interpretation without chasing files.\\\\\n\n",
@@ -5121,15 +5969,21 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
     tex.push_str("If the improvement says ``no change'', it typically means we are deterministically rediscovering the same law with the same settings, or that the discovery problem is already saturated under the current feature library.\\\\\n\n");
 
     if index.buckets.is_empty() {
-        tex.push_str("No runs found yet under \\texttt{results/**/factory/evaluation\\_input.json}.\\\\\n\n");
+        tex.push_str(
+            "No runs found yet under \\texttt{results/**/factory/evaluation\\_input.json}.\\\\\n\n",
+        );
         tex.push_str("\\end{document}\n");
         return tex;
     }
 
-    let highlight = index
-        .buckets
-        .iter()
-        .max_by(|a, b| a.bucket.steps.cmp(&b.bucket.steps).then_with(|| a.bucket.dt.partial_cmp(&b.bucket.dt).unwrap_or(std::cmp::Ordering::Equal)));
+    let highlight = index.buckets.iter().max_by(|a, b| {
+        a.bucket.steps.cmp(&b.bucket.steps).then_with(|| {
+            a.bucket
+                .dt
+                .partial_cmp(&b.bucket.dt)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    });
     if let Some(best) = highlight {
         tex.push_str("\\subsection*{Most stringent bucket (largest steps)}\n");
         tex.push_str(&format!(
@@ -5209,7 +6063,10 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
                 "Barycentric: \\texttt{{{}}}.\\\\\n",
                 if ic.barycentric { "true" } else { "false" }
             ));
-            tex.push_str(&format!("Notes: \\texttt{{{}}}.\\\\\n\n", escape_latex(&ic.notes)));
+            tex.push_str(&format!(
+                "Notes: \\texttt{{{}}}.\\\\\n\n",
+                escape_latex(&ic.notes)
+            ));
             tex.push_str("\\begin{longtable}{lrrrrrrrr}\n");
             tex.push_str("\\toprule\n");
             tex.push_str("Body & m & q & x & y & z & v_x & v_y & v_z\\\\\n");
@@ -5217,15 +6074,7 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
             for (i, b) in ic.bodies.iter().enumerate() {
                 tex.push_str(&format!(
                     "{} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6}\\\\\n",
-                    i,
-                    b.mass,
-                    b.charge,
-                    b.pos[0],
-                    b.pos[1],
-                    b.pos[2],
-                    b.vel[0],
-                    b.vel[1],
-                    b.vel[2],
+                    i, b.mass, b.charge, b.pos[0], b.pos[1], b.pos[2], b.vel[0], b.vel[1], b.vel[2],
                 ));
             }
             tex.push_str("\\bottomrule\n");
@@ -5264,7 +6113,9 @@ fn render_findings_tex(index: &BestResultsIndexV1, progress: &[BucketProgress]) 
     }
 
     tex.push_str("\\section*{How to Reproduce}\n");
-    tex.push_str("The simplest workflow runs 10 quickstarts and then regenerates this report:\\\\\n");
+    tex.push_str(
+        "The simplest workflow runs 10 quickstarts and then regenerates this report:\\\\\n",
+    );
     tex.push_str("\\begin{verbatim}\n");
     tex.push_str("just quickstart10 1000\n");
     tex.push_str("cargo run -p threebody-cli -- findings\n");
@@ -5370,7 +6221,10 @@ fn wrap_one_line(mut line: &str, width: usize) -> String {
         }
 
         let (head, tail) = match break_byte {
-            Some(b) if b > 0 => (&line[..b], line[b..].trim_start_matches(|c: char| c.is_whitespace())),
+            Some(b) if b > 0 => (
+                &line[..b],
+                line[b..].trim_start_matches(|c: char| c.is_whitespace()),
+            ),
             _ => {
                 let b = line
                     .char_indices()
@@ -5390,7 +6244,10 @@ fn wrap_one_line(mut line: &str, width: usize) -> String {
     out
 }
 
-fn write_best_results(results_root: &std::path::Path, index: &BestResultsIndexV1) -> anyhow::Result<()> {
+fn write_best_results(
+    results_root: &std::path::Path,
+    index: &BestResultsIndexV1,
+) -> anyhow::Result<()> {
     fs::create_dir_all(results_root)?;
     let json_path = results_root.join("best_results.json");
     let md_path = results_root.join("best_results.md");
@@ -5444,7 +6301,10 @@ fn load_best_results_index(results_root: &std::path::Path) -> Option<BestResults
     serde_json::from_str(&raw).ok()
 }
 
-fn load_incumbent_for_bucket(results_root: &std::path::Path, bucket: &BucketKey) -> Option<BestRecord> {
+fn load_incumbent_for_bucket(
+    results_root: &std::path::Path,
+    bucket: &BucketKey,
+) -> Option<BestRecord> {
     if let Some(index) = load_best_results_index(results_root) {
         if let Some(hit) = index.buckets.into_iter().find(|r| r.bucket.matches(bucket)) {
             return Some(hit);
@@ -5525,7 +6385,8 @@ fn basis_usage_from_equation_text(text: &str) -> BasisUsage {
 
 fn feature_names_for_equation_text(equation_text: &str) -> Vec<String> {
     let default = FeatureLibrary::default_physics();
-    let default_set: std::collections::HashSet<&str> = default.features.iter().map(|s| s.as_str()).collect();
+    let default_set: std::collections::HashSet<&str> =
+        default.features.iter().map(|s| s.as_str()).collect();
     let [tx, ty, tz] = parse_vector_equation_terms(equation_text);
     let mut uses_extended = false;
     for (_, f) in tx.iter().chain(ty.iter()).chain(tz.iter()) {
@@ -5541,9 +6402,13 @@ fn feature_names_for_equation_text(equation_text: &str) -> Vec<String> {
     }
 }
 
-fn normalize_equation_text_for_features(equation_text: &str, feature_names: &[String]) -> Option<String> {
+fn normalize_equation_text_for_features(
+    equation_text: &str,
+    feature_names: &[String],
+) -> Option<String> {
     let mut model = vector_model_from_equation_text(equation_text)?;
-    let allowed: std::collections::HashSet<&str> = feature_names.iter().map(|s| s.as_str()).collect();
+    let allowed: std::collections::HashSet<&str> =
+        feature_names.iter().map(|s| s.as_str()).collect();
     for eq in [&mut model.eq_x, &mut model.eq_y, &mut model.eq_z] {
         eq.terms
             .retain(|t| t.coeff.is_finite() && allowed.contains(t.feature.as_str()));
@@ -5739,7 +6604,8 @@ fn propose_equation_mutants(
         mutate_axis(&mut my, &pool_y, &mut rng, max_terms);
         mutate_axis(&mut mz, &pool_z, &mut rng, max_terms);
 
-        let eq = format_vector_equation_text([map_to_terms(mx), map_to_terms(my), map_to_terms(mz)]);
+        let eq =
+            format_vector_equation_text([map_to_terms(mx), map_to_terms(my), map_to_terms(mz)]);
         let Some(norm) = normalize_equation_text_for_features(&eq, feature_names) else {
             continue;
         };
@@ -5840,7 +6706,10 @@ fn render_expanded_math_md(equation_text: &str) -> String {
                 out.push_str(sign);
                 out.push(' ');
             }
-            out.push_str(&format!("{abs:.6} * {}", feature_to_math_symbol(feature, axis)));
+            out.push_str(&format!(
+                "{abs:.6} * {}",
+                feature_to_math_symbol(feature, axis)
+            ));
         }
         out
     }
@@ -5860,10 +6729,14 @@ fn render_expanded_math_md(equation_text: &str) -> String {
         md.push_str("g_i^* = Σ_{j≠i} m_j * (r_j - r_i) / ||r_j - r_i||^3    (no G)\n");
     }
     if usage.elec {
-        md.push_str("e_i^* = (q_i/m_i) * Σ_{j≠i} q_j * (r_i - r_j) / ||r_i - r_j||^3    (no k_e)\n");
+        md.push_str(
+            "e_i^* = (q_i/m_i) * Σ_{j≠i} q_j * (r_i - r_j) / ||r_i - r_j||^3    (no k_e)\n",
+        );
     }
     if usage.mag {
-        md.push_str("B_i^* = (1/4π) * Σ_{j≠i} q_j * (v_j × (r_i - r_j)) / ||r_i - r_j||^3    (no μ0)\n");
+        md.push_str(
+            "B_i^* = (1/4π) * Σ_{j≠i} q_j * (v_j × (r_i - r_j)) / ||r_i - r_j||^3    (no μ0)\n",
+        );
         md.push_str("b_i^* = (q_i/m_i) * (v_i × B_i^*)    (no μ0)\n");
     }
     md.push_str("```\n\n");
@@ -5872,7 +6745,9 @@ fn render_expanded_math_md(equation_text: &str) -> String {
     md
 }
 
-fn best_candidate_in_iteration(iter: &FactoryEvaluationIteration) -> Option<&FactoryEvaluationCandidate> {
+fn best_candidate_in_iteration(
+    iter: &FactoryEvaluationIteration,
+) -> Option<&FactoryEvaluationCandidate> {
     let mut best: Option<&FactoryEvaluationCandidate> = None;
     let mut best_key: Option<(f64, f64, usize)> = None;
     for cand in &iter.top_candidates {
@@ -5917,13 +6792,15 @@ fn load_oracle_run_from_dir(run_dir: &std::path::Path) -> anyhow::Result<OracleR
         cfg,
         result: threebody_core::sim::SimResult {
             steps,
-            encounter: sidecar.encounter.map(|e| threebody_core::sim::EncounterEvent {
-                step: e.step,
-                min_pair_dist: e.min_pair_dist,
-                epsilon_before: e.epsilon_before,
-                epsilon_after: e.epsilon_after,
-                substeps_used: e.substeps_used,
-            }),
+            encounter: sidecar
+                .encounter
+                .map(|e| threebody_core::sim::EncounterEvent {
+                    step: e.step,
+                    min_pair_dist: e.min_pair_dist,
+                    epsilon_before: e.epsilon_before,
+                    epsilon_after: e.epsilon_after,
+                    substeps_used: e.substeps_used,
+                }),
             encounter_action: sidecar.encounter_action,
             warnings: sidecar.warnings,
             terminated_early: sidecar.terminated_early,
@@ -6216,7 +7093,9 @@ fn render_evaluation_tex(
             if let Some(eq) = j.recommendations.next_manual_equation_text.as_ref() {
                 let trimmed = eq.trim();
                 if !trimmed.is_empty() {
-                    tex.push_str("\\noindent\\textbf{LLM proposed next equation (hypothesis):}\\\\\n");
+                    tex.push_str(
+                        "\\noindent\\textbf{LLM proposed next equation (hypothesis):}\\\\\n",
+                    );
                     tex.push_str("\\begin{verbatim}\n");
                     tex.push_str(trimmed);
                     tex.push_str("\n\\end{verbatim}\n\n");
@@ -6231,7 +7110,10 @@ fn render_evaluation_tex(
             "Barycentric: \\texttt{{{}}}.\\\\\n",
             if ic.barycentric { "true" } else { "false" }
         ));
-        tex.push_str(&format!("Notes: \\texttt{{{}}}.\\\\\n\n", escape_latex(&ic.notes)));
+        tex.push_str(&format!(
+            "Notes: \\texttt{{{}}}.\\\\\n\n",
+            escape_latex(&ic.notes)
+        ));
         tex.push_str("\\begin{longtable}{lrrrrrrrr}\n");
         tex.push_str("\\toprule\n");
         tex.push_str("Body & m & q & x & y & z & v_x & v_y & v_z\\\\\n");
@@ -6239,15 +7121,7 @@ fn render_evaluation_tex(
         for (i, b) in ic.bodies.iter().enumerate() {
             tex.push_str(&format!(
                 "{} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6} & {:.6}\\\\\n",
-                i,
-                b.mass,
-                b.charge,
-                b.pos[0],
-                b.pos[1],
-                b.pos[2],
-                b.vel[0],
-                b.vel[1],
-                b.vel[2],
+                i, b.mass, b.charge, b.pos[0], b.pos[1], b.pos[2], b.vel[0], b.vel[1], b.vel[2],
             ));
         }
         tex.push_str("\\bottomrule\n");
@@ -6270,7 +7144,10 @@ fn render_evaluation_tex(
             format_opt_f64(cm.rollout_rmse)
         ));
         tex.push_str(&format!("mse & {:.6e} & {:.6e}\\\\\n", pm.mse, cm.mse));
-        tex.push_str(&format!("complexity & {} & {}\\\\\n", pm.complexity, cm.complexity));
+        tex.push_str(&format!(
+            "complexity & {} & {}\\\\\n",
+            pm.complexity, cm.complexity
+        ));
         tex.push_str("\\bottomrule\n");
         tex.push_str("\\end{tabular}\n\n");
         tex.push_str(&format!(
@@ -6505,7 +7382,9 @@ fn render_evaluation_tex(
 
     if let Some(bm) = opts.benchmark {
         tex.push_str("\\subsection*{Held-out Benchmark (Fixed IC Suite)}\n");
-        tex.push_str("This is an apples-to-apples check across runs in the same (steps, dt) bucket.\\\\\n");
+        tex.push_str(
+            "This is an apples-to-apples check across runs in the same (steps, dt) bucket.\\\\\n",
+        );
         tex.push_str(&format!(
             "suite\\_id=\\texttt{{{}}}, cases={}, rollout\\_integrator=\\texttt{{{}}}.{}\\\\\n",
             escape_latex(&bm.aggregate.suite_id),
@@ -6554,7 +7433,10 @@ fn render_executive_summary_md(
     match current_best {
         Some(best) => {
             let m = &best.candidate.metrics;
-            md.push_str(&format!("- Best run: `{}` (regime: `{}`)\n", best.run_id, best.regime));
+            md.push_str(&format!(
+                "- Best run: `{}` (regime: `{}`)\n",
+                best.run_id, best.regime
+            ));
             md.push_str(&format!(
                 "- Best metrics: rollout_rmse={}, mse={:.6e}, complexity={}, divergence_time={}\n",
                 format_opt_f64(m.rollout_rmse),
@@ -6568,13 +7450,20 @@ fn render_executive_summary_md(
             md.push_str("\n```\n");
             md.push_str(&render_expanded_math_md(&best.candidate.equation_text));
 
-            if let Some(iter) = eval_input.iterations.iter().find(|it| it.run_id == best.run_id) {
+            if let Some(iter) = eval_input
+                .iterations
+                .iter()
+                .find(|it| it.run_id == best.run_id)
+            {
                 if let Some(sim) = iter.simulation.as_ref() {
                     md.push_str("\n## Best-Run Physics Diagnostics\n");
                     md.push_str(&format!("- produced_samples={}\n", sim.steps));
                     if let Some(req) = sim.requested_steps {
                         let expected = req.saturating_add(1);
-                        md.push_str(&format!("- requested_steps={} (expected_samples={})\n", req, expected));
+                        md.push_str(&format!(
+                            "- requested_steps={} (expected_samples={})\n",
+                            req, expected
+                        ));
                     }
                     if let Some(dt) = sim.requested_dt {
                         md.push_str(&format!("- requested_dt={dt}\n"));
@@ -6598,8 +7487,14 @@ fn render_executive_summary_md(
                             md.push_str(&format!("  - action={action}\n"));
                         }
                     }
-                    md.push_str(&format!("- min_pair_dist={}\n", format_opt_f64(sim.min_pair_dist)));
-                    md.push_str(&format!("- energy_drift={}\n", format_opt_f64(sim.energy_drift)));
+                    md.push_str(&format!(
+                        "- min_pair_dist={}\n",
+                        format_opt_f64(sim.min_pair_dist)
+                    ));
+                    md.push_str(&format!(
+                        "- energy_drift={}\n",
+                        format_opt_f64(sim.energy_drift)
+                    ));
                     md.push_str(&format!(
                         "- mean_abs_accel_grav={}\n",
                         format_opt_f64(sim.mean_abs_accel_grav)
@@ -6612,7 +7507,10 @@ fn render_executive_summary_md(
                         "- mean(|a_em|)/mean(|a_grav|)={}\n",
                         format_opt_f64(sim.mean_abs_accel_ratio_em_over_grav)
                     ));
-                    md.push_str(&format!("- rollout_integrator={}\n", sim.rollout_integrator));
+                    md.push_str(&format!(
+                        "- rollout_integrator={}\n",
+                        sim.rollout_integrator
+                    ));
                     if !sim.warnings.is_empty() {
                         md.push_str(&format!("- warnings: {}\n", sim.warnings.join("; ")));
                     }
@@ -6786,7 +7684,9 @@ fn parse_csv_f64_list(raw: &str) -> anyhow::Result<Vec<f64>> {
         if t.is_empty() {
             continue;
         }
-        let v: f64 = t.parse().map_err(|e| anyhow::anyhow!("invalid f64 '{t}': {e}"))?;
+        let v: f64 = t
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid f64 '{t}': {e}"))?;
         values.push(v);
     }
     Ok(values)
@@ -6824,12 +7724,20 @@ fn initial_conditions_from_preset(preset: &str) -> anyhow::Result<InitialConditi
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use threebody_core::diagnostics::Diagnostics;
+    use threebody_core::regime::RegimeDiagnostics;
+    use threebody_core::sim::{SimResult, SimStats, SimStep};
     use threebody_discover::Equation;
 
     fn unique_temp_path(name: &str, ext: &str) -> PathBuf {
         static COUNTER: AtomicUsize = AtomicUsize::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("threebody_cli_test_{name}_{}_{}.{}", std::process::id(), n, ext))
+        std::env::temp_dir().join(format!(
+            "threebody_cli_test_{name}_{}_{}.{}",
+            std::process::id(),
+            n,
+            ext
+        ))
     }
 
     #[test]
@@ -6878,12 +7786,126 @@ mod tests {
             eq_y: Equation { terms: vec![] },
             eq_z: Equation { terms: vec![] },
         };
-        let (rmse_e, _div_e) =
-            rollout_metrics(&model, &vec_data.feature_names, &result, &cfg, RolloutIntegrator::Euler);
-        let (rmse_l, _div_l) =
-            rollout_metrics(&model, &vec_data.feature_names, &result, &cfg, RolloutIntegrator::Leapfrog);
+        let (rmse_e, _div_e) = rollout_metrics(
+            &model,
+            &vec_data.feature_names,
+            &result,
+            &cfg,
+            RolloutIntegrator::Euler,
+        );
+        let (rmse_l, _div_l) = rollout_metrics(
+            &model,
+            &vec_data.feature_names,
+            &result,
+            &cfg,
+            RolloutIntegrator::Leapfrog,
+        );
         assert!(rmse_e.is_finite());
         assert!(rmse_l.is_finite());
+    }
+
+    #[test]
+    fn vector_candidate_grid_uses_cross_axis_combinations() {
+        let cfg = Config::default();
+        let dt = 0.1;
+        let bodies = [Body::new(0.0, 0.0); 3];
+        let pos = [
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 2.0, 0.0),
+        ];
+        let vel = [Vec3::zero(); 3];
+        let system = System::new(bodies, State::new(pos, vel));
+        let step = SimStep {
+            system: system.clone(),
+            diagnostics: Diagnostics {
+                linear_momentum: Vec3::zero(),
+                angular_momentum: Vec3::zero(),
+                energy_proxy: 0.0,
+            },
+            regime: RegimeDiagnostics {
+                min_pair_dist: 1.0,
+                max_speed: 0.0,
+                max_accel: 0.0,
+                dt_ratio: 0.0,
+            },
+            t: 0.0,
+            dt,
+        };
+        let result = SimResult {
+            steps: vec![step.clone(), SimStep { t: dt, ..step }],
+            encounter: None,
+            encounter_action: None,
+            warnings: vec![],
+            terminated_early: false,
+            termination_reason: None,
+            stats: SimStats {
+                accepted_steps: 1,
+                rejected_steps: 0,
+                dt_min: Some(dt),
+                dt_max: Some(dt),
+                dt_avg: Some(dt),
+            },
+        };
+
+        let mk_eq = |feature: &str, coeff: f64| Equation {
+            terms: vec![threebody_discover::equation::Term {
+                feature: feature.to_string(),
+                coeff,
+            }],
+        };
+        let topk_x = vec![
+            threebody_discover::EquationScore {
+                equation: mk_eq("grav_x", 1.0),
+                score: 1.0,
+            },
+            threebody_discover::EquationScore {
+                equation: mk_eq("grav_x", 2.0),
+                score: 10.0,
+            },
+        ];
+        let topk_y = vec![
+            threebody_discover::EquationScore {
+                equation: mk_eq("grav_y", 1.0),
+                score: 10.0,
+            },
+            threebody_discover::EquationScore {
+                equation: mk_eq("grav_y", 2.0),
+                score: 1.0,
+            },
+        ];
+        let topk_z = vec![
+            threebody_discover::EquationScore {
+                equation: mk_eq("grav_z", 1.0),
+                score: 10.0,
+            },
+            threebody_discover::EquationScore {
+                equation: mk_eq("grav_z", 2.0),
+                score: 1.0,
+            },
+        ];
+
+        let feature_names = vec![
+            "grav_x".to_string(),
+            "grav_y".to_string(),
+            "grav_z".to_string(),
+        ];
+        let candidates = build_vector_candidates(
+            &topk_x,
+            &topk_y,
+            &topk_z,
+            &feature_names,
+            &result,
+            &cfg,
+            "gravity_only",
+            RolloutIntegrator::Euler,
+        );
+        assert!(!candidates.is_empty());
+        let best = &candidates[0];
+        assert!(best.equation_text.contains("ax=+1.000000*grav_x"));
+        assert!(best.equation_text.contains("ay=+2.000000*grav_y"));
+        assert!(best.equation_text.contains("az=+2.000000*grav_z"));
+        assert!(best.metrics.mse <= 1.0 + 1e-12);
     }
 
     #[test]
@@ -6894,7 +7916,11 @@ mod tests {
         cfg.integrator.kind = IntegratorKind::Leapfrog;
         cfg.integrator.adaptive = false;
 
-        let bodies = [Body::new(1.0, 1.0), Body::new(1.0, -1.0), Body::new(1.0, 1.0)];
+        let bodies = [
+            Body::new(1.0, 1.0),
+            Body::new(1.0, -1.0),
+            Body::new(1.0, 1.0),
+        ];
         let pos = [
             Vec3::new(-0.6, 0.0, 0.0),
             Vec3::new(0.6, 0.0, 0.0),
@@ -6911,9 +7937,7 @@ mod tests {
 
         let grav = sim.mean_abs_accel_grav.expect("grav mean");
         let em = sim.mean_abs_accel_em.expect("em mean");
-        let ratio = sim
-            .mean_abs_accel_ratio_em_over_grav
-            .expect("ratio mean");
+        let ratio = sim.mean_abs_accel_ratio_em_over_grav.expect("ratio mean");
         assert!(grav.is_finite() && grav > 0.0);
         assert!(em.is_finite() && em > 0.0);
         assert!(ratio.is_finite() && ratio > 0.0);
@@ -6926,7 +7950,11 @@ mod tests {
         cfg.enable_em = true;
 
         // Force a "close" configuration so gate_close=1.
-        let bodies = [Body::new(1.0, 0.1), Body::new(1.0, -0.1), Body::new(1.0, 0.1)];
+        let bodies = [
+            Body::new(1.0, 0.1),
+            Body::new(1.0, -0.1),
+            Body::new(1.0, 0.1),
+        ];
         let pos = [
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(0.3, 0.0, 0.0),
@@ -7165,7 +8193,10 @@ mod tests {
         )
         .unwrap();
 
-        let exclude = root.join("current").join("factory").join("evaluation_input.json");
+        let exclude = root
+            .join("current")
+            .join("factory")
+            .join("evaluation_input.json");
         let best = find_best_prior_attempt(&root, &exclude, &PriorAttemptFilter::default())
             .unwrap()
             .unwrap();
@@ -7189,7 +8220,8 @@ mod tests {
         for line in out.lines() {
             let trimmed = line.trim_start_matches(|c: char| c.is_whitespace());
             assert!(
-                !trimmed.starts_with("\\end{verbatim}") && !trimmed.starts_with("\\begin{verbatim}"),
+                !trimmed.starts_with("\\end{verbatim}")
+                    && !trimmed.starts_with("\\begin{verbatim}"),
                 "unsafe verbatim terminator emitted: {trimmed:?}"
             );
         }
@@ -7354,8 +8386,16 @@ mod tests {
         fs::write(run_dir.join("report.md"), "REPORT_MARKER: r\n").unwrap();
         fs::write(run_dir.join("discovery.json"), "DISCOVERY_MARKER: d\n").unwrap();
         fs::write(run_dir.join("rollout_trace.json"), "TRACE_MARKER: t\n").unwrap();
-        fs::write(run_dir.join("judge_prompt.txt"), "JUDGE_PROMPT_MARKER: jp\n").unwrap();
-        fs::write(run_dir.join("judge_response.txt"), "JUDGE_RESPONSE_MARKER: jr\n").unwrap();
+        fs::write(
+            run_dir.join("judge_prompt.txt"),
+            "JUDGE_PROMPT_MARKER: jp\n",
+        )
+        .unwrap();
+        fs::write(
+            run_dir.join("judge_response.txt"),
+            "JUDGE_RESPONSE_MARKER: jr\n",
+        )
+        .unwrap();
         fs::write(run_dir.join("ic_prompt.txt"), "IC_PROMPT_MARKER: ip\n").unwrap();
         fs::write(run_dir.join("ic_response.txt"), "IC_RESPONSE_MARKER: ir\n").unwrap();
         fs::write(run_dir.join("config.json"), "{}\n").unwrap();
@@ -7419,7 +8459,10 @@ mod tests {
         ] {
             assert!(tex.contains(marker), "missing excerpt marker: {marker}");
         }
-        assert!(tex.contains("\\footnote{"), "expected at least one footnote");
+        assert!(
+            tex.contains("\\footnote{"),
+            "expected at least one footnote"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -7461,9 +8504,132 @@ mod tests {
         let parent = "ax=+1.000000*grav_x ; ay=+1.000000*grav_y ; az=0";
         let muts = propose_equation_mutants(parent, &features, "gravity_only", 7);
         assert!(
-            muts.iter().any(|s| s.contains("az=") && s.contains("grav_z")),
+            muts.iter()
+                .any(|s| s.contains("az=") && s.contains("grav_z")),
             "expected a mutant that includes grav_z in az"
         );
+    }
+
+    #[test]
+    fn equation_search_archive_update_tracks_visits_scores_and_sources() {
+        let feature_names = FeatureLibrary::default_physics().features;
+        let eq = "ax=+1.000000*grav_x ; ay=+1.000000*grav_y ; az=+1.000000*grav_z";
+        let mk_candidate = |rollout_rmse: f64, mse: f64, source: &str| CandidateSummary {
+            id: 0,
+            equation: Equation { terms: vec![] },
+            equation_text: eq.to_string(),
+            metrics: CandidateMetrics {
+                mse,
+                complexity: 3,
+                rollout_rmse: Some(rollout_rmse),
+                divergence_time: None,
+                stability_flags: vec![],
+            },
+            notes: vec![format!("source={source}")],
+        };
+
+        let mut archive = EquationSearchArchive::default();
+        update_equation_search_archive(
+            &mut archive,
+            &[mk_candidate(0.6, 1.0, "grid")],
+            &feature_names,
+            1,
+            8,
+        );
+        assert_eq!(archive.total_updates, 1);
+        assert_eq!(archive.nodes.len(), 1);
+        let first_best = archive.nodes[0].best_score;
+        assert!(first_best.is_finite());
+        assert_eq!(archive.nodes[0].visits, 1);
+
+        update_equation_search_archive(
+            &mut archive,
+            &[mk_candidate(0.2, 0.5, "equation_ga")],
+            &feature_names,
+            2,
+            8,
+        );
+        assert_eq!(archive.total_updates, 2);
+        assert_eq!(archive.nodes.len(), 1);
+        let node = &archive.nodes[0];
+        assert_eq!(node.visits, 2);
+        assert_eq!(node.last_seen_iter, 2);
+        assert_eq!(node.improvements, 1);
+        assert!(node.best_score < first_best);
+        assert!(node.mean_score.is_finite());
+        assert!(node.mean_score >= node.best_score);
+        assert_eq!(node.source_counts.get("grid"), Some(&1));
+        assert_eq!(node.source_counts.get("equation_ga"), Some(&1));
+    }
+
+    #[test]
+    fn archive_select_parents_mcts_is_ranked_and_skips_seen_equations() {
+        let feature_names = FeatureLibrary::default_physics().features;
+        let eq_a = "ax=+1.000000*grav_x ; ay=+1.000000*grav_y ; az=+1.000000*grav_z";
+        let eq_b = "ax=+0.500000*grav_x ; ay=+0.500000*grav_y ; az=+0.500000*grav_z";
+        let eq_c = "ax=+1.000000*grav_x ; ay=0 ; az=0";
+        let mk_node = |eq: &str, visits: usize, best_score: f64| EquationSearchNode {
+            equation_text: eq.to_string(),
+            visits,
+            mean_score: best_score + 0.05,
+            best_score,
+            last_seen_iter: 1,
+            improvements: 0,
+            descriptor: EquationDescriptor::from_equation_text(eq),
+            source_counts: std::collections::BTreeMap::from([("seed".to_string(), 1)]),
+        };
+        let archive = EquationSearchArchive {
+            version: EQUATION_SEARCH_ARCHIVE_VERSION.to_string(),
+            total_updates: 0,
+            nodes: vec![
+                mk_node(eq_a, 50, 0.05),
+                mk_node(eq_b, 1, 5.0),
+                mk_node(eq_c, 3, 0.5),
+            ],
+        };
+
+        let seen_eq_b = normalize_equation_text_for_features(eq_b, &feature_names).unwrap();
+        let mut seen = std::collections::HashSet::new();
+        seen.insert(seen_eq_b.clone());
+
+        let selected = archive_select_parents_mcts(&archive, &feature_names, &seen, 2, 0.7);
+        assert!(selected.len() <= 2);
+        assert!(!selected.iter().any(|(_kind, eq)| eq == &seen_eq_b));
+        if !selected.is_empty() {
+            assert_eq!(selected[0].0, "equation_mcts_uct_rank1");
+        }
+        if selected.len() > 1 {
+            assert_eq!(selected[1].0, "equation_mcts_uct_rank2");
+        }
+
+        let total_visits = archive
+            .nodes
+            .iter()
+            .map(|node| node.visits.max(1))
+            .sum::<usize>();
+        let mut expected = archive
+            .nodes
+            .iter()
+            .filter_map(|node| {
+                let norm = normalize_equation_text_for_features(&node.equation_text, &feature_names)?;
+                if seen.contains(&norm) {
+                    None
+                } else {
+                    Some((mcts_uct_score(node, total_visits, 0.7), norm))
+                }
+            })
+            .collect::<Vec<_>>();
+        expected.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let expected_eqs = expected
+            .into_iter()
+            .take(2)
+            .map(|(_score, eq)| eq)
+            .collect::<Vec<_>>();
+        let selected_eqs = selected
+            .into_iter()
+            .map(|(_kind, eq)| eq)
+            .collect::<Vec<_>>();
+        assert_eq!(selected_eqs, expected_eqs);
     }
 
     fn mk_eval_input_with_notes(
@@ -7581,7 +8747,10 @@ mod tests {
         fs::create_dir_all(&non_factory).unwrap();
         fs::write(
             non_factory.join("evaluation_input.json"),
-            serde_json::to_string_pretty(&mk_eval_input_with_notes(200, 0.01, 0.9, 1.0, 1, "a=bad")).unwrap(),
+            serde_json::to_string_pretty(&mk_eval_input_with_notes(
+                200, 0.01, 0.9, 1.0, 1, "a=bad",
+            ))
+            .unwrap(),
         )
         .unwrap();
 
@@ -7589,13 +8758,20 @@ mod tests {
         fs::create_dir_all(&factory_dir).unwrap();
         fs::write(
             factory_dir.join("evaluation_input.json"),
-            serde_json::to_string_pretty(&mk_eval_input_with_notes(200, 0.01, 0.1, 1.0, 1, "a=good")).unwrap(),
+            serde_json::to_string_pretty(&mk_eval_input_with_notes(
+                200, 0.01, 0.1, 1.0, 1, "a=good",
+            ))
+            .unwrap(),
         )
         .unwrap();
 
         let index = scan_best_results(&root).unwrap();
         assert_eq!(index.buckets.len(), 1);
-        assert!(index.buckets[0].eval_input_path.contains("quickstart_factory"));
+        assert!(
+            index.buckets[0]
+                .eval_input_path
+                .contains("quickstart_factory")
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -7615,12 +8791,18 @@ mod tests {
 
         fs::write(
             run1_factory.join("evaluation_input.json"),
-            serde_json::to_string_pretty(&mk_eval_input_with_notes(100, 0.01, 0.9, 1.0, 1, "a=run1")).unwrap(),
+            serde_json::to_string_pretty(&mk_eval_input_with_notes(
+                100, 0.01, 0.9, 1.0, 1, "a=run1",
+            ))
+            .unwrap(),
         )
         .unwrap();
         fs::write(
             run2_factory.join("evaluation_input.json"),
-            serde_json::to_string_pretty(&mk_eval_input_with_notes(100, 0.01, 0.1, 2.0, 2, "a=run2")).unwrap(),
+            serde_json::to_string_pretty(&mk_eval_input_with_notes(
+                100, 0.01, 0.1, 2.0, 2, "a=run2",
+            ))
+            .unwrap(),
         )
         .unwrap();
 
@@ -7649,21 +8831,40 @@ mod tests {
         // Best metrics but terminated early -> must be skipped.
         fs::write(
             bad_term.join("evaluation_input.json"),
-            serde_json::to_string_pretty(&mk_eval_input_with_sim(100, 0.01, 101, true, 0.01, "a=bad_term")).unwrap(),
+            serde_json::to_string_pretty(&mk_eval_input_with_sim(
+                100,
+                0.01,
+                101,
+                true,
+                0.01,
+                "a=bad_term",
+            ))
+            .unwrap(),
         )
         .unwrap();
 
         // Best metrics but short horizon (produced_steps != steps+1) -> must be skipped.
         fs::write(
             bad_short.join("evaluation_input.json"),
-            serde_json::to_string_pretty(&mk_eval_input_with_sim(100, 0.01, 50, false, 0.02, "a=bad_short")).unwrap(),
+            serde_json::to_string_pretty(&mk_eval_input_with_sim(
+                100,
+                0.01,
+                50,
+                false,
+                0.02,
+                "a=bad_short",
+            ))
+            .unwrap(),
         )
         .unwrap();
 
         // Worse metrics but valid oracle -> should be selected.
         fs::write(
             good.join("evaluation_input.json"),
-            serde_json::to_string_pretty(&mk_eval_input_with_sim(100, 0.01, 101, false, 0.2, "a=good")).unwrap(),
+            serde_json::to_string_pretty(&mk_eval_input_with_sim(
+                100, 0.01, 101, false, 0.2, "a=good",
+            ))
+            .unwrap(),
         )
         .unwrap();
 
@@ -7690,13 +8891,19 @@ mod tests {
         // run1: looks better on within-run rollout_rmse, but worse on benchmark.
         fs::write(
             run1_factory.join("evaluation_input.json"),
-            serde_json::to_string_pretty(&mk_eval_input_with_sim(100, 0.01, 101, false, 0.01, "a=run1")).unwrap(),
+            serde_json::to_string_pretty(&mk_eval_input_with_sim(
+                100, 0.01, 101, false, 0.01, "a=run1",
+            ))
+            .unwrap(),
         )
         .unwrap();
         let bm1 = BenchmarkEvalV1 {
             version: "v1".to_string(),
             suite_id: "benchmark_suite_v1".to_string(),
-            bucket: BucketKey { steps: 100, dt: 0.01 },
+            bucket: BucketKey {
+                steps: 100,
+                dt: 0.01,
+            },
             regime: "gravity_only".to_string(),
             rollout_integrator: "leapfrog".to_string(),
             candidate: BenchmarkCandidateRef {
@@ -7725,13 +8932,19 @@ mod tests {
         // run2: worse within-run metric, but better benchmark -> should win.
         fs::write(
             run2_factory.join("evaluation_input.json"),
-            serde_json::to_string_pretty(&mk_eval_input_with_sim(100, 0.01, 101, false, 0.2, "a=run2")).unwrap(),
+            serde_json::to_string_pretty(&mk_eval_input_with_sim(
+                100, 0.01, 101, false, 0.2, "a=run2",
+            ))
+            .unwrap(),
         )
         .unwrap();
         let bm2 = BenchmarkEvalV1 {
             version: "v1".to_string(),
             suite_id: "benchmark_suite_v1".to_string(),
-            bucket: BucketKey { steps: 100, dt: 0.01 },
+            bucket: BucketKey {
+                steps: 100,
+                dt: 0.01,
+            },
             regime: "gravity_only".to_string(),
             rollout_integrator: "leapfrog".to_string(),
             candidate: BenchmarkCandidateRef {
@@ -7766,7 +8979,8 @@ mod tests {
 
     #[test]
     fn executive_summary_includes_termination_metadata_when_present() {
-        let mut eval_input = mk_eval_input_with_sim(100, 0.01, 50, true, 0.1, "ax=+1*grav_x ; ay=0 ; az=0");
+        let mut eval_input =
+            mk_eval_input_with_sim(100, 0.01, 50, true, 0.1, "ax=+1*grav_x ; ay=0 ; az=0");
         if let Some(sim) = eval_input.iterations[0].simulation.as_mut() {
             sim.termination_reason = Some("max_rejects_exceeded".to_string());
             sim.encounter_step = Some(7);
@@ -7789,7 +9003,10 @@ mod tests {
             version: "v1".to_string(),
             updated_at_utc: "unix_seconds=0".to_string(),
             buckets: vec![BestRecord {
-                bucket: BucketKey { steps: 200, dt: 0.01 },
+                bucket: BucketKey {
+                    steps: 200,
+                    dt: 0.01,
+                },
                 run_dir: "results/quickstart_x".to_string(),
                 factory_dir: "results/quickstart_x/factory".to_string(),
                 eval_input_path: "results/quickstart_x/factory/evaluation_input.json".to_string(),
@@ -7820,7 +9037,10 @@ mod tests {
             version: "v1".to_string(),
             updated_at_utc: "unix_seconds=0".to_string(),
             buckets: vec![BestRecord {
-                bucket: BucketKey { steps: 200, dt: 0.01 },
+                bucket: BucketKey {
+                    steps: 200,
+                    dt: 0.01,
+                },
                 run_dir: "results/quickstart_x".to_string(),
                 factory_dir: "results/quickstart_x/factory".to_string(),
                 eval_input_path: "results/quickstart_x/factory/evaluation_input.json".to_string(),
@@ -7855,14 +9075,21 @@ mod tests {
         let factory_dir = root.join("factory");
         let best_run_dir = factory_dir.join("run_001");
         fs::create_dir_all(&best_run_dir).unwrap();
-        fs::write(factory_dir.join("evaluation.md"), "EVAL_LOG_MARKER: hello\n").unwrap();
+        fs::write(
+            factory_dir.join("evaluation.md"),
+            "EVAL_LOG_MARKER: hello\n",
+        )
+        .unwrap();
         fs::write(best_run_dir.join("report.md"), "REPORT_LOG_MARKER: world\n").unwrap();
 
         let index = BestResultsIndexV1 {
             version: "v1".to_string(),
             updated_at_utc: "unix_seconds=0".to_string(),
             buckets: vec![BestRecord {
-                bucket: BucketKey { steps: 200, dt: 0.01 },
+                bucket: BucketKey {
+                    steps: 200,
+                    dt: 0.01,
+                },
                 run_dir: root.to_string_lossy().to_string(),
                 factory_dir: factory_dir.to_string_lossy().to_string(),
                 eval_input_path: factory_dir
@@ -7920,7 +9147,11 @@ mod tests {
         cfg.enable_em = false;
         cfg.softening = 0.0;
 
-        let bodies = [Body::new(1.0, 0.0), Body::new(2.0, 0.0), Body::new(3.0, 0.0)];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(2.0, 0.0),
+            Body::new(3.0, 0.0),
+        ];
         let pos = [
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(1.0, 0.0, 0.0),
@@ -7953,7 +9184,11 @@ mod tests {
         cfg.enable_em = true;
         cfg.softening = 0.0;
 
-        let bodies = [Body::new(1.0, 1.0), Body::new(1.0, 2.0), Body::new(1.0, 0.0)];
+        let bodies = [
+            Body::new(1.0, 1.0),
+            Body::new(1.0, 2.0),
+            Body::new(1.0, 0.0),
+        ];
         let pos = [
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(1.0, 0.0, 0.0),
@@ -7994,7 +9229,11 @@ mod tests {
         // B_basis_z = (1/4π) * q1 * 1/|r|^3 = q1/(4π).
         // mag = (q0/m0) * v0 × B_basis, with v0=(1,0,0) and B_basis=(0,0,q1/(4π))
         // => mag_y = -(q0/m0) * q1/(4π).
-        let bodies = [Body::new(1.0, 1.0), Body::new(1.0, 2.0), Body::new(1.0, 0.0)];
+        let bodies = [
+            Body::new(1.0, 1.0),
+            Body::new(1.0, 2.0),
+            Body::new(1.0, 0.0),
+        ];
         let pos = [
             Vec3::new(0.0, 0.0, 0.0),
             Vec3::new(1.0, 0.0, 0.0),
@@ -8107,53 +9346,21 @@ mod tests {
         cfg.enable_em = false;
         cfg.softening = 0.0;
 
-        let bodies = [Body::new(1.0, 0.0), Body::new(2.0, 0.0), Body::new(3.0, 0.0)];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(2.0, 0.0),
+            Body::new(3.0, 0.0),
+        ];
         let csv_path = unique_temp_path("load_steps", "csv");
 
         let header = [
-            "t",
-            "dt",
-            "r1_x",
-            "r1_y",
-            "r1_z",
-            "r2_x",
-            "r2_y",
-            "r2_z",
-            "r3_x",
-            "r3_y",
-            "r3_z",
-            "v1_x",
-            "v1_y",
-            "v1_z",
-            "v2_x",
-            "v2_y",
-            "v2_z",
-            "v3_x",
-            "v3_y",
-            "v3_z",
+            "t", "dt", "r1_x", "r1_y", "r1_z", "r2_x", "r2_y", "r2_z", "r3_x", "r3_y", "r3_z",
+            "v1_x", "v1_y", "v1_z", "v2_x", "v2_y", "v2_z", "v3_x", "v3_y", "v3_z",
         ]
         .join(",");
         let row = [
-            "0.0",
-            "0.1",
-            "0.0",
-            "0.0",
-            "0.0",
-            "1.0",
-            "0.0",
-            "0.0",
-            "0.0",
-            "2.0",
-            "0.0",
-            "0.0",
-            "0.0",
-            "0.0",
-            "0.0",
-            "0.0",
-            "0.0",
-            "0.0",
-            "0.0",
-            "0.0",
+            "0.0", "0.1", "0.0", "0.0", "0.0", "1.0", "0.0", "0.0", "0.0", "2.0", "0.0", "0.0",
+            "0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0", "0.0",
         ]
         .join(",");
         fs::write(&csv_path, format!("{header}\n{row}\n")).unwrap();

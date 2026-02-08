@@ -28,12 +28,20 @@ pub(crate) fn rollout_metrics(
     cfg: &Config,
     rollout_integrator: RolloutIntegrator,
 ) -> (f64, Option<f64>) {
-    let mut system = result.steps.first().map(|s| s.system).unwrap_or_else(|| {
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(1.0, 0.0)];
-        let pos = [Vec3::zero(); 3];
-        let vel = [Vec3::zero(); 3];
-        System::new(bodies, State::new(pos, vel))
-    });
+    let mut system = result
+        .steps
+        .first()
+        .map(|s| s.system.clone())
+        .unwrap_or_else(|| {
+            let bodies = [
+                Body::new(1.0, 0.0),
+                Body::new(1.0, 0.0),
+                Body::new(1.0, 0.0),
+            ];
+            let pos = [Vec3::zero(); 3];
+            let vel = [Vec3::zero(); 3];
+            System::new(bodies, State::new(pos, vel))
+        });
     let feature_dataset = Dataset::new(feature_names.to_vec(), vec![], vec![]);
     let mut sum_sq = 0.0;
     let mut count = 0usize;
@@ -44,7 +52,14 @@ pub(crate) fn rollout_metrics(
     let mut divergence_time = None;
     for i in 0..(result.steps.len().saturating_sub(1)) {
         let dt = result.steps[i].dt;
-        system = rollout_step(&system, &feature_dataset, model, cfg, dt, rollout_integrator);
+        system = rollout_step(
+            &system,
+            &feature_dataset,
+            model,
+            cfg,
+            dt,
+            rollout_integrator,
+        );
         t += dt;
         let err = rms_pos_error(&system, &result.steps[i + 1].system);
         sum_sq += err * err;
@@ -53,7 +68,11 @@ pub(crate) fn rollout_metrics(
             divergence_time = Some(t);
         }
     }
-    let rmse = if count > 0 { (sum_sq / count as f64).sqrt() } else { 0.0 };
+    let rmse = if count > 0 {
+        (sum_sq / count as f64).sqrt()
+    } else {
+        0.0
+    };
     (rmse, divergence_time)
 }
 
@@ -64,28 +83,38 @@ pub(crate) fn rollout_trace(
     cfg: &Config,
     rollout_integrator: RolloutIntegrator,
 ) -> Vec<RolloutTraceStep> {
-    let mut system = result.steps.first().map(|s| s.system).unwrap_or_else(|| {
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(1.0, 0.0)];
-        let pos = [Vec3::zero(); 3];
-        let vel = [Vec3::zero(); 3];
-        System::new(bodies, State::new(pos, vel))
-    });
+    let mut system = result
+        .steps
+        .first()
+        .map(|s| s.system.clone())
+        .unwrap_or_else(|| {
+            let bodies = [
+                Body::new(1.0, 0.0),
+                Body::new(1.0, 0.0),
+                Body::new(1.0, 0.0),
+            ];
+            let pos = [Vec3::zero(); 3];
+            let vel = [Vec3::zero(); 3];
+            System::new(bodies, State::new(pos, vel))
+        });
     let feature_dataset = Dataset::new(feature_names.to_vec(), vec![], vec![]);
     let mut trace = Vec::new();
     let mut t = 0.0;
     for i in 0..(result.steps.len().saturating_sub(1)) {
         let dt = result.steps[i].dt;
-        system = rollout_step(&system, &feature_dataset, model, cfg, dt, rollout_integrator);
+        system = rollout_step(
+            &system,
+            &feature_dataset,
+            model,
+            cfg,
+            dt,
+            rollout_integrator,
+        );
         t += dt;
         let err = rms_pos_error(&system, &result.steps[i + 1].system);
         trace.push(RolloutTraceStep {
             t,
-            pos: system
-                .state
-                .pos
-                .iter()
-                .map(|p| [p.x, p.y, p.z])
-                .collect(),
+            pos: system.state.pos.iter().map(|p| [p.x, p.y, p.z]).collect(),
             rmse_pos: err,
         });
     }
@@ -99,10 +128,16 @@ pub(crate) struct RolloutTraceStep {
     rmse_pos: f64,
 }
 
-fn predict_accel(system: &System, feature_dataset: &Dataset, model: &VectorModel, cfg: &Config) -> [Vec3; 3] {
+fn predict_accel(
+    system: &System,
+    feature_dataset: &Dataset,
+    model: &VectorModel,
+    cfg: &Config,
+) -> [Vec3; 3] {
     let mut acc = [Vec3::zero(); 3];
     for body in 0..3 {
-        let features = crate::compute_feature_vector(system, body, cfg, &feature_dataset.feature_names);
+        let features =
+            crate::compute_feature_vector(system, body, cfg, &feature_dataset.feature_names);
         let ax = model.eq_x.predict(feature_dataset, &features);
         let ay = model.eq_y.predict(feature_dataset, &features);
         let az = model.eq_z.predict(feature_dataset, &features);
@@ -122,30 +157,33 @@ fn rollout_step(
     let acc = predict_accel(system, feature_dataset, model, cfg);
     match integrator {
         RolloutIntegrator::Euler => {
-            let mut new_pos = system.state.pos;
-            let mut new_vel = system.state.vel;
+            let mut new_pos = system.state.pos.clone();
+            let mut new_vel = system.state.vel.clone();
             for b in 0..3 {
                 new_vel[b] = new_vel[b] + acc[b] * dt;
                 new_pos[b] = new_pos[b] + new_vel[b] * dt;
             }
-            System::new(system.bodies, State::new(new_pos, new_vel))
+            System::new(system.bodies.clone(), State::new(new_pos, new_vel))
         }
         RolloutIntegrator::Leapfrog => {
-            let mut v_half = system.state.vel;
+            let mut v_half = system.state.vel.clone();
             for b in 0..3 {
                 v_half[b] = v_half[b] + acc[b] * (0.5 * dt);
             }
-            let mut new_pos = system.state.pos;
+            let mut new_pos = system.state.pos.clone();
             for b in 0..3 {
                 new_pos[b] = new_pos[b] + v_half[b] * dt;
             }
-            let interim = System::new(system.bodies, State::new(new_pos, v_half));
+            let interim = System::new(system.bodies.clone(), State::new(new_pos, v_half.clone()));
             let acc_new = predict_accel(&interim, feature_dataset, model, cfg);
             let mut new_vel = v_half;
             for b in 0..3 {
                 new_vel[b] = new_vel[b] + acc_new[b] * (0.5 * dt);
             }
-            System::new(system.bodies, State::new(interim.state.pos, new_vel))
+            System::new(
+                system.bodies.clone(),
+                State::new(interim.state.pos.clone(), new_vel),
+            )
         }
     }
 }
@@ -161,7 +199,7 @@ fn rms_pos_error(pred: &System, truth: &System) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{rollout_metrics, rollout_trace, VectorModel};
+    use super::{VectorModel, rollout_metrics, rollout_trace};
     use crate::RolloutIntegrator;
     use threebody_core::config::Config;
     use threebody_core::diagnostics::Diagnostics;
@@ -204,14 +242,18 @@ mod tests {
         let feature_names: Vec<String> = Vec::new();
 
         let bodies = [Body::new(1.0, 0.0); 3];
-        let pos = [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 2.0, 0.0)];
+        let pos = [
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 2.0, 0.0),
+        ];
         let vel = [Vec3::zero(); 3];
         let system = System::new(bodies, State::new(pos, vel));
 
         let dt = 0.1;
         let steps = vec![
-            dummy_step(system, 0.0, dt),
-            dummy_step(system, dt, dt),
+            dummy_step(system.clone(), 0.0, dt),
+            dummy_step(system.clone(), dt, dt),
             dummy_step(system, 2.0 * dt, dt),
         ];
         let result = SimResult {
@@ -230,10 +272,22 @@ mod tests {
             },
         };
 
-        let trace = rollout_trace(&model, &feature_names, &result, &cfg, RolloutIntegrator::Euler);
+        let trace = rollout_trace(
+            &model,
+            &feature_names,
+            &result,
+            &cfg,
+            RolloutIntegrator::Euler,
+        );
         assert_eq!(trace.len(), result.steps.len() - 1);
 
-        let (rmse, div) = rollout_metrics(&model, &feature_names, &result, &cfg, RolloutIntegrator::Euler);
+        let (rmse, div) = rollout_metrics(
+            &model,
+            &feature_names,
+            &result,
+            &cfg,
+            RolloutIntegrator::Euler,
+        );
         assert!(rmse.abs() < 1e-12);
         assert!(div.is_none());
     }
@@ -245,7 +299,11 @@ mod tests {
         let feature_names: Vec<String> = Vec::new();
 
         let bodies = [Body::new(1.0, 0.0); 3];
-        let pos0 = [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 2.0, 0.0)];
+        let pos0 = [
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 2.0, 0.0),
+        ];
         let vel = [Vec3::zero(); 3];
         let sys0 = System::new(bodies, State::new(pos0, vel));
 
@@ -272,7 +330,13 @@ mod tests {
             },
         };
 
-        let (_rmse, div) = rollout_metrics(&model, &feature_names, &result, &cfg, RolloutIntegrator::Euler);
+        let (_rmse, div) = rollout_metrics(
+            &model,
+            &feature_names,
+            &result,
+            &cfg,
+            RolloutIntegrator::Euler,
+        );
         assert_eq!(div, Some(dt));
     }
 }

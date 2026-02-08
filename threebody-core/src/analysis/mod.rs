@@ -97,7 +97,12 @@ pub fn specific_energy_1overr(r: Vec3, v: Vec3, kappa: f64, softening: f64) -> f
 /// Compute osculating elements for the central 1/r component (gravity + electrostatics).
 ///
 /// Returns `None` if the inputs are degenerate (e.g., r=0 or kappa=0).
-pub fn osculating_elements_1overr(r: Vec3, v: Vec3, kappa: f64, softening: f64) -> Option<OsculatingElements> {
+pub fn osculating_elements_1overr(
+    r: Vec3,
+    v: Vec3,
+    kappa: f64,
+    softening: f64,
+) -> Option<OsculatingElements> {
     let r_soft = softened_distance(r, softening);
     if r_soft == 0.0 || !r_soft.is_finite() || kappa == 0.0 || !kappa.is_finite() {
         return None;
@@ -126,13 +131,18 @@ pub fn osculating_elements_1overr(r: Vec3, v: Vec3, kappa: f64, softening: f64) 
     })
 }
 
-pub fn pair_osculating_elements(cfg: &Config, system: &System, i: usize, j: usize) -> Option<OsculatingElements> {
+pub fn pair_osculating_elements(
+    cfg: &Config,
+    system: &System,
+    i: usize,
+    j: usize,
+) -> Option<OsculatingElements> {
     let (r, v) = relative_state(system, i, j);
     let coeffs = pair_central_coefficients(cfg, &system.bodies[i], &system.bodies[j]);
     osculating_elements_1overr(r, v, coeffs.kappa, cfg.softening)
 }
 
-pub fn min_pair_distance(pos: &[Vec3; 3]) -> (f64, (usize, usize)) {
+pub fn min_pair_distance(pos: &[Vec3]) -> (f64, (usize, usize)) {
     let mut best = (f64::INFINITY, (0, 1));
     for (i, j) in PAIRS_3 {
         let d = (pos[j] - pos[i]).norm();
@@ -145,7 +155,10 @@ pub fn min_pair_distance(pos: &[Vec3; 3]) -> (f64, (usize, usize)) {
 
 #[cfg(test)]
 mod tests {
-    use super::{min_pair_distance, osculating_elements_1overr, pair_central_coefficients, reduced_mass, PAIRS_3};
+    use super::{
+        PAIRS_3, min_pair_distance, osculating_elements_1overr, pair_central_coefficients,
+        reduced_mass,
+    };
     use crate::config::Config;
     use crate::math::vec3::Vec3;
     use crate::state::{Body, State, System};
@@ -201,8 +214,16 @@ mod tests {
     #[test]
     fn pair_coeffs_work_inside_system() {
         let cfg = Config::default();
-        let bodies = [Body::new(2.0, 1.0), Body::new(3.0, -1.0), Body::new(1.0, 0.0)];
-        let pos = [Vec3::zero(), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 2.0, 0.0)];
+        let bodies = [
+            Body::new(2.0, 1.0),
+            Body::new(3.0, -1.0),
+            Body::new(1.0, 0.0),
+        ];
+        let pos = [
+            Vec3::zero(),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 2.0, 0.0),
+        ];
         let vel = [Vec3::zero(); 3];
         let system = System::new(bodies, State::new(pos, vel));
 
@@ -211,4 +232,3 @@ mod tests {
         assert!(c01.kappa.is_finite());
     }
 }
-

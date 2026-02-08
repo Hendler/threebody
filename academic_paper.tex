@@ -197,6 +197,23 @@ In addition to per-component coefficient estimation, the CLI’s \texttt{factory
 
 Related work: Sparse regression (SINDy/STLS)\cite{Brunton2016} and LASSO-style solvers\cite{Tibshirani1996} are natural coefficient estimators for fixed libraries and are implemented in the Rust codebase; the data contract (header-based CSV plus sidecar metadata) supports reproducible regression and search-based baselines.
 
+\subsection{Archive-guided equation search across iterations (current implementation)}
+To retain and reuse successful equation structures across iterations, we added a persistent equation archive and an MCTS-style parent selector in the \texttt{factory} loop.
+
+For each candidate equation $e$, we define a scalar score
+\begin{equation*}
+s(e)=\mathrm{RMSE}_{\mathrm{rollout}}(e)+0.1\log(1+\mathrm{MSE}(e))+10^{-3}\,\mathrm{complexity}(e).
+\end{equation*}
+Each iteration updates an archive with the top-$K$ candidates (default $K=12$), storing per-equation visit count $n(e)$, mean score $\bar{s}(e)$, and best score $s^\star(e)$.
+
+Archive parent selection uses a UCT-like priority
+\begin{equation*}
+u(e)=\frac{1}{1+s^\star(e)}+c\sqrt{\frac{\log(1+N)}{1+n(e)}},
+\end{equation*}
+where $N$ is the archive total visit count and $c$ is an exploration constant (default $c=0.4$). The top-$M$ archive parents (default $M=2$) are injected into the equation-mutation pool each iteration after normalization and deduplication.
+
+This adds explicit search memory and reproducible artifacts (\texttt{equation\_search\_archive.json}, \texttt{equation\_search\_report.md}) without changing the primary selection criterion (numeric rollout metrics).
+
 \subsection{What counts as ``predicts well''}
 Pointwise acceleration fit is not sufficient. We evaluate:
 \begin{itemize}
@@ -257,10 +274,20 @@ For gravity-only or weak-EM regimes:
 \item Sparse models can achieve strong short-horizon rollout fidelity with few terms.
 \end{itemize}
 
+\subsection{Current empirical evidence for archive-guided search}
+We ran a controlled local sweep (8 factory iterations, STLS, \texttt{three-body} preset, \texttt{steps}=200, $dt=0.01$, mock LLM), varying $c\in\{0.4,0.7,1.0\}$ and $K\in\{6,8,12\}$ at fixed seed.
+\begin{itemize}
+\item Across all settings, the best rollout RMSE found in the run was identical: $9.2602898\times 10^{-3}$.
+\item The tuned setting ($c=0.4$, $K=12$) was slightly better on that seed in average per-iteration top-candidate RMSE ($2.7002408\times 10^{-2}$ vs.\ $2.7074579\times 10^{-2}$ for prior defaults $c=0.7$, $K=8$), and in final-iteration top RMSE ($1.7625853\times 10^{-2}$ vs.\ $1.7921833\times 10^{-2}$).
+\item The archive became more diverse (node count $38\rightarrow45$, updates $60\rightarrow69$ for the same 8-iteration budget).
+\end{itemize}
+Cross-seed verification (two additional seeds) showed no measurable predictive advantage between prior defaults and tuned settings; best and mean rollout RMSE were numerically identical in those checks. Therefore, we treat the current change as a search-efficiency and reporting improvement, not evidence of a robust accuracy breakthrough.
+
 \subsection{What we can claim}
 \begin{itemize}
 \item The simulator provides consistent numerical solutions to the implemented equations with user-controlled accuracy (RK45 mode).
 \item The discovery engine can identify compact, interpretable approximations within structured libraries and validate them by rollout.
+\item The archive-guided search reliably preserves, ranks, and reuses high-quality equation structures across iterations.
 \end{itemize}
 
 \subsection{What we cannot honestly claim (yet)}
@@ -296,6 +323,7 @@ We interpret ``novel'' as compact approximations that outperform naive baselines
 \item Implement predict and score commands with standardized benchmarks (divergence time, RMS error curves).
 \item Implement regime partitioning (``atlas of models''): train multiple sparse models with a lightweight regime classifier.
 \item Extend discovery to probabilistic forecasts for chaotic regimes.
+\item Run statistically powered multi-seed hyperparameter studies for archive/UCT settings before claiming accuracy gains.
 \item Extend the LLM judge rubric and experiment-planning prompts (ablation suggestions, regime partitioning), while keeping numeric scoring primary.
 \end{itemize}
 
@@ -363,6 +391,7 @@ S. Mikkola and S. J. Aarseth, ``An implementation of N-body chain regularization
 \begin{itemize}
 \item CSV parsing must be header-based to remain stable as columns evolve.
 \item Discovery expands vector bases into x/y/z component features and estimates sparse linear combinations via STLS/LASSO sparse regression (with an optional GA baseline).
+\item Factory now persists equation-search state (\texttt{equation\_search\_archive.json}) and emits a compact archive report (\texttt{equation\_search\_report.md}) for auditability.
 \end{itemize}
 
 \end{document}

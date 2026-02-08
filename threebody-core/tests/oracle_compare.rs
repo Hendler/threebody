@@ -1,23 +1,35 @@
 use threebody_core::config::Config;
-use threebody_core::integrators::{boris::Boris, leapfrog::Leapfrog, rk45::Rk45, Integrator};
+use threebody_core::integrators::{Integrator, boris::Boris, leapfrog::Leapfrog, rk45::Rk45};
 use threebody_core::math::vec3::Vec3;
 use threebody_core::state::{Body, State, System};
 
 fn base_system() -> System {
-    let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(0.0, 0.0)];
-    let pos = [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::zero()];
+    let bodies = [
+        Body::new(1.0, 0.0),
+        Body::new(1.0, 0.0),
+        Body::new(0.0, 0.0),
+    ];
+    let pos = [
+        Vec3::new(-0.5, 0.0, 0.0),
+        Vec3::new(0.5, 0.0, 0.0),
+        Vec3::zero(),
+    ];
     let v = (0.5_f64).sqrt();
-    let vel = [Vec3::new(0.0, v, 0.0), Vec3::new(0.0, -v, 0.0), Vec3::zero()];
+    let vel = [
+        Vec3::new(0.0, v, 0.0),
+        Vec3::new(0.0, -v, 0.0),
+        Vec3::zero(),
+    ];
     System::new(bodies, State::new(pos, vel))
 }
 
 fn run(integrator: &dyn Integrator, cfg: &Config, steps: usize, dt: f64) -> Vec<System> {
     let mut systems = Vec::with_capacity(steps + 1);
     let mut sys = base_system();
-    systems.push(sys);
+    systems.push(sys.clone());
     for _ in 0..steps {
         sys = integrator.step(&sys, dt, cfg);
-        systems.push(sys);
+        systems.push(sys.clone());
     }
     systems
 }

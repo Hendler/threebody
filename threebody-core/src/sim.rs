@@ -1,8 +1,8 @@
 use crate::config::{CloseEncounterAction, Config};
-use crate::diagnostics::{compute_diagnostics, Diagnostics};
-use crate::forces::{compute_accel, ForceConfig};
+use crate::diagnostics::{Diagnostics, compute_diagnostics};
+use crate::forces::{ForceConfig, compute_accel};
 use crate::integrators::Integrator;
-use crate::regime::{compute_regime, RegimeDiagnostics};
+use crate::regime::{RegimeDiagnostics, compute_regime};
 use crate::state::System;
 use serde::{Deserialize, Serialize};
 
@@ -184,7 +184,7 @@ pub fn simulate(
                         substeps_used: None,
                     });
                     steps.push(SimStep {
-                        system,
+                        system: system.clone(),
                         diagnostics,
                         regime,
                         t,
@@ -214,7 +214,7 @@ pub fn simulate(
             });
         }
         steps.push(SimStep {
-            system,
+            system: system.clone(),
             diagnostics,
             regime,
             t,
@@ -225,7 +225,10 @@ pub fn simulate(
             break;
         }
         if local_cfg.integrator.adaptive
-            && matches!(local_cfg.integrator.kind, crate::config::IntegratorKind::Rk45)
+            && matches!(
+                local_cfg.integrator.kind,
+                crate::config::IntegratorKind::Rk45
+            )
         {
             let mut rejects = 0;
             loop {
@@ -305,7 +308,7 @@ pub fn simulate(
 
 #[cfg(test)]
 mod tests {
-    use super::{simulate, SimOptions};
+    use super::{SimOptions, simulate};
     use crate::config::Config;
     use crate::integrators::leapfrog::Leapfrog;
     use crate::math::vec3::Vec3;
@@ -313,14 +316,26 @@ mod tests {
 
     #[test]
     fn deterministic_output_for_fixed_inputs() {
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(0.0, 0.0)];
-        let pos = [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::zero()];
-        let vel = [Vec3::new(0.0, 0.7, 0.0), Vec3::new(0.0, -0.7, 0.0), Vec3::zero()];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(1.0, 0.0),
+            Body::new(0.0, 0.0),
+        ];
+        let pos = [
+            Vec3::new(-0.5, 0.0, 0.0),
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::zero(),
+        ];
+        let vel = [
+            Vec3::new(0.0, 0.7, 0.0),
+            Vec3::new(0.0, -0.7, 0.0),
+            Vec3::zero(),
+        ];
         let system = System::new(bodies, State::new(pos, vel));
         let cfg = Config::default();
         let options = SimOptions { steps: 5, dt: 0.01 };
         let integrator = Leapfrog;
-        let a = simulate(system, &cfg, &integrator, None, options);
+        let a = simulate(system.clone(), &cfg, &integrator, None, options);
         let b = simulate(system, &cfg, &integrator, None, options);
         assert_eq!(a.steps.len(), b.steps.len());
         assert_eq!(a.steps[0].system, b.steps[0].system);
@@ -329,8 +344,16 @@ mod tests {
 
     #[test]
     fn close_encounter_triggers_event() {
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(0.0, 0.0)];
-        let pos = [Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.05, 0.0, 0.0), Vec3::zero()];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(1.0, 0.0),
+            Body::new(0.0, 0.0),
+        ];
+        let pos = [
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.05, 0.0, 0.0),
+            Vec3::zero(),
+        ];
         let vel = [Vec3::zero(); 3];
         let system = System::new(bodies, State::new(pos, vel));
         let mut cfg = Config::default();
@@ -419,9 +442,21 @@ mod tests {
 
     #[test]
     fn adaptive_rk45_adjusts_dt() {
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(0.0, 0.0)];
-        let pos = [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::zero()];
-        let vel = [Vec3::new(0.0, 0.7, 0.0), Vec3::new(0.0, -0.7, 0.0), Vec3::zero()];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(1.0, 0.0),
+            Body::new(0.0, 0.0),
+        ];
+        let pos = [
+            Vec3::new(-0.5, 0.0, 0.0),
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::zero(),
+        ];
+        let vel = [
+            Vec3::new(0.0, 0.7, 0.0),
+            Vec3::new(0.0, -0.7, 0.0),
+            Vec3::zero(),
+        ];
         let system = System::new(bodies, State::new(pos, vel));
 
         let mut cfg = Config::default();
@@ -444,8 +479,16 @@ mod tests {
 
     #[test]
     fn stats_track_fixed_dt() {
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(0.0, 0.0)];
-        let pos = [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::zero()];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(1.0, 0.0),
+            Body::new(0.0, 0.0),
+        ];
+        let pos = [
+            Vec3::new(-0.5, 0.0, 0.0),
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::zero(),
+        ];
         let vel = [Vec3::zero(); 3];
         let system = System::new(bodies, State::new(pos, vel));
         let mut cfg = Config::default();

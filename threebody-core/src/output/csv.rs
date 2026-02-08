@@ -1,10 +1,10 @@
 use std::io::{self, Write};
 
 use crate::config::Config;
-use crate::diagnostics::{compute_diagnostics, Diagnostics};
-use crate::forces::{compute_accel, compute_fields, ForceConfig};
+use crate::diagnostics::{Diagnostics, compute_diagnostics};
+use crate::forces::{ForceConfig, compute_accel, compute_fields};
 use crate::math::vec3::Vec3;
-use crate::regime::{compute_regime, RegimeDiagnostics};
+use crate::regime::{RegimeDiagnostics, compute_regime};
 use crate::sim::SimStep;
 
 pub fn csv_header(cfg: &Config) -> Vec<String> {
@@ -94,7 +94,7 @@ pub fn write_csv<W: Write>(mut writer: W, steps: &[SimStep], cfg: &Config) -> io
     Ok(())
 }
 
-fn push_vec3_values(row: &mut Vec<String>, values: &[Vec3; 3]) {
+fn push_vec3_values(row: &mut Vec<String>, values: &[Vec3]) {
     for v in values {
         row.push(v.x.to_string());
         row.push(v.y.to_string());

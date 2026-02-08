@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::forces::{compute_accel, ForceConfig};
+use crate::forces::{ForceConfig, compute_accel};
 use crate::integrators::Integrator;
 use crate::math::vec3::Vec3;
 use crate::state::{State, System};
@@ -24,7 +24,10 @@ pub fn step_with_error(system: &System, dt: f64, cfg: &Config) -> (System, f64, 
     };
 
     let (k1p, k1v) = deriv(system, &force_cfg);
-    let (k2p, k2v) = deriv(&add_scaled(system, &k1p, &k1v, dt * (1.0 / 5.0)), &force_cfg);
+    let (k2p, k2v) = deriv(
+        &add_scaled(system, &k1p, &k1v, dt * (1.0 / 5.0)),
+        &force_cfg,
+    );
     let (k3p, k3v) = deriv(
         &add_scaled(
             system,
@@ -37,8 +40,16 @@ pub fn step_with_error(system: &System, dt: f64, cfg: &Config) -> (System, f64, 
     let (k4p, k4v) = deriv(
         &add_scaled(
             system,
-            &lincomb(&[(&k1p, 44.0 / 45.0), (&k2p, -56.0 / 15.0), (&k3p, 32.0 / 9.0)]),
-            &lincomb(&[(&k1v, 44.0 / 45.0), (&k2v, -56.0 / 15.0), (&k3v, 32.0 / 9.0)]),
+            &lincomb(&[
+                (&k1p, 44.0 / 45.0),
+                (&k2p, -56.0 / 15.0),
+                (&k3p, 32.0 / 9.0),
+            ]),
+            &lincomb(&[
+                (&k1v, 44.0 / 45.0),
+                (&k2v, -56.0 / 15.0),
+                (&k3v, 32.0 / 9.0),
+            ]),
             dt,
         ),
         &force_cfg,
@@ -149,7 +160,7 @@ pub fn step_with_error(system: &System, dt: f64, cfg: &Config) -> (System, f64, 
     let dt_suggested = if err_norm == 0.0 {
         dt * 2.0
     } else {
-        let safety = 0.9;
+        let safety = cfg.integrator.safety.clamp(1e-6, 1.0);
         let factor = safety * err_norm.powf(-0.2);
         dt * factor.clamp(0.2, 5.0)
     };
@@ -158,19 +169,24 @@ pub fn step_with_error(system: &System, dt: f64, cfg: &Config) -> (System, f64, 
 }
 
 fn deriv(system: &System, cfg: &ForceConfig) -> ([Vec3; 3], [Vec3; 3]) {
-    let dpos = system.state.vel;
+    let dpos: [Vec3; 3] = system
+        .state
+        .vel
+        .clone()
+        .try_into()
+        .expect("rk45 requires exactly 3 velocity vectors");
     let dvel = compute_accel(system, cfg);
     (dpos, dvel)
 }
 
 fn add_scaled(system: &System, dpos: &[Vec3; 3], dvel: &[Vec3; 3], scale: f64) -> System {
-    let mut pos = system.state.pos;
-    let mut vel = system.state.vel;
+    let mut pos = system.state.pos.clone();
+    let mut vel = system.state.vel.clone();
     for i in 0..3 {
         pos[i] = pos[i] + dpos[i] * scale;
         vel[i] = vel[i] + dvel[i] * scale;
     }
-    System::new(system.bodies, State::new(pos, vel))
+    System::new(system.bodies.clone(), State::new(pos, vel))
 }
 
 fn lincomb(terms: &[(&[Vec3; 3], f64)]) -> [Vec3; 3] {
@@ -204,17 +220,29 @@ fn error_norm(prev: &System, y5: &System, y4: &System, rtol: f64, atol: f64) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{step_with_error, Rk45};
+    use super::{Rk45, step_with_error};
     use crate::config::Config;
-    use crate::integrators::{leapfrog::Leapfrog, Integrator};
+    use crate::integrators::{Integrator, leapfrog::Leapfrog};
     use crate::math::vec3::Vec3;
     use crate::state::{Body, State, System};
 
     fn two_body_system() -> System {
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(0.0, 0.0)];
-        let pos = [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::zero()];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(1.0, 0.0),
+            Body::new(0.0, 0.0),
+        ];
+        let pos = [
+            Vec3::new(-0.5, 0.0, 0.0),
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::zero(),
+        ];
         let v = (0.5_f64).sqrt();
-        let vel = [Vec3::new(0.0, v, 0.0), Vec3::new(0.0, -v, 0.0), Vec3::zero()];
+        let vel = [
+            Vec3::new(0.0, v, 0.0),
+            Vec3::new(0.0, -v, 0.0),
+            Vec3::zero(),
+        ];
         System::new(bodies, State::new(pos, vel))
     }
 
@@ -235,7 +263,7 @@ mod tests {
         cfg.enable_em = false;
         cfg.constants.g = 1.0;
         let mut s1 = two_body_system();
-        let mut s2 = s1;
+        let mut s2 = s1.clone();
         let rk = Rk45;
         let lf = Leapfrog;
         let dt = 0.01;
@@ -245,5 +273,23 @@ mod tests {
         }
         let diff = (s1.state.pos[0] - s2.state.pos[0]).norm();
         assert!(diff < 1e-2);
+    }
+
+    #[test]
+    fn safety_factor_changes_dt_suggestion() {
+        let mut cfg_lo = Config::default();
+        cfg_lo.enable_em = false;
+        cfg_lo.constants.g = 1.0;
+        cfg_lo.integrator.safety = 0.5;
+
+        let mut cfg_hi = cfg_lo;
+        cfg_hi.integrator.safety = 0.95;
+
+        let system = two_body_system();
+        let (_y_lo, err_lo, dt_lo) = step_with_error(&system, 0.05, &cfg_lo);
+        let (_y_hi, err_hi, dt_hi) = step_with_error(&system, 0.05, &cfg_hi);
+
+        assert!((err_lo - err_hi).abs() < 1e-12);
+        assert!(dt_hi > dt_lo);
     }
 }

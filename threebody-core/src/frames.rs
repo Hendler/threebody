@@ -35,7 +35,11 @@ mod tests {
 
     #[test]
     fn com_position_and_momentum_zeroed() {
-        let bodies = [Body::new(1.0, 0.0), Body::new(2.0, 0.0), Body::new(3.0, 0.0)];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(2.0, 0.0),
+            Body::new(3.0, 0.0),
+        ];
         let pos = [
             Vec3::new(1.0, 0.0, 0.0),
             Vec3::new(0.0, 2.0, 0.0),
@@ -65,11 +69,15 @@ mod tests {
 
     #[test]
     fn zero_total_mass_is_noop() {
-        let bodies = [Body::new(0.0, 0.0), Body::new(0.0, 0.0), Body::new(0.0, 0.0)];
+        let bodies = [
+            Body::new(0.0, 0.0),
+            Body::new(0.0, 0.0),
+            Body::new(0.0, 0.0),
+        ];
         let pos = [Vec3::new(1.0, 2.0, 3.0); 3];
         let vel = [Vec3::new(0.1, 0.2, 0.3); 3];
         let system = System::new(bodies, State::new(pos, vel));
-        let bary = to_barycentric(system);
+        let bary = to_barycentric(system.clone());
         assert_eq!(bary, system);
     }
 }

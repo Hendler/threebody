@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::forces::{compute_fields, gravity::gravity_accel, ForceConfig};
+use crate::forces::{ForceConfig, compute_fields, gravity::gravity_accel};
 use crate::integrators::Integrator;
 use crate::math::vec3::Vec3;
 use crate::state::System;
@@ -17,11 +17,17 @@ impl Integrator for Boris {
             enable_em: cfg.enable_em,
         };
 
-        let mut next = *system;
+        let mut next = system.clone();
+        let n = system.n();
         // Gravity half-kick (if enabled).
         if cfg.enable_gravity {
-            let g_acc = gravity_accel(&system.bodies, &system.state.pos, cfg.constants.g, cfg.softening);
-            for i in 0..3 {
+            let g_acc = gravity_accel(
+                &system.bodies,
+                &system.state.pos,
+                cfg.constants.g,
+                cfg.softening,
+            );
+            for i in 0..n {
                 next.state.vel[i] = next.state.vel[i] + g_acc[i] * (0.5 * dt);
             }
         }
@@ -29,32 +35,32 @@ impl Integrator for Boris {
         // EM Boris push for velocities.
         if cfg.enable_em {
             let fields = compute_fields(system, &force_cfg);
-            for i in 0..3 {
+            for i in 0..n {
                 let qi = system.bodies[i].charge;
                 let mi = system.bodies[i].mass;
                 if qi == 0.0 || mi == 0.0 {
                     continue;
                 }
                 let q_over_m = qi / mi;
-                next.state.vel[i] = boris_push(
-                    next.state.vel[i],
-                    q_over_m,
-                    fields.e[i],
-                    fields.b[i],
-                    dt,
-                );
+                next.state.vel[i] =
+                    boris_push(next.state.vel[i], q_over_m, fields.e[i], fields.b[i], dt);
             }
         }
 
         // Drift positions.
-        for i in 0..3 {
+        for i in 0..n {
             next.state.pos[i] = next.state.pos[i] + next.state.vel[i] * dt;
         }
 
         // Gravity half-kick at new positions (if enabled).
         if cfg.enable_gravity {
-            let g_acc = gravity_accel(&system.bodies, &next.state.pos, cfg.constants.g, cfg.softening);
-            for i in 0..3 {
+            let g_acc = gravity_accel(
+                &system.bodies,
+                &next.state.pos,
+                cfg.constants.g,
+                cfg.softening,
+            );
+            for i in 0..n {
                 next.state.vel[i] = next.state.vel[i] + g_acc[i] * (0.5 * dt);
             }
         }

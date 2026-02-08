@@ -11,13 +11,16 @@ pub struct EmFields {
 /// E_i = sum_{j != i} k_e * q_j * (r_i - r_j) / |r_i - r_j|^3
 /// B_i = sum_{j != i} (mu_0 / 4pi) * q_j * (v_j x (r_i - r_j)) / |r_i - r_j|^3
 pub fn em_fields(
-    bodies: &[Body; 3],
-    pos: &[Vec3; 3],
-    vel: &[Vec3; 3],
+    bodies: &[Body],
+    pos: &[Vec3],
+    vel: &[Vec3],
     k_e: f64,
     mu_0: f64,
     epsilon: f64,
 ) -> EmFields {
+    debug_assert_eq!(bodies.len(), 3);
+    debug_assert_eq!(pos.len(), 3);
+    debug_assert_eq!(vel.len(), 3);
     let mut e = [Vec3::zero(); 3];
     let mut b = [Vec3::zero(); 3];
     let mu0_over_4pi = mu_0 / (4.0 * std::f64::consts::PI);
@@ -46,9 +49,9 @@ pub fn em_fields(
 /// Compute Lorentz acceleration for all bodies.
 /// a_i(em) = (q_i / m_i) * (E_i + v_i x B_i)
 pub fn em_accel(
-    bodies: &[Body; 3],
-    pos: &[Vec3; 3],
-    vel: &[Vec3; 3],
+    bodies: &[Body],
+    pos: &[Vec3],
+    vel: &[Vec3],
     k_e: f64,
     mu_0: f64,
     epsilon: f64,
@@ -71,7 +74,11 @@ fn softened_inv_r3(r2: f64, epsilon: f64) -> f64 {
     if r2 == 0.0 {
         return 0.0;
     }
-    let soft2 = if epsilon == 0.0 { r2 } else { r2 + epsilon * epsilon };
+    let soft2 = if epsilon == 0.0 {
+        r2
+    } else {
+        r2 + epsilon * epsilon
+    };
     let r = soft2.sqrt();
     1.0 / (r * r * r)
 }
@@ -84,8 +91,16 @@ mod tests {
 
     #[test]
     fn zero_charges_give_zero_accel() {
-        let bodies = [Body::new(1.0, 0.0), Body::new(2.0, 0.0), Body::new(3.0, 0.0)];
-        let pos = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::zero()];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(2.0, 0.0),
+            Body::new(3.0, 0.0),
+        ];
+        let pos = [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::zero(),
+        ];
         let vel = [Vec3::zero(); 3];
         let acc = em_accel(&bodies, &pos, &vel, 1.0, 1.0, 0.0);
         assert_eq!(acc, [Vec3::zero(); 3]);
@@ -93,8 +108,16 @@ mod tests {
 
     #[test]
     fn zero_velocities_remove_magnetic_terms() {
-        let bodies = [Body::new(1.0, 1.0), Body::new(1.0, -1.0), Body::new(0.0, 0.0)];
-        let pos = [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::zero()];
+        let bodies = [
+            Body::new(1.0, 1.0),
+            Body::new(1.0, -1.0),
+            Body::new(0.0, 0.0),
+        ];
+        let pos = [
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::zero(),
+        ];
         let vel = [Vec3::zero(); 3];
         let fields = em_fields(&bodies, &pos, &vel, 1.0, 1.0, 0.0);
         assert_eq!(fields.b, [Vec3::zero(); 3]);
@@ -107,8 +130,16 @@ mod tests {
 
     #[test]
     fn zero_qi_gives_zero_accel_for_that_body() {
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 1.0), Body::new(1.0, -1.0)];
-        let pos = [Vec3::new(-1.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::zero()];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(1.0, 1.0),
+            Body::new(1.0, -1.0),
+        ];
+        let pos = [
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::zero(),
+        ];
         let vel = [Vec3::new(0.1, 0.0, 0.0); 3];
         let acc = em_accel(&bodies, &pos, &vel, 1.0, 1.0, 0.0);
         assert!(acc[0].approx_eq(Vec3::zero(), 1e-12, 1e-12));

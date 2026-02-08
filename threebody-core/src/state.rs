@@ -19,7 +19,13 @@ pub struct State {
 }
 
 impl State {
-    pub fn try_new(pos: Vec<Vec3>, vel: Vec<Vec3>) -> Result<Self, String> {
+    pub fn try_new<P, V>(pos: P, vel: V) -> Result<Self, String>
+    where
+        P: Into<Vec<Vec3>>,
+        V: Into<Vec<Vec3>>,
+    {
+        let pos = pos.into();
+        let vel = vel.into();
         if pos.len() != vel.len() {
             return Err(format!(
                 "state pos/vel length mismatch: pos={} vel={}",
@@ -30,7 +36,11 @@ impl State {
         Ok(Self { pos, vel })
     }
 
-    pub fn new(pos: Vec<Vec3>, vel: Vec<Vec3>) -> Self {
+    pub fn new<P, V>(pos: P, vel: V) -> Self
+    where
+        P: Into<Vec<Vec3>>,
+        V: Into<Vec<Vec3>>,
+    {
         Self::try_new(pos, vel).expect("invalid state: pos/vel length mismatch")
     }
 
@@ -50,7 +60,11 @@ pub struct System {
 }
 
 impl System {
-    pub fn try_new(bodies: Vec<Body>, state: State) -> Result<Self, String> {
+    pub fn try_new<B>(bodies: B, state: State) -> Result<Self, String>
+    where
+        B: Into<Vec<Body>>,
+    {
+        let bodies = bodies.into();
         if bodies.len() != state.len() {
             return Err(format!(
                 "system bodies/state length mismatch: bodies={} state={}",
@@ -61,7 +75,10 @@ impl System {
         Ok(Self { bodies, state })
     }
 
-    pub fn new(bodies: Vec<Body>, state: State) -> Self {
+    pub fn new<B>(bodies: B, state: State) -> Self
+    where
+        B: Into<Vec<Body>>,
+    {
         Self::try_new(bodies, state).expect("invalid system: bodies/state length mismatch")
     }
 

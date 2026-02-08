@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::forces::{compute_accel, ForceConfig};
+use crate::forces::{ForceConfig, compute_accel};
 use crate::integrators::Integrator;
 use crate::state::System;
 
@@ -16,16 +16,20 @@ impl Integrator for Leapfrog {
             enable_em: cfg.enable_em,
         };
         let acc = compute_accel(system, &force_cfg);
-        let mut next = *system;
-        let mut v_half = system.state.vel;
-        for i in 0..3 {
+        let mut next = system.clone();
+        let mut v_half = system.state.vel.clone();
+        let n = system.n();
+        for i in 0..n {
             v_half[i] = v_half[i] + acc[i] * (0.5 * dt);
             next.state.pos[i] = next.state.pos[i] + v_half[i] * dt;
         }
 
-        let temp = System::new(system.bodies, crate::state::State::new(next.state.pos, v_half));
+        let temp = System::new(
+            system.bodies.clone(),
+            crate::state::State::new(next.state.pos.clone(), v_half.clone()),
+        );
         let acc_new = compute_accel(&temp, &force_cfg);
-        for i in 0..3 {
+        for i in 0..n {
             next.state.vel[i] = v_half[i] + acc_new[i] * (0.5 * dt);
         }
         next
@@ -43,10 +47,22 @@ mod tests {
 
     #[test]
     fn gravity_energy_proxy_is_bounded() {
-        let bodies = [Body::new(1.0, 0.0), Body::new(1.0, 0.0), Body::new(0.0, 0.0)];
-        let pos = [Vec3::new(-0.5, 0.0, 0.0), Vec3::new(0.5, 0.0, 0.0), Vec3::zero()];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(1.0, 0.0),
+            Body::new(0.0, 0.0),
+        ];
+        let pos = [
+            Vec3::new(-0.5, 0.0, 0.0),
+            Vec3::new(0.5, 0.0, 0.0),
+            Vec3::zero(),
+        ];
         let v = (0.5_f64).sqrt();
-        let vel = [Vec3::new(0.0, v, 0.0), Vec3::new(0.0, -v, 0.0), Vec3::zero()];
+        let vel = [
+            Vec3::new(0.0, v, 0.0),
+            Vec3::new(0.0, -v, 0.0),
+            Vec3::zero(),
+        ];
         let mut system = System::new(bodies, State::new(pos, vel));
 
         let mut cfg = Config::default();

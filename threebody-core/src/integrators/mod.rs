@@ -1,10 +1,10 @@
 use crate::config::Config;
 use crate::state::System;
 
-pub mod leapfrog;
 pub mod boris;
-pub mod rk45;
 pub mod implicit_midpoint;
+pub mod leapfrog;
+pub mod rk45;
 
 /// Core integrator interface.
 pub trait Integrator {
@@ -62,7 +62,7 @@ mod tests {
 
     impl Integrator for EulerOscillator {
         fn step(&self, system: &System, dt: f64, _cfg: &Config) -> System {
-            let mut next = *system;
+            let mut next = system.clone();
             let x = system.state.pos[0].x;
             let v = system.state.vel[0].x;
             let a = -x;
@@ -73,7 +73,11 @@ mod tests {
     }
 
     fn simulate(integrator: &impl Integrator, dt: f64, steps: usize) -> f64 {
-        let bodies = [Body::new(1.0, 0.0), Body::new(0.0, 0.0), Body::new(0.0, 0.0)];
+        let bodies = [
+            Body::new(1.0, 0.0),
+            Body::new(0.0, 0.0),
+            Body::new(0.0, 0.0),
+        ];
         let pos = [Vec3::new(1.0, 0.0, 0.0), Vec3::zero(), Vec3::zero()];
         let vel = [Vec3::new(0.0, 0.0, 0.0), Vec3::zero(), Vec3::zero()];
         let mut system = System::new(bodies, State::new(pos, vel));
