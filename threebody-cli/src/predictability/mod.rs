@@ -136,8 +136,8 @@ pub enum PredictabilityCommand {
         /// Ridge lambdas (comma-separated nonnegative floats).
         #[arg(long, default_value = "1e-8,1e-6,1e-4,1e-2")]
         lambda: String,
-        /// Model family: linear | rational | both (or comma-separated list).
-        #[arg(long, default_value = "both")]
+        /// Model family: linear | rational | delta_linear | delta_rational | both | all.
+        #[arg(long, default_value = "all")]
         model: String,
         /// Split mode: chronological | shuffled.
         #[arg(long, default_value = "chronological")]
@@ -172,6 +172,33 @@ pub enum PredictabilityCommand {
         /// Maximum allowed sensitivity-median threshold for marking a channel effective.
         #[arg(long, default_value_t = 0.1)]
         max_sensitivity_median: f64,
+        /// Number of bootstrap resamples for median CI estimates (0 disables CIs).
+        #[arg(long, default_value_t = 2000)]
+        bootstrap_resamples: usize,
+        /// Confidence level for bootstrap CIs in (0,1), typically 0.95.
+        #[arg(long, default_value_t = 0.95)]
+        bootstrap_ci: f64,
+        /// RNG seed for deterministic bootstrap resampling.
+        #[arg(long, default_value_t = 42)]
+        bootstrap_seed: u64,
+    },
+    /// Compare two efficacy reports (before vs after) with effect-size and non-regression flags.
+    Compare {
+        /// Baseline efficacy report JSON path.
+        #[arg(long)]
+        before: PathBuf,
+        /// Candidate efficacy report JSON path.
+        #[arg(long)]
+        after: PathBuf,
+        /// Output comparison JSON path.
+        #[arg(long, default_value = "efficacy_compare.json")]
+        out: PathBuf,
+        /// Optional Markdown summary output path.
+        #[arg(long)]
+        markdown_out: Option<PathBuf>,
+        /// Allowed negative delta tolerance for non-regression checks.
+        #[arg(long, default_value_t = 0.0)]
+        non_regression_tol: f64,
     },
     /// Forecast with lock detection and optional encounter map (reserved for v1).
     Forecast {
@@ -274,13 +301,26 @@ pub fn run(cmd: PredictabilityCommand) -> anyhow::Result<()> {
             markdown_out,
             improvement_threshold,
             max_sensitivity_median,
+            bootstrap_resamples,
+            bootstrap_ci,
+            bootstrap_seed,
         } => report::run_report(
             reports,
             out,
             markdown_out,
             improvement_threshold,
             max_sensitivity_median,
+            bootstrap_resamples,
+            bootstrap_ci,
+            bootstrap_seed,
         ),
+        PredictabilityCommand::Compare {
+            before,
+            after,
+            out,
+            markdown_out,
+            non_regression_tol,
+        } => report::run_compare(before, after, out, markdown_out, non_regression_tol),
         PredictabilityCommand::Forecast { .. } => {
             anyhow::bail!("predictability forecast not implemented yet")
         }

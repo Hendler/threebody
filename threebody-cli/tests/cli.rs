@@ -8,8 +8,8 @@ fn start_openai_chat_stub() -> Option<(
 )> {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
@@ -617,19 +617,15 @@ fn bench_em_writes_suite_and_results() {
 
     assert!(out_dir.join("RESULTS.md").exists());
     assert!(out_dir.join("suite.json").exists());
-    assert!(
-        out_dir
-            .join("factory")
-            .join("evaluation_input.json")
-            .exists()
-    );
-    assert!(
-        out_dir
-            .join("factory")
-            .join("run_001")
-            .join("report.md")
-            .exists()
-    );
+    assert!(out_dir
+        .join("factory")
+        .join("evaluation_input.json")
+        .exists());
+    assert!(out_dir
+        .join("factory")
+        .join("run_001")
+        .join("report.md")
+        .exists());
 }
 
 #[test]
@@ -887,12 +883,11 @@ fn predictability_takens_writes_report_with_sensitivity_fields() {
         .unwrap_or_default();
     assert!(model == "linear" || model == "rational");
     assert!(best.get("holdout_mse").and_then(|v| v.as_f64()).is_some());
-    assert!(
-        best.get("holdout_sensitivity")
-            .and_then(|v| v.get("median_rel_error"))
-            .and_then(|v| v.as_f64())
-            .is_some()
-    );
+    assert!(best
+        .get("holdout_sensitivity")
+        .and_then(|v| v.get("median_rel_error"))
+        .and_then(|v| v.as_f64())
+        .is_some());
 }
 
 #[test]
@@ -956,6 +951,12 @@ fn predictability_report_summarizes_channel_efficacy() {
             "0.0",
             "--max-sensitivity-median",
             "0.1",
+            "--bootstrap-resamples",
+            "256",
+            "--bootstrap-ci",
+            "0.95",
+            "--bootstrap-seed",
+            "7",
         ])
         .output()
         .expect("run predictability report");
@@ -976,5 +977,109 @@ fn predictability_report_summarizes_channel_efficacy() {
     assert_eq!(
         agg.get("claim_status").and_then(|v| v.as_str()),
         Some("information_helpful_in_some_channels")
+    );
+    assert!(agg
+        .get("median_relative_improvement_all_ci_low")
+        .and_then(|v| v.as_f64())
+        .is_some());
+    assert!(agg
+        .get("median_relative_improvement_all_ci_high")
+        .and_then(|v| v.as_f64())
+        .is_some());
+}
+
+#[test]
+fn predictability_compare_reports_effect_size_and_non_regression() {
+    let exe = env!("CARGO_BIN_EXE_threebody-cli");
+    let tmp_dir =
+        env::temp_dir().join(format!("threebody_efficacy_compare_{}", std::process::id()));
+    if tmp_dir.exists() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+    fs::create_dir_all(&tmp_dir).expect("create temp dir");
+
+    let before = tmp_dir.join("before.json");
+    let after = tmp_dir.join("after.json");
+    fs::write(
+        &before,
+        r#"{
+  "aggregate": {
+    "n_effective": 1,
+    "effective_rate": 0.5,
+    "median_relative_improvement_all": 0.2,
+    "median_relative_improvement_raw": 0.9,
+    "median_relative_improvement_derived": -0.5,
+    "info_value_delta_raw_minus_derived": 1.4
+  },
+  "channels": [
+    {"column":"a1_x","holdout_relative_improvement":0.9,"effective":true},
+    {"column":"min_pair_dist","holdout_relative_improvement":-0.5,"effective":false}
+  ]
+}"#,
+    )
+    .expect("write before");
+    fs::write(
+        &after,
+        r#"{
+  "aggregate": {
+    "n_effective": 2,
+    "effective_rate": 1.0,
+    "median_relative_improvement_all": 0.95,
+    "median_relative_improvement_raw": 0.97,
+    "median_relative_improvement_derived": 0.92,
+    "info_value_delta_raw_minus_derived": 0.05
+  },
+  "channels": [
+    {"column":"a1_x","holdout_relative_improvement":0.95,"effective":true},
+    {"column":"min_pair_dist","holdout_relative_improvement":0.92,"effective":true}
+  ]
+}"#,
+    )
+    .expect("write after");
+
+    let out_json = tmp_dir.join("compare.json");
+    let out_md = tmp_dir.join("compare.md");
+    let out = Command::new(exe)
+        .current_dir(&tmp_dir)
+        .args([
+            "predictability",
+            "compare",
+            "--before",
+            before.to_str().unwrap(),
+            "--after",
+            after.to_str().unwrap(),
+            "--out",
+            out_json.to_str().unwrap(),
+            "--markdown-out",
+            out_md.to_str().unwrap(),
+            "--non-regression-tol",
+            "0.0",
+        ])
+        .output()
+        .expect("run predictability compare");
+
+    assert!(
+        out.status.success(),
+        "compare failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out_json.exists());
+    assert!(out_md.exists());
+
+    let json = fs::read_to_string(&out_json).expect("read compare");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("valid compare");
+    let agg = value.get("aggregate").expect("aggregate");
+    assert!(
+        agg.get("median_relative_improvement_all_delta")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0)
+            > 0.0
+    );
+    let flags = value.get("flags").expect("flags");
+    assert_eq!(
+        flags
+            .get("overall_non_regression")
+            .and_then(|v| v.as_bool()),
+        Some(true)
     );
 }

@@ -38,6 +38,8 @@ impl SplitMode {
 enum ModelKind {
     Linear,
     Rational,
+    DeltaLinear,
+    DeltaRational,
 }
 
 impl ModelKind {
@@ -47,12 +49,24 @@ impl ModelKind {
             match tok.to_ascii_lowercase().as_str() {
                 "linear" => push_unique_model(&mut out, Self::Linear),
                 "rational" => push_unique_model(&mut out, Self::Rational),
+                "delta_linear" | "residual_linear" => push_unique_model(&mut out, Self::DeltaLinear),
+                "delta_rational" | "residual_rational" => {
+                    push_unique_model(&mut out, Self::DeltaRational)
+                }
+                "delta" | "residual" => {
+                    push_unique_model(&mut out, Self::DeltaLinear);
+                    push_unique_model(&mut out, Self::DeltaRational);
+                }
                 "both" | "all" => {
                     push_unique_model(&mut out, Self::Linear);
                     push_unique_model(&mut out, Self::Rational);
+                    if tok.eq_ignore_ascii_case("all") {
+                        push_unique_model(&mut out, Self::DeltaLinear);
+                        push_unique_model(&mut out, Self::DeltaRational);
+                    }
                 }
                 _ => anyhow::bail!(
-                    "unknown model kind: {tok} (expected linear|rational|both or CSV list)"
+                    "unknown model kind: {tok} (expected linear|rational|delta_linear|delta_rational|both|all or CSV list)"
                 ),
             }
         }
@@ -223,7 +237,8 @@ pub(crate) fn run_takens(
                             lambda,
                             model,
                         )?;
-                        let holdout_baseline_mse = evaluate_persistence_mse(&samples, &split.holdout)?;
+                        let holdout_baseline_mse =
+                            evaluate_persistence_mse(&samples, &split.holdout)?;
                         let val_sensitivity = evaluate_sensitivity_summary(
                             &samples,
                             &split.train,
@@ -241,7 +256,8 @@ pub(crate) fn run_takens(
                             model,
                         )?;
                         let rank_score = val_mse
-                            * (1.0 + sensitivity_weight * val_sensitivity.median_rel_error.max(0.0));
+                            * (1.0
+                                + sensitivity_weight * val_sensitivity.median_rel_error.max(0.0));
 
                         let row = GridEval {
                             config: TakensConfig {
@@ -325,7 +341,7 @@ pub(crate) fn run_takens(
         notes: vec![
             "Takens embedding uses one-step target x_{t+1} and delay coordinates from selected sensor columns."
                 .to_string(),
-            "Model families include local linear and local linear-fractional (rational) maps fit on kNN neighborhoods."
+            "Model families include local linear, local rational, and residual variants (delta_*) fit on kNN neighborhoods."
                 .to_string(),
             "Primary score is strict holdout MSE; baseline is persistence y_hat=x_t.".to_string(),
             "Selection rank_score = val_mse * (1 + sensitivity_weight * val_sensitivity_median)."
@@ -627,7 +643,10 @@ fn split_indices(
     })
 }
 
-fn assert_no_chronological_leakage(samples: &[DelaySample], split: &SplitIndices) -> anyhow::Result<()> {
+fn assert_no_chronological_leakage(
+    samples: &[DelaySample],
+    split: &SplitIndices,
+) -> anyhow::Result<()> {
     let max_train = split
         .train
         .iter()
@@ -723,27 +742,30 @@ fn solve_linear_system(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>
     Some(b)
 }
 
-fn nearest_neighbors(samples: &[DelaySample], train_indices: &[usize], query: &[f64], k: usize) -> Vec<usize> {
+fn nearest_neighbors(
+    samples: &[DelaySample],
+    train_indices: &[usize],
+    query: &[f64],
+    k: usize,
+) -> Vec<usize> {
     let mut ranked: Vec<(f64, usize)> = train_indices
         .iter()
         .filter_map(|&i| samples.get(i).map(|s| (sq_dist(&s.z, query), i)))
         .collect();
     ranked.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(Ordering::Equal));
-    ranked
-        .into_iter()
-        .take(k.max(1))
-        .map(|(_, i)| i)
-        .collect()
+    ranked.into_iter().take(k.max(1)).map(|(_, i)| i).collect()
 }
 
 #[derive(Debug, Clone)]
 enum LocalModel {
     Linear {
         beta: Vec<f64>,
+        add_x_t: bool,
     },
     Rational {
         beta: Vec<f64>,
         delta: Vec<f64>,
+        add_x_t: bool,
     },
 }
 
@@ -751,15 +773,22 @@ impl LocalModel {
     fn predict(&self, query_z: &[f64]) -> Option<f64> {
         let phi = feature_vector(query_z);
         match self {
-            Self::Linear { beta } => {
-                let pred = dot(beta, &phi);
+            Self::Linear { beta, add_x_t } => {
+                let mut pred = dot(beta, &phi);
+                if *add_x_t {
+                    pred += *query_z.first().unwrap_or(&0.0);
+                }
                 if pred.is_finite() {
                     Some(pred)
                 } else {
                     None
                 }
             }
-            Self::Rational { beta, delta } => {
+            Self::Rational {
+                beta,
+                delta,
+                add_x_t,
+            } => {
                 let num = dot(beta, &phi);
                 let raw_den = 1.0 + dot(delta, &phi);
                 let den = if raw_den.abs() < 1e-9 {
@@ -771,7 +800,10 @@ impl LocalModel {
                 } else {
                     raw_den
                 };
-                let pred = num / den;
+                let mut pred = num / den;
+                if *add_x_t {
+                    pred += *query_z.first().unwrap_or(&0.0);
+                }
                 if pred.is_finite() {
                     Some(pred)
                 } else {
@@ -784,13 +816,21 @@ impl LocalModel {
     fn gradient(&self, query_z: &[f64]) -> Option<Vec<f64>> {
         let d = query_z.len();
         match self {
-            Self::Linear { beta } => {
+            Self::Linear { beta, add_x_t } => {
                 if beta.len() != d + 1 {
                     return None;
                 }
-                Some(beta[1..].to_vec())
+                let mut out = beta[1..].to_vec();
+                if *add_x_t && !out.is_empty() {
+                    out[0] += 1.0;
+                }
+                Some(out)
             }
-            Self::Rational { beta, delta } => {
+            Self::Rational {
+                beta,
+                delta,
+                add_x_t,
+            } => {
                 if beta.len() != d + 1 || delta.len() != d + 1 {
                     return None;
                 }
@@ -809,13 +849,21 @@ impl LocalModel {
                     }
                     grad[j] = g;
                 }
+                if *add_x_t && !grad.is_empty() {
+                    grad[0] += 1.0;
+                }
                 Some(grad)
             }
         }
     }
 }
 
-fn fit_linear_model(samples: &[DelaySample], neighbors: &[usize], lambda: f64) -> Option<LocalModel> {
+fn fit_linear_model(
+    samples: &[DelaySample],
+    neighbors: &[usize],
+    lambda: f64,
+    fit_residual: bool,
+) -> Option<LocalModel> {
     let first = samples.get(*neighbors.first()?)?;
     let p = first.z.len() + 1;
     let mut xtx = vec![vec![0.0; p]; p];
@@ -824,8 +872,9 @@ fn fit_linear_model(samples: &[DelaySample], neighbors: &[usize], lambda: f64) -
     for &idx in neighbors {
         let s = samples.get(idx)?;
         let phi = feature_vector(&s.z);
+        let target = if fit_residual { s.y - s.x_t } else { s.y };
         for i in 0..p {
-            xty[i] += phi[i] * s.y;
+            xty[i] += phi[i] * target;
             for j in 0..p {
                 xtx[i][j] += phi[i] * phi[j];
             }
@@ -838,10 +887,18 @@ fn fit_linear_model(samples: &[DelaySample], neighbors: &[usize], lambda: f64) -
     }
 
     let beta = solve_linear_system(xtx, xty)?;
-    Some(LocalModel::Linear { beta })
+    Some(LocalModel::Linear {
+        beta,
+        add_x_t: fit_residual,
+    })
 }
 
-fn fit_rational_model(samples: &[DelaySample], neighbors: &[usize], lambda: f64) -> Option<LocalModel> {
+fn fit_rational_model(
+    samples: &[DelaySample],
+    neighbors: &[usize],
+    lambda: f64,
+    fit_residual: bool,
+) -> Option<LocalModel> {
     let first = samples.get(*neighbors.first()?)?;
     let p = first.z.len() + 1;
     let n_param = 2 * p;
@@ -851,7 +908,7 @@ fn fit_rational_model(samples: &[DelaySample], neighbors: &[usize], lambda: f64)
     for &idx in neighbors {
         let s = samples.get(idx)?;
         let phi = feature_vector(&s.z);
-        let y = s.y;
+        let y = if fit_residual { s.y - s.x_t } else { s.y };
         let mut row = vec![0.0; n_param];
         for j in 0..p {
             row[j] = phi[j];
@@ -874,7 +931,11 @@ fn fit_rational_model(samples: &[DelaySample], neighbors: &[usize], lambda: f64)
     let theta = solve_linear_system(ata, atb)?;
     let beta = theta[..p].to_vec();
     let delta = theta[p..].to_vec();
-    Some(LocalModel::Rational { beta, delta })
+    Some(LocalModel::Rational {
+        beta,
+        delta,
+        add_x_t: fit_residual,
+    })
 }
 
 fn fit_local_model(
@@ -892,8 +953,10 @@ fn fit_local_model(
     let neighbors = nearest_neighbors(samples, train_indices, query, k);
     let fallback = samples.get(*neighbors.first()?)?.y;
     let local = match model {
-        ModelKind::Linear => fit_linear_model(samples, &neighbors, lambda)?,
-        ModelKind::Rational => fit_rational_model(samples, &neighbors, lambda)?,
+        ModelKind::Linear => fit_linear_model(samples, &neighbors, lambda, false)?,
+        ModelKind::Rational => fit_rational_model(samples, &neighbors, lambda, false)?,
+        ModelKind::DeltaLinear => fit_linear_model(samples, &neighbors, lambda, true)?,
+        ModelKind::DeltaRational => fit_rational_model(samples, &neighbors, lambda, true)?,
     };
     Some((local, fallback))
 }
@@ -1017,7 +1080,10 @@ fn quantile_sorted(xs: &[f64], q: f64) -> f64 {
     }
 }
 
-fn evaluate_persistence_mse(samples: &[DelaySample], eval_indices: &[usize]) -> anyhow::Result<f64> {
+fn evaluate_persistence_mse(
+    samples: &[DelaySample],
+    eval_indices: &[usize],
+) -> anyhow::Result<f64> {
     if eval_indices.is_empty() {
         anyhow::bail!("empty evaluation split");
     }
@@ -1038,9 +1104,9 @@ fn evaluate_persistence_mse(samples: &[DelaySample], eval_indices: &[usize]) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelKind, SplitMode, assert_no_chronological_leakage, build_delay_embedding,
-        build_delay_embedding_multi,
+        assert_no_chronological_leakage, build_delay_embedding, build_delay_embedding_multi,
         evaluate_model_mse, evaluate_persistence_mse, evaluate_sensitivity_summary, split_indices,
+        ModelKind, SplitMode,
     };
 
     fn logistic_series(n: usize, r: f64, x0: f64) -> Vec<f64> {
@@ -1093,6 +1159,20 @@ mod tests {
         (y, u)
     }
 
+    fn persistence_dominated_series(n: usize, x0: f64) -> (Vec<f64>, Vec<f64>) {
+        let mut x = Vec::with_capacity(n);
+        let mut u = Vec::with_capacity(n);
+        let mut prev_x = x0;
+        for t in 0..n {
+            let tt = t as f64;
+            let sensor = (0.05 * tt).sin() + 0.25 * (0.09 * tt).cos();
+            x.push(prev_x);
+            u.push(sensor);
+            prev_x = prev_x + 0.03 * sensor - 0.005 * sensor * sensor;
+        }
+        (x, u)
+    }
+
     #[test]
     fn delay_embedding_indexing_is_correct() {
         let series: Vec<f64> = (0..10).map(|v| v as f64).collect();
@@ -1130,7 +1210,8 @@ mod tests {
             "train indices should come before val"
         );
         assert!(
-            split.val
+            split
+                .val
                 .iter()
                 .all(|&i| i > *split.train.last().unwrap() && i < split.holdout[0]),
             "val indices should sit between train and holdout"
@@ -1161,9 +1242,15 @@ mod tests {
         let split = split_indices(emb.len(), SplitMode::Chronological, 42, 0.7, 0.15).unwrap();
         assert_no_chronological_leakage(&emb, &split).unwrap();
 
-        let holdout_mse =
-            evaluate_model_mse(&emb, &split.train, &split.holdout, 12, 1e-8, ModelKind::Linear)
-                .unwrap();
+        let holdout_mse = evaluate_model_mse(
+            &emb,
+            &split.train,
+            &split.holdout,
+            12,
+            1e-8,
+            ModelKind::Linear,
+        )
+        .unwrap();
         let baseline_mse = evaluate_persistence_mse(&emb, &split.holdout).unwrap();
         assert!(
             holdout_mse < baseline_mse * 0.9,
@@ -1235,7 +1322,8 @@ mod tests {
     #[test]
     fn richer_sensors_improve_prediction_for_coupled_target() {
         let (target, sensor_u) = coupled_series(800, 0.13);
-        let emb_target_only = build_delay_embedding_multi(&target, &[target.clone()], 1, 1).unwrap();
+        let emb_target_only =
+            build_delay_embedding_multi(&target, &[target.clone()], 1, 1).unwrap();
         let emb_with_sensor =
             build_delay_embedding_multi(&target, &[target.clone(), sensor_u], 1, 1).unwrap();
 
@@ -1272,6 +1360,39 @@ mod tests {
             "expected richer sensors to improve prediction (target_only={} with_sensor={})",
             mse_target_only,
             mse_with_sensor
+        );
+    }
+
+    #[test]
+    fn delta_linear_beats_linear_when_persistence_dominates() {
+        let (target, sensor_u) = persistence_dominated_series(900, 0.2);
+        let emb = build_delay_embedding_multi(&target, &[target.clone(), sensor_u], 1, 1).unwrap();
+        let split = split_indices(emb.len(), SplitMode::Chronological, 99, 0.7, 0.15).unwrap();
+        let k_global = split.train.len();
+
+        let linear_mse = evaluate_model_mse(
+            &emb,
+            &split.train,
+            &split.holdout,
+            k_global,
+            1.0,
+            ModelKind::Linear,
+        )
+        .unwrap();
+        let delta_mse = evaluate_model_mse(
+            &emb,
+            &split.train,
+            &split.holdout,
+            k_global,
+            1.0,
+            ModelKind::DeltaLinear,
+        )
+        .unwrap();
+        assert!(
+            delta_mse < linear_mse * 0.5,
+            "expected delta linear to outperform linear on persistence-dominated target (linear={} delta={})",
+            linear_mse,
+            delta_mse
         );
     }
 }
