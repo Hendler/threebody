@@ -368,27 +368,23 @@ To stabilize iterative progress, we additionally maintain a global ``best so far
 The judge can additionally recommend (a) which rollout integrator to use for evaluation (Euler vs.\ leapfrog), (b) which fitness heuristic to use for candidate selection (MSE vs.\ MSE with a parsimony penalty), and (c) which discovery solver/hyperparameters to try next (STLS/LASSO/GA), enabling controlled ablations without compromising reproducibility.
 
 \section{System Integration and Reproducibility}
-\subsection{CLI-driven workflow}
-The systems are controlled by CLI:
+\subsection{CLI workflow (main-body summary)}
+The implementation is organized as a reproducible CLI pipeline with four stages:
 \begin{itemize}
-\item \textbf{simulate}: produce truth trajectories and diagnostics.
-\item \textbf{discover}: fit sparse equations using a chosen library.
-\item \textbf{predictability}: ensemble runs, lock-point detection, close-encounter extraction, a sparse encounter-map baseline (experimental), and delay-embedding local-map reports (\texttt{takens}) with strict holdout/sensitivity summaries.
-\item \textbf{predictability report}: aggregate efficacy summaries from report artifacts, including raw-vs-derived channel separation and claim labels.
-\item \textbf{factory}: an optional LLM-guided loop that selects initial conditions, runs simulation, performs discovery, and emits a judged report with suggested next runs.
-\item \textbf{quickstart}: a convenience wrapper that runs an end-to-end workflow and writes a novice-friendly summary plus evidence under a single directory.
-\item \textbf{bench-em}: deterministic EM identifiability suite (charge/velocity sweeps + diverse initial conditions) that writes a comparable report per case.
-\item \textbf{findings}: render an aggregated LaTeX report of best-discovered equations across local runs (from the best-results ledger).
-\item \textbf{predict} (planned): roll out discovered equations and compare to truth.
-\item \textbf{score} (planned): compute quantitative benchmarks.
-\item \textbf{render-gif} (script): render a simple GIF animation from a trajectory CSV (header-based parsing).
+\item \textbf{oracle generation} (\texttt{simulate});
+\item \textbf{candidate-model generation} (\texttt{discover}, \texttt{predictability takens});
+\item \textbf{strict efficacy reporting} (\texttt{predictability report}/\texttt{compare}, claim gates);
+\item \textbf{optional closed-loop automation} (\texttt{factory}, \texttt{quickstart}, \texttt{bench-em}).
 \end{itemize}
+For readability, command-level details and full artifact inventories are moved to Appendix~A.
 
-\subsection{LLM-guided ``factory'' loop (optional)}
-The factory loop operationalizes a scientific workflow: (1) propose initial conditions, (2) simulate, (3) discover equations, (4) judge results under a fixed rubric, and (5) decide whether to continue. The LLM assists only in steps (1) and (4), and all artifacts (config, initial conditions, prompts, responses, metrics) are saved per iteration to ensure reproducibility and auditability.
-At the end of a run, we additionally render reproducible evaluation artifacts (Markdown and LaTeX) that record the best discovered equations (exact text), the best-run initial conditions, and a best-vs-history comparison over prior local attempts. We also save machine-readable numeric evidence: per-iteration rollout error curves (\texttt{rollout\_trace.json}) and a fixed held-out benchmark report (\texttt{benchmark\_eval.json}). The global best-results ledger is also updated to capture the current incumbent per simulation bucket.
-The LaTeX evaluation is designed for quick human review: it ends with a compact end-of-run summary and an evidence appendix that embeds small, truncated excerpts from key logs (deterministic executive summary plus optional LLM narrative), with footnotes pointing to the corresponding raw artifact files.
-When \texttt{publish\_report} is enabled, we additionally compute a deterministic seed-suite aggregate (\texttt{evaluation\_aggregate.json}), a claim classifier (\texttt{claim\_assessment.json}), a strict holdout decision (\texttt{strict\_holdout\_report.json}), a sensitivity summary (\texttt{sensitivity\_eval.json}), and a paper-ready concise summary (\texttt{paper\_summary.md}). The current strict profile (\texttt{highbar\_v2\_benchmark\_first}) requires: minimum relative-improvement threshold, minimum usable case count, bootstrap confidence-interval checks, and a non-regression check on a fixed held-out benchmark suite before ``confirmed improvement'' language is allowed.
+\subsection{Factory loop and long-run reuse}
+The factory loop follows a fixed cycle: propose initial conditions, simulate, discover candidate equations, score under a fixed rubric, and continue/stop. Numeric holdout metrics remain the decision authority; optional LLM output is advisory and fully logged.
+To support longer searches and cross-run reuse, this revision adds recursive archive seeding: \texttt{--equation-archive-seed} now accepts archive files or directories, scans directories for prior \texttt{equation\_search\_archive.json} artifacts, merges node statistics, and warm-starts parent selection. This is infrastructure for longer discovery loops; measured efficacy impact is reported in Section~4 and Appendix~B.
+
+\subsection{Reproducibility contract}
+The reproducibility contract is: fixed seeds, fixed simulator/discovery settings, structured sidecars, and explicit claim-gate artifacts.
+Current outputs include trajectory CSV + JSON sidecar (config, header hash, warnings, regime diagnostics, dt statistics, encounter metadata, initial state), per-iteration reports (\texttt{report.json}, \texttt{rollout\_trace.json}), and end-of-run claim files (\texttt{claim\_assessment.json}, \texttt{strict\_holdout\_report.json}, \texttt{evaluation\_aggregate.json}, \texttt{sensitivity\_eval.json}).
 
 \subsection{Robust I/O design}
 We explicitly fixed a key fragility: rigid CSV schemas break as output evolves. We therefore parse by header name and extract only needed columns for any given task. This enables rapid iteration.
@@ -636,11 +632,31 @@ In the main body, the key outcomes are:
 \end{itemize}
 This behavior is aligned with the paper's guiding question: we only claim progress when richer information plus new math improves strict holdout prediction.
 
+\subsection{Cross-run archive seeding for longer loops (February 10, 2026)}
+To enable longer search loops that reuse prior candidates, we added recursive archive seeding in \texttt{factory} via \texttt{--equation-archive-seed}. This allows a new run to import prior equation archives and start selection from accumulated historical candidates.
+
+We evaluated a matched-seed gravity-only pair (\texttt{research\_v2\_atlas}, 4 iterations, \texttt{steps}=180, $dt=0.01$, STLS, mock LLM, strict claim gate):
+\begin{center}
+\begin{tabular}{lrr}
+\hline
+metric & baseline & seeded (matched seed) \\
+\hline
+iteration-1 top rollout RMSE & $5.713546713\times 10^{-2}$ & $5.713546707\times 10^{-2}$ \\
+final-iteration top rollout RMSE & $1.501334298\times 10^{-2}$ & $1.501438012\times 10^{-2}$ \\
+benchmark RMSE mean (3-case suite) & $1.698633932\times 10^{-2}$ & $1.698756042\times 10^{-2}$ \\
+claim status & baseline-only (\texttt{n\_cases}=0) & \texttt{no\_improvement} (\texttt{n\_cases}=12) \\
+strict holdout pass & false & false \\
+\hline
+\end{tabular}
+\end{center}
+
+In this matched comparison, archive seeding was essentially neutral at iteration 1 and slightly worse at final/benchmark metrics (relative changes $\approx 10^{-9}$ at iteration 1 and $\approx 6.9\times10^{-5}$ at final RMSE). In an additional different-seed seeded run, iteration-1 error improved, but final strict-holdout outcomes remained non-improving. Therefore, current evidence supports archive seeding as a useful search-memory mechanism, not yet as a demonstrated strict-holdout accuracy improvement.
+
 \subsection{What we can claim}
 \begin{itemize}
 \item The simulator provides consistent numerical solutions to the implemented equations with user-controlled accuracy (RK45 mode).
 \item The discovery engine can identify compact, interpretable approximations within structured libraries and validate them by rollout.
-\item The archive-guided search reliably preserves, ranks, and reuses high-quality equation structures across iterations.
+\item The archive-guided search now reliably preserves, ranks, and reuses equation structures across iterations and across runs (via recursive archive seeding), even when strict-holdout accuracy gains are not yet demonstrated.
 \item The claim-gated reporting pipeline is conservative in practice: when improvements are absent or unproven, it emits \texttt{no\_improvement} rather than optimistic language.
 \end{itemize}
 
@@ -697,6 +713,7 @@ Yes, in a qualified sense. Under strict one-step holdout evaluation, richer simu
 \item \textbf{Claim C3 (negative global result):} In global force-library discovery, added geometry families and MDL-aware ranking did not yield robust strict-holdout gains over the Newtonian baseline in reported matched runs.
 \item \textbf{Claim C4 (non-monotonic sensor value):} In follow-up strict scans on \texttt{min\_pair\_dist}, a target-only embedding reached a high-bar pass at $W^\star=4$, while richer position/state sensor sets did not pass in the tested grid. Information value is therefore not monotonic in sensor count.
 \item \textbf{Claim C5 (current temporal NN result):} In matched side-by-side Takens runs on \texttt{a1\_x}, \texttt{min\_pair\_dist}, and \texttt{energy\_proxy}, adding the upgraded temporal-window \texttt{delta\_mlp} candidate did not improve selected strict-holdout results, and NN-only ablations were worse.
+\item \textbf{Claim C6 (search-memory result):} Recursive archive seeding enables cross-run candidate reuse and warm-start parent selection for longer loops, but in the current matched test it did not improve strict holdout metrics.
 \end{itemize}
 
 \subsection*{What is genuinely novel in this work}
@@ -799,10 +816,12 @@ S. Mikkola and S. J. Aarseth, ``An implementation of N-body chain regularization
 \appendix
 \section{Implementation Notes (brief)}
 \begin{itemize}
+\item Main body now keeps only workflow-level reproducibility summary; command-by-command operational detail is intentionally kept in appendices.
 \item CSV parsing must be header-based to remain stable as columns evolve.
 \item Discovery expands vector bases into x/y/z component features and estimates sparse linear combinations via STLS/LASSO sparse regression (with an optional GA baseline).
 \item Factory now includes a charged preset (\texttt{em-three-body}) so EM-enabled policy comparisons can be run without external IC injection.
 \item Factory now persists equation-search state (\texttt{equation\_search\_archive.json}), uncertainty-aware ranking metadata, and a compact archive report (\texttt{equation\_search\_report.md}) for auditability.
+\item Factory supports recursive cross-run archive seeding via \texttt{--equation-archive-seed}: archive files or directories are scanned for \texttt{equation\_search\_archive.json}, merged into current archive state, and logged in \texttt{equation\_search\_archive\_seeded\_from.json}.
 \item Factory policy/gating metadata is explicit (\texttt{policy\_effective.json}); optional publication artifacts include \texttt{evaluation\_aggregate.json}, \texttt{claim\_assessment.json}, \texttt{strict\_holdout\_report.json}, \texttt{sensitivity\_eval.json}, and \texttt{paper\_summary.md}.
 \item Advanced controls now include multi-smooth atlas variants, one-shot smooth gate-geometry tuning (\texttt{gate\_geometry.json}), strict redundancy/collinearity pruning with algebraic partition canonicalization, sensitivity-aware ranking, selectable feature-family hypotheses, and deterministic equation-template injection for non-Newtonian candidates.
 \item New deterministic feature-family atoms include \texttt{jacobi\_legendre}, \texttt{shape\_invariants}, and \texttt{symmetry\_invariants}; selection can be switched to an MDL-prioritized comparator via \texttt{--selector-policy numeric\_mdl}.
@@ -823,6 +842,34 @@ We ran a controlled local sweep (8 factory iterations, STLS, \texttt{three-body}
 \item The archive became more diverse (node count $38\rightarrow45$, updates $60\rightarrow69$ for the same 8-iteration budget).
 \end{itemize}
 Cross-seed verification (two additional seeds) showed no measurable predictive advantage between prior defaults and tuned settings; best and mean rollout RMSE were numerically identical in those checks.
+
+\subsection{Cross-run archive-seeding details (long-loop infrastructure)}
+On February 10, 2026, we ran a controlled archive-reuse experiment under \texttt{research\_v2\_atlas} (gravity-only, STLS, \texttt{steps}=180, $dt=0.01$, 4 factory iterations, mock LLM). Three runs were compared:
+\begin{itemize}
+\item \textbf{baseline}: seed 4401, no archive seeding.
+\item \textbf{seeded}: seed 4417, archive-seeded from the experiment root (different-seed exploratory run).
+\item \textbf{seeded\_match}: seed 4401, archive-seeded from the same experiment root (matched-seed fairness run).
+\end{itemize}
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\hline
+run & iter-1 top RMSE & final top RMSE & benchmark mean RMSE & claim status \\
+\hline
+baseline & $5.713546713\times 10^{-2}$ & $1.501334298\times 10^{-2}$ & $1.698633932\times 10^{-2}$ & baseline-only \\
+seeded (seed 4417) & $4.698068919\times 10^{-2}$ & $2.071624485\times 10^{-2}$ & $1.698625189\times 10^{-2}$ & no\_improvement \\
+seeded\_match (seed 4401) & $5.713546707\times 10^{-2}$ & $1.501438012\times 10^{-2}$ & $1.698756042\times 10^{-2}$ & no\_improvement \\
+\hline
+\end{tabular}
+\end{center}
+
+Interpretation:
+\begin{itemize}
+\item Different-seed seeding can improve early-iteration quality, but this is not sufficient evidence of causal gain.
+\item In the matched-seed comparison, iteration-1 performance was effectively unchanged and final performance was slightly worse; strict holdout remained false.
+\item Archive seeding therefore currently functions as search-memory infrastructure (candidate carryover and warm-starting), not as a validated strict-holdout accuracy improvement.
+\end{itemize}
+Seed-merge metadata confirms recursive ingestion: in \texttt{seeded\_match}, 40 nodes were added from baseline and 36 additional nodes were added from the exploratory seeded run (with 40 merged existing nodes), resulting in 76 post-seed archive nodes.
 
 \subsection{Claim-gate status snapshot}
 In the latest matched geometry+MDL run on February 8, 2026 (\texttt{research\_v2\_atlas}), \texttt{highbar\_v2\_benchmark\_first} returned:
@@ -885,12 +932,12 @@ Aggregate outcomes:
 \item Claim gate output: 4/5 \texttt{no\_improvement}, 1/5 \texttt{directional\_trend}, and 0/5 high-bar passes.
 \end{itemize}
 
-\section{Main-Body Compression Plan}
-This revision begins a structural change requested by the project lead:
+\section{Main-Body Compression Status}
+This revision continues the structural change requested by the project lead:
 \begin{itemize}
-\item Keep the main body focused on the primary research question, method summary, and claim-level outcomes.
-\item Move detailed build-up, expanded ablation tables, and preliminary matrix evidence to appendices.
-\item Continue this migration in future revisions by moving additional simulator/discovery derivations and implementation-level detail out of the main narrative.
+\item Main body now focuses on the primary research question, methods, and claim-level results.
+\item Detailed build-up, expanded matrix evidence, and command/artifact implementation specifics are now concentrated in appendices.
+\item Remaining compression work is to move additional derivation-level and engineering-level detail out of Sections 2--3 while preserving reproducibility.
 \end{itemize}
 
 \end{document}
