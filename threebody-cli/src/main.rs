@@ -401,6 +401,11 @@ enum Commands {
         /// Emit aggregate evidence and claim-assessment artifacts for publication/reporting.
         #[arg(long)]
         publish_report: bool,
+        /// Seed the equation-search archive from prior runs (archive file or directory).
+        /// Directory paths are scanned recursively for `equation_search_archive.json`.
+        /// Repeat flag or pass comma-separated paths.
+        #[arg(long = "equation-archive-seed", value_delimiter = ',')]
+        equation_archive_seed: Vec<PathBuf>,
     },
     /// Verify OpenAI-compatible LLM connectivity and JSON validity.
     LlmCheck {
@@ -626,6 +631,7 @@ fn main() -> anyhow::Result<()> {
             claim_gate,
             seed_suite,
             publish_report,
+            equation_archive_seed,
         } => {
             let solver_settings = DiscoverySolverSettings {
                 solver: parse_discovery_solver(&solver)?,
@@ -754,6 +760,7 @@ fn main() -> anyhow::Result<()> {
                 claim_gate,
                 seed_suite,
                 publish_report,
+                equation_archive_seed,
                 advanced,
             )?;
         }
@@ -966,6 +973,7 @@ fn run_quickstart(
         ClaimGateProfile::highbar_v2_benchmark_first(),
         SeedSuite::deterministic_v1(),
         true,
+        Vec::new(),
         FactoryAdvancedSettings::default(),
     )?;
 
@@ -5274,6 +5282,7 @@ fn run_factory(
     claim_gate: ClaimGateProfile,
     seed_suite: SeedSuite,
     publish_report: bool,
+    equation_archive_seed: Vec<PathBuf>,
     advanced: FactoryAdvancedSettings,
 ) -> anyhow::Result<()> {
     fs::create_dir_all(&out_dir)?;
@@ -5308,6 +5317,10 @@ fn run_factory(
             "seeds": seed_suite.seeds(),
         },
         "publish_report": publish_report,
+        "equation_archive_seed": equation_archive_seed
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>(),
     });
     fs::write(
         out_dir.join("policy_effective.json"),
@@ -5373,6 +5386,53 @@ fn run_factory(
     let mut previous_iteration_elites: Vec<(String, CandidateMetrics)> = Vec::new();
     let equation_search_archive_path = out_dir.join("equation_search_archive.json");
     let mut equation_search_archive = load_equation_search_archive(&equation_search_archive_path);
+    let mut archive_seeded_from: Vec<String> = Vec::new();
+    let mut archive_seed_merge_rows: Vec<serde_json::Value> = Vec::new();
+    let mut seed_archives_seen: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    for seed in &equation_archive_seed {
+        let seed_paths = collect_equation_archive_seed_paths(seed);
+        if seed_paths.is_empty() {
+            eprintln!(
+                "warning: --equation-archive-seed path has no archive file(s): {}",
+                seed.display()
+            );
+            continue;
+        }
+        for seed_archive_path in seed_paths {
+            if !seed_archives_seen.insert(seed_archive_path.clone()) {
+                continue;
+            }
+            if seed_archive_path == equation_search_archive_path {
+                continue;
+            }
+            let seed_archive = load_equation_search_archive(&seed_archive_path);
+            let (merged_existing, added_new) =
+                merge_equation_search_archive(&mut equation_search_archive, &seed_archive);
+            archive_seeded_from.push(seed_archive_path.display().to_string());
+            archive_seed_merge_rows.push(serde_json::json!({
+                "path": seed_archive_path.display().to_string(),
+                "source_nodes": seed_archive.nodes.len(),
+                "merged_existing": merged_existing,
+                "added_new": added_new,
+            }));
+        }
+    }
+    if !archive_seeded_from.is_empty() {
+        fs::write(
+            out_dir.join("equation_search_archive_seeded_from.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "version": "v1",
+                "seed_paths": archive_seeded_from,
+                "merge_rows": archive_seed_merge_rows,
+                "archive_node_count_after_seed": equation_search_archive.nodes.len(),
+            }))?,
+        )?;
+    }
+    if equation_ga_parent.is_none() {
+        if let Some(node) = equation_search_archive.nodes.first() {
+            equation_ga_parent = Some(node.equation_text.clone());
+        }
+    }
 
     if require_llm {
         let Some(client) = llm_client.as_ref() else {
@@ -8894,6 +8954,161 @@ fn source_from_notes(notes: &[String]) -> String {
     "unknown".to_string()
 }
 
+fn collect_equation_archive_seed_paths(path: &std::path::Path) -> Vec<PathBuf> {
+    fn walk(path: &std::path::Path, out: &mut Vec<PathBuf>) {
+        if path.is_file() {
+            out.push(path.to_path_buf());
+            return;
+        }
+        let entries = match fs::read_dir(path) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
+            let entry_path = entry.path();
+            if ft.is_dir() && !ft.is_symlink() {
+                walk(&entry_path, out);
+                continue;
+            }
+            if ft.is_file()
+                && entry_path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map_or(false, |name| name == "equation_search_archive.json")
+            {
+                out.push(entry_path);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    walk(path, &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn finalize_equation_search_archive(archive: &mut EquationSearchArchive) {
+    archive.nodes.retain(|node| {
+        !node.equation_text.trim().is_empty()
+            && node.visits > 0
+            && node.best_score.is_finite()
+            && node.mean_score.is_finite()
+    });
+
+    for node in &mut archive.nodes {
+        if !node.score_m2.is_finite() || node.score_m2 < 0.0 {
+            node.score_m2 = 0.0;
+        }
+        node.score_stddev = if node.visits > 1 {
+            (node.score_m2 / (node.visits as f64 - 1.0)).sqrt()
+        } else {
+            0.0
+        };
+    }
+
+    archive.nodes.sort_by(|a, b| {
+        a.best_score
+            .partial_cmp(&b.best_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.mean_score
+                    .partial_cmp(&b.mean_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| b.visits.cmp(&a.visits))
+    });
+    if archive.nodes.len() > 512 {
+        archive.nodes.truncate(512);
+    }
+}
+
+fn merge_equation_search_archive(
+    dst: &mut EquationSearchArchive,
+    src: &EquationSearchArchive,
+) -> (usize, usize) {
+    let mut merged_existing = 0usize;
+    let mut added_new = 0usize;
+    dst.total_updates = dst.total_updates.saturating_add(src.total_updates);
+
+    for src_node in &src.nodes {
+        if src_node.visits == 0
+            || src_node.equation_text.trim().is_empty()
+            || !src_node.best_score.is_finite()
+            || !src_node.mean_score.is_finite()
+        {
+            continue;
+        }
+        let mut incoming = src_node.clone();
+        if !incoming.score_m2.is_finite() || incoming.score_m2 < 0.0 {
+            incoming.score_m2 = 0.0;
+        }
+        incoming.score_stddev = if incoming.visits > 1 {
+            (incoming.score_m2 / (incoming.visits as f64 - 1.0)).sqrt()
+        } else {
+            0.0
+        };
+
+        if let Some(dst_node) = dst
+            .nodes
+            .iter_mut()
+            .find(|node| node.equation_text == incoming.equation_text)
+        {
+            merged_existing += 1;
+            let n1 = dst_node.visits as f64;
+            let n2 = incoming.visits as f64;
+            let mean1 = dst_node.mean_score;
+            let mean2 = incoming.mean_score;
+            let m2_1 = dst_node.score_m2.max(0.0);
+            let m2_2 = incoming.score_m2.max(0.0);
+            let n_total = n1 + n2;
+            if n_total > 0.0 {
+                let delta = mean2 - mean1;
+                let mean_total = mean1 + delta * (n2 / n_total);
+                let m2_total = m2_1 + m2_2 + delta * delta * (n1 * n2 / n_total);
+                if mean_total.is_finite() {
+                    dst_node.mean_score = mean_total;
+                }
+                if m2_total.is_finite() && m2_total >= 0.0 {
+                    dst_node.score_m2 = m2_total;
+                } else {
+                    dst_node.score_m2 = 0.0;
+                }
+            }
+            dst_node.visits = dst_node.visits.saturating_add(incoming.visits);
+            dst_node.score_stddev = if dst_node.visits > 1 {
+                (dst_node.score_m2 / (dst_node.visits as f64 - 1.0)).sqrt()
+            } else {
+                0.0
+            };
+
+            if incoming.best_score + 1e-12 < dst_node.best_score || !dst_node.best_score.is_finite() {
+                dst_node.best_score = incoming.best_score;
+                dst_node.descriptor = incoming.descriptor.clone();
+            }
+            dst_node.improvements = dst_node.improvements.saturating_add(incoming.improvements);
+            dst_node.last_seen_iter = dst_node.last_seen_iter.max(incoming.last_seen_iter);
+            for (k, v) in incoming.source_counts {
+                let entry = dst_node.source_counts.entry(k).or_insert(0);
+                *entry = entry.saturating_add(v);
+            }
+            for (k, v) in incoming.seed_counts {
+                let entry = dst_node.seed_counts.entry(k).or_insert(0);
+                *entry = entry.saturating_add(v);
+            }
+        } else {
+            added_new += 1;
+            dst.nodes.push(incoming);
+        }
+    }
+
+    finalize_equation_search_archive(dst);
+    (merged_existing, added_new)
+}
+
 fn load_equation_search_archive(path: &std::path::Path) -> EquationSearchArchive {
     if !path.exists() {
         return EquationSearchArchive::default();
@@ -8927,6 +9142,7 @@ fn load_equation_search_archive(path: &std::path::Path) -> EquationSearchArchive
         );
         archive.version = EQUATION_SEARCH_ARCHIVE_VERSION.to_string();
     }
+    finalize_equation_search_archive(&mut archive);
     archive
 }
 
@@ -9011,20 +9227,7 @@ fn update_equation_search_archive(
         }
     }
 
-    archive.nodes.sort_by(|a, b| {
-        a.best_score
-            .partial_cmp(&b.best_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| {
-                a.mean_score
-                    .partial_cmp(&b.mean_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .then_with(|| b.visits.cmp(&a.visits))
-    });
-    if archive.nodes.len() > 512 {
-        archive.nodes.truncate(512);
-    }
+    finalize_equation_search_archive(archive);
 }
 
 fn mcts_uct_score(
@@ -12989,6 +13192,115 @@ mod tests {
         assert_eq!(node.source_counts.get("equation_ga"), Some(&1));
         assert_eq!(node.seed_counts.get(&101), Some(&1));
         assert_eq!(node.seed_counts.get(&211), Some(&1));
+    }
+
+    #[test]
+    fn collect_equation_archive_seed_paths_scans_nested_directories() {
+        let root = unique_temp_path("archive_seed_collect", "dir");
+        if root.exists() {
+            let _ = fs::remove_dir_all(&root);
+        }
+        fs::create_dir_all(root.join("a").join("b")).expect("create nested dirs");
+
+        let archive_root = root.join("equation_search_archive.json");
+        let archive_a = root.join("a").join("equation_search_archive.json");
+        let archive_b = root.join("a").join("b").join("equation_search_archive.json");
+        fs::write(&archive_root, "{\"version\":\"v1\",\"total_updates\":0,\"nodes\":[]}")
+            .expect("write root archive");
+        fs::write(&archive_a, "{\"version\":\"v1\",\"total_updates\":0,\"nodes\":[]}")
+            .expect("write archive a");
+        fs::write(&archive_b, "{\"version\":\"v1\",\"total_updates\":0,\"nodes\":[]}")
+            .expect("write archive b");
+        fs::write(root.join("a").join("ignore.json"), "{}").expect("write non-archive file");
+
+        let mut expected = vec![archive_a.clone(), archive_b.clone(), archive_root.clone()];
+        expected.sort();
+
+        let discovered = collect_equation_archive_seed_paths(&root);
+        assert_eq!(discovered, expected);
+
+        let single = collect_equation_archive_seed_paths(&archive_b);
+        assert_eq!(single, vec![archive_b]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn merge_equation_search_archive_combines_existing_and_new_nodes() {
+        let eq_shared = "ax=+1.000000*grav_x ; ay=+1.000000*grav_y ; az=+1.000000*grav_z";
+        let eq_new = "ax=+0.500000*grav_x ; ay=+0.500000*grav_y ; az=+0.500000*grav_z";
+
+        let mut dst = EquationSearchArchive {
+            version: EQUATION_SEARCH_ARCHIVE_VERSION.to_string(),
+            total_updates: 2,
+            nodes: vec![EquationSearchNode {
+                equation_text: eq_shared.to_string(),
+                visits: 2,
+                mean_score: 0.5,
+                best_score: 0.4,
+                score_m2: 0.02,
+                score_stddev: 0.1,
+                last_seen_iter: 2,
+                improvements: 1,
+                descriptor: EquationDescriptor::from_equation_text(eq_shared),
+                source_counts: std::collections::BTreeMap::from([("grid".to_string(), 2)]),
+                seed_counts: std::collections::BTreeMap::from([(101, 1)]),
+            }],
+        };
+        let src = EquationSearchArchive {
+            version: EQUATION_SEARCH_ARCHIVE_VERSION.to_string(),
+            total_updates: 3,
+            nodes: vec![
+                EquationSearchNode {
+                    equation_text: eq_shared.to_string(),
+                    visits: 3,
+                    mean_score: 0.3,
+                    best_score: 0.2,
+                    score_m2: 0.03,
+                    score_stddev: 0.1,
+                    last_seen_iter: 4,
+                    improvements: 2,
+                    descriptor: EquationDescriptor::from_equation_text(eq_shared),
+                    source_counts: std::collections::BTreeMap::from([("equation_ga".to_string(), 3)]),
+                    seed_counts: std::collections::BTreeMap::from([(202, 2)]),
+                },
+                EquationSearchNode {
+                    equation_text: eq_new.to_string(),
+                    visits: 1,
+                    mean_score: 0.7,
+                    best_score: 0.7,
+                    score_m2: 0.0,
+                    score_stddev: 0.0,
+                    last_seen_iter: 4,
+                    improvements: 0,
+                    descriptor: EquationDescriptor::from_equation_text(eq_new),
+                    source_counts: std::collections::BTreeMap::from([("llm".to_string(), 1)]),
+                    seed_counts: std::collections::BTreeMap::from([(303, 1)]),
+                },
+            ],
+        };
+
+        let (merged_existing, added_new) = merge_equation_search_archive(&mut dst, &src);
+        assert_eq!(merged_existing, 1);
+        assert_eq!(added_new, 1);
+        assert_eq!(dst.total_updates, 5);
+        assert_eq!(dst.nodes.len(), 2);
+
+        let merged = dst
+            .nodes
+            .iter()
+            .find(|node| node.equation_text == eq_shared)
+            .expect("merged shared node");
+        assert_eq!(merged.visits, 5);
+        assert!((merged.best_score - 0.2).abs() < 1e-12);
+        assert_eq!(merged.last_seen_iter, 4);
+        assert_eq!(merged.improvements, 3);
+        assert_eq!(merged.source_counts.get("grid"), Some(&2));
+        assert_eq!(merged.source_counts.get("equation_ga"), Some(&3));
+        assert_eq!(merged.seed_counts.get(&101), Some(&1));
+        assert_eq!(merged.seed_counts.get(&202), Some(&2));
+        assert!(merged.mean_score.is_finite());
+        assert!(merged.score_stddev.is_finite());
     }
 
     #[test]

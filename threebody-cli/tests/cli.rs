@@ -177,6 +177,14 @@ fn start_openai_chat_stub() -> Option<(
     Some((addr, handle, running))
 }
 
+fn unique_temp_dir(prefix: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    env::temp_dir().join(format!("{prefix}_{}_{}", std::process::id(), nanos))
+}
+
 #[test]
 fn help_includes_commands() {
     let exe = env!("CARGO_BIN_EXE_threebody-cli");
@@ -365,6 +373,91 @@ fn factory_runs_once_with_mock_llm() {
     assert!(tmp_dir.join("evaluation_input.json").exists());
     assert!(tmp_dir.join("evaluation_history.json").exists());
     assert!(tmp_dir.join("evaluation.tex").exists());
+}
+
+#[test]
+fn factory_archive_seed_recursively_merges_prior_runs() {
+    let exe = env!("CARGO_BIN_EXE_threebody-cli");
+    let root = unique_temp_dir("threebody_factory_seeded");
+    let prior_out = root.join("prior").join("nested").join("run_a");
+    let seeded_out = root.join("seeded_run");
+    if root.exists() {
+        let _ = fs::remove_dir_all(&root);
+    }
+    fs::create_dir_all(prior_out.parent().unwrap()).expect("create prior parent");
+
+    let prior = Command::new(exe)
+        .args([
+            "factory",
+            "--out-dir",
+            prior_out.to_str().unwrap(),
+            "--max-iters",
+            "1",
+            "--auto",
+            "--steps",
+            "5",
+            "--dt",
+            "0.01",
+            "--seed",
+            "123",
+            "--llm-mode",
+            "mock",
+        ])
+        .output()
+        .expect("run prior factory");
+    assert!(
+        prior.status.success(),
+        "prior run failed: {}",
+        String::from_utf8_lossy(&prior.stderr)
+    );
+    assert!(prior_out.join("equation_search_archive.json").exists());
+
+    let seeded = Command::new(exe)
+        .args([
+            "factory",
+            "--out-dir",
+            seeded_out.to_str().unwrap(),
+            "--max-iters",
+            "1",
+            "--auto",
+            "--steps",
+            "5",
+            "--dt",
+            "0.01",
+            "--seed",
+            "999",
+            "--llm-mode",
+            "mock",
+            "--equation-archive-seed",
+            root.join("prior").to_str().unwrap(),
+        ])
+        .output()
+        .expect("run seeded factory");
+    assert!(
+        seeded.status.success(),
+        "seeded run failed: {}",
+        String::from_utf8_lossy(&seeded.stderr)
+    );
+
+    let seeded_meta = seeded_out.join("equation_search_archive_seeded_from.json");
+    assert!(seeded_meta.exists(), "expected seed-merge metadata file");
+    let seeded_json = fs::read_to_string(&seeded_meta).expect("read seeded metadata");
+    let seeded_value: serde_json::Value = serde_json::from_str(&seeded_json).unwrap();
+    let seed_paths = seeded_value
+        .get("seed_paths")
+        .and_then(|v| v.as_array())
+        .expect("seed_paths array");
+    assert!(
+        !seed_paths.is_empty(),
+        "expected at least one resolved seed archive path"
+    );
+    let seeded_count = seeded_value
+        .get("archive_node_count_after_seed")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    assert!(seeded_count > 0, "expected merged archive nodes");
+
+    let _ = fs::remove_dir_all(&root);
 }
 
 #[test]
