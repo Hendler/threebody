@@ -975,6 +975,16 @@ fn predictability_takens_writes_report_with_sensitivity_fields() {
         .and_then(|v| v.as_str())
         .unwrap_or_default();
     assert!(model == "linear" || model == "rational");
+    let arch = best.get("architecture").expect("architecture metadata in best row");
+    assert!(arch.get("model_family").and_then(|v| v.as_str()).is_some());
+    assert!(arch
+        .get("feature_dim")
+        .and_then(|v| v.as_u64())
+        .map_or(false, |v| v > 0));
+    assert!(arch
+        .get("parameter_count")
+        .and_then(|v| v.as_u64())
+        .map_or(false, |v| v > 0));
     assert!(best.get("holdout_mse").and_then(|v| v.as_f64()).is_some());
     assert!(best
         .get("holdout_sensitivity")

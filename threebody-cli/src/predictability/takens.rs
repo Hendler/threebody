@@ -42,6 +42,7 @@ enum ModelKind {
     DeltaLinear,
     DeltaRational,
     DeltaMlp,
+    DeltaTcn,
 }
 
 impl ModelKind {
@@ -55,10 +56,10 @@ impl ModelKind {
                 "delta_rational" | "residual_rational" => {
                     push_unique_model(&mut out, Self::DeltaRational)
                 }
-                "delta_mlp" | "residual_mlp" | "mlp" | "nn" | "neural" | "delta_tcn"
-                | "residual_tcn" | "tcn" => {
+                "delta_mlp" | "residual_mlp" | "mlp" | "nn" | "neural" => {
                     push_unique_model(&mut out, Self::DeltaMlp)
                 }
+                "delta_tcn" | "residual_tcn" | "tcn" => push_unique_model(&mut out, Self::DeltaTcn),
                 "delta" | "residual" => {
                     push_unique_model(&mut out, Self::DeltaLinear);
                     push_unique_model(&mut out, Self::DeltaRational);
@@ -70,10 +71,11 @@ impl ModelKind {
                         push_unique_model(&mut out, Self::DeltaLinear);
                         push_unique_model(&mut out, Self::DeltaRational);
                         push_unique_model(&mut out, Self::DeltaMlp);
+                        push_unique_model(&mut out, Self::DeltaTcn);
                     }
                 }
                 _ => anyhow::bail!(
-                    "unknown model kind: {tok} (expected linear|rational|delta_linear|delta_rational|delta_mlp|both|all or CSV list)"
+                    "unknown model kind: {tok} (expected linear|rational|delta_linear|delta_rational|delta_mlp|delta_tcn|both|all or CSV list)"
                 ),
             }
         }
@@ -100,7 +102,21 @@ fn model_kind_name(model: ModelKind) -> &'static str {
         ModelKind::DeltaLinear => "delta_linear",
         ModelKind::DeltaRational => "delta_rational",
         ModelKind::DeltaMlp => "delta_mlp",
+        ModelKind::DeltaTcn => "delta_tcn",
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ModelArchitecture {
+    model_family: String,
+    feature_map: String,
+    input_dim: usize,
+    feature_dim: usize,
+    depth: usize,
+    width: usize,
+    hidden_layers: usize,
+    hidden_widths: Vec<usize>,
+    parameter_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +143,120 @@ struct TakensConfig {
     split_mode: SplitMode,
 }
 
+fn infer_model_architecture(config: &TakensConfig, n_sensors: usize) -> anyhow::Result<ModelArchitecture> {
+    if n_sensors == 0 {
+        anyhow::bail!("n_sensors must be positive for architecture inference");
+    }
+    let input_dim = config
+        .m
+        .checked_mul(n_sensors)
+        .ok_or_else(|| anyhow::anyhow!("input_dim overflow for m={} sensors={}", config.m, n_sensors))?;
+    let affine_dim = input_dim
+        .checked_add(1)
+        .ok_or_else(|| anyhow::anyhow!("affine_dim overflow for input_dim={input_dim}"))?;
+
+    let arch = match config.model {
+        ModelKind::Linear => ModelArchitecture {
+            model_family: "local_linear".to_string(),
+            feature_map: "affine".to_string(),
+            input_dim,
+            feature_dim: affine_dim,
+            depth: 1,
+            width: affine_dim,
+            hidden_layers: 0,
+            hidden_widths: Vec::new(),
+            parameter_count: affine_dim,
+        },
+        ModelKind::DeltaLinear => ModelArchitecture {
+            model_family: "delta_local_linear".to_string(),
+            feature_map: "affine".to_string(),
+            input_dim,
+            feature_dim: affine_dim,
+            depth: 1,
+            width: affine_dim,
+            hidden_layers: 0,
+            hidden_widths: Vec::new(),
+            parameter_count: affine_dim,
+        },
+        ModelKind::Rational => ModelArchitecture {
+            model_family: "local_rational".to_string(),
+            feature_map: "affine_rational".to_string(),
+            input_dim,
+            feature_dim: affine_dim,
+            depth: 1,
+            width: affine_dim,
+            hidden_layers: 0,
+            hidden_widths: Vec::new(),
+            parameter_count: affine_dim
+                .checked_mul(2)
+                .ok_or_else(|| anyhow::anyhow!("parameter_count overflow for rational model"))?,
+        },
+        ModelKind::DeltaRational => ModelArchitecture {
+            model_family: "delta_local_rational".to_string(),
+            feature_map: "affine_rational".to_string(),
+            input_dim,
+            feature_dim: affine_dim,
+            depth: 1,
+            width: affine_dim,
+            hidden_layers: 0,
+            hidden_widths: Vec::new(),
+            parameter_count: affine_dim
+                .checked_mul(2)
+                .ok_or_else(|| anyhow::anyhow!("parameter_count overflow for delta_rational model"))?,
+        },
+        ModelKind::DeltaMlp | ModelKind::DeltaTcn => {
+            let delta_dim = n_sensors
+                .checked_mul(config.m.saturating_sub(1))
+                .ok_or_else(|| anyhow::anyhow!("delta feature dimension overflow"))?;
+            let tcn_extra = if matches!(config.model, ModelKind::DeltaTcn) {
+                n_sensors
+                    .checked_mul(config.m.saturating_sub(2))
+                    .and_then(|v| v.checked_mul(2))
+                    .ok_or_else(|| anyhow::anyhow!("tcn feature dimension overflow"))?
+            } else {
+                0
+            };
+            let feature_dim = input_dim
+                .checked_add(delta_dim)
+                .and_then(|v| v.checked_add(tcn_extra))
+                .ok_or_else(|| anyhow::anyhow!("feature_dim overflow for neural model"))?;
+            let h1 = config.k.clamp(4, 64);
+            let h2 = (h1 / 2).clamp(4, 32);
+            let layer1 = h1
+                .checked_mul(feature_dim)
+                .and_then(|v| v.checked_add(h1))
+                .ok_or_else(|| anyhow::anyhow!("layer1 parameter overflow"))?;
+            let layer2 = h2
+                .checked_mul(h1)
+                .and_then(|v| v.checked_add(h2))
+                .ok_or_else(|| anyhow::anyhow!("layer2 parameter overflow"))?;
+            let layer3 = h2
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("layer3 parameter overflow"))?;
+            let parameter_count = layer1
+                .checked_add(layer2)
+                .and_then(|v| v.checked_add(layer3))
+                .ok_or_else(|| anyhow::anyhow!("total neural parameter overflow"))?;
+            ModelArchitecture {
+                model_family: "delta_neural".to_string(),
+                feature_map: if matches!(config.model, ModelKind::DeltaTcn) {
+                    "temporal_conv".to_string()
+                } else {
+                    "delta_window".to_string()
+                },
+                input_dim,
+                feature_dim,
+                depth: 3,
+                width: h1.max(h2),
+                hidden_layers: 2,
+                hidden_widths: vec![h1, h2],
+                parameter_count,
+            }
+        }
+    };
+    Ok(arch)
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct SensitivitySummary {
     n_pairs: usize,
@@ -138,6 +268,7 @@ struct SensitivitySummary {
 #[derive(Debug, Clone, Serialize)]
 struct GridEval {
     config: TakensConfig,
+    architecture: ModelArchitecture,
     n_embedded: usize,
     split: SplitCounts,
     rank_score: f64,
@@ -151,6 +282,7 @@ struct GridEval {
 #[derive(Debug, Clone, Serialize)]
 struct BestEval {
     config: TakensConfig,
+    architecture: ModelArchitecture,
     n_embedded: usize,
     split: SplitCounts,
     rank_score: f64,
@@ -160,6 +292,16 @@ struct BestEval {
     holdout_baseline_mse: f64,
     holdout_relative_improvement: f64,
     holdout_sensitivity: SensitivitySummary,
+    horizon_metrics: Vec<HorizonMetric>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct HorizonMetric {
+    horizon: usize,
+    n_eval: usize,
+    holdout_mse: f64,
+    holdout_baseline_mse: f64,
+    holdout_relative_improvement: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -182,6 +324,7 @@ struct SensorGateSummary {
 #[derive(Debug, Clone, Serialize)]
 struct DeltaMlpDiagnostics {
     config: TakensConfig,
+    architecture: ModelArchitecture,
     n_embedded: usize,
     split: SplitCounts,
     val_mse: f64,
@@ -325,15 +468,18 @@ pub(crate) fn run_takens(
                             * (1.0
                                 + sensitivity_weight * val_sensitivity.median_rel_error.max(0.0));
 
+                        let config = TakensConfig {
+                            tau,
+                            m,
+                            k,
+                            lambda,
+                            model,
+                            split_mode,
+                        };
+                        let architecture = infer_model_architecture(&config, n_sensors)?;
                         let row = GridEval {
-                            config: TakensConfig {
-                                tau,
-                                m,
-                                k,
-                                lambda,
-                                model,
-                                split_mode,
-                            },
+                            config,
+                            architecture,
                             n_embedded: samples.len(),
                             split: SplitCounts {
                                 train: split.train.len(),
@@ -381,9 +527,41 @@ pub(crate) fn run_takens(
     } else {
         0.0
     };
+    let mut horizon_metrics = Vec::new();
+    let best_samples = build_delay_embedding_multi(
+        &aligned.target,
+        &aligned.sensors,
+        best_row.config.tau,
+        best_row.config.m,
+    )?;
+    let best_split = split_indices(
+        best_samples.len(),
+        best_row.config.split_mode,
+        seed,
+        train_frac,
+        val_frac,
+    )?;
+    if matches!(best_row.config.split_mode, SplitMode::Chronological) {
+        assert_no_chronological_leakage(&best_samples, &best_split)?;
+    }
+    for horizon in [1usize, 2, 4, 8] {
+        if let Some(metric) = evaluate_recursive_horizon_metric(
+            &best_samples,
+            &aligned.target,
+            &best_split.train,
+            &best_split.holdout,
+            &best_row.config,
+            n_sensors,
+            target_is_energy,
+            horizon,
+        )? {
+            horizon_metrics.push(metric);
+        }
+    }
 
     let best = BestEval {
         config: best_row.config.clone(),
+        architecture: best_row.architecture.clone(),
         n_embedded: best_row.n_embedded,
         split: best_row.split.clone(),
         rank_score: best_row.rank_score,
@@ -393,6 +571,7 @@ pub(crate) fn run_takens(
         holdout_baseline_mse: best_row.holdout_baseline_mse,
         holdout_relative_improvement: rel,
         holdout_sensitivity: best_holdout_sensitivity,
+        horizon_metrics,
     };
 
     let mut model_eval_counts = BTreeMap::<String, usize>::new();
@@ -405,7 +584,9 @@ pub(crate) fn run_takens(
     let mut notes = vec![
         "Takens embedding uses one-step target x_{t+1} and delay coordinates from selected sensor columns."
             .to_string(),
-        "Model families include local linear, local rational, residual local variants (delta_*), and a temporal-window neural residual baseline with sparse sensor gates (delta_mlp/delta_tcn aliases)."
+        "Model families include local linear, local rational, residual local variants (delta_*), and temporal neural baselines (delta_mlp, delta_tcn)."
+            .to_string(),
+        "Each row now includes architecture metadata (model_family, depth/width, feature_dim, parameter_count)."
             .to_string(),
         "Primary score is strict holdout MSE; baseline is persistence y_hat=x_t.".to_string(),
         "Selection rank_score = val_mse * (1 + sensitivity_weight * val_sensitivity_median)."
@@ -445,6 +626,11 @@ pub(crate) fn run_takens(
     } else {
         None
     };
+    if best.horizon_metrics.is_empty() {
+        notes.push(
+            "multi-horizon metrics unavailable for this best config (requires single-sensor embedding with tau=1 and sufficient holdout continuity).".to_string(),
+        );
+    }
 
     let report = TakensReport {
         version: PREDICTABILITY_VERSION.to_string(),
@@ -968,10 +1154,17 @@ impl LocalModel {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+enum NeuralFeatureMap {
+    DeltaWindow,
+    TemporalConv,
+}
+
 #[derive(Debug, Clone)]
-struct DeltaMlpModel {
+struct DeltaNeuralModel {
     n_sensors: usize,
     sensor_gates: Vec<f64>,
+    feature_map: NeuralFeatureMap,
     input_mean: Vec<f64>,
     input_scale: Vec<f64>,
     target_mean: f64,
@@ -984,13 +1177,18 @@ struct DeltaMlpModel {
     b3: f64,
 }
 
-impl DeltaMlpModel {
+impl DeltaNeuralModel {
     fn predict(&self, query_z: &[f64]) -> Option<f64> {
         if query_z.len() != self.input_mean.len() || query_z.is_empty() || self.n_sensors == 0 {
             return None;
         }
         let x_norm = normalize_input(query_z, &self.input_mean, &self.input_scale)?;
-        let x_feat = build_temporal_window_features(&x_norm, self.n_sensors, &self.sensor_gates)?;
+        let x_feat = build_neural_features(
+            &x_norm,
+            self.n_sensors,
+            &self.sensor_gates,
+            self.feature_map,
+        )?;
         let (_, _, _, h2) = self.forward_hidden(&x_feat)?;
         let y_norm = dot(&self.w3, &h2) + self.b3;
         if !y_norm.is_finite() {
@@ -1006,7 +1204,12 @@ impl DeltaMlpModel {
             return None;
         }
         let x_norm = normalize_input(query_z, &self.input_mean, &self.input_scale)?;
-        let x_feat = build_temporal_window_features(&x_norm, self.n_sensors, &self.sensor_gates)?;
+        let x_feat = build_neural_features(
+            &x_norm,
+            self.n_sensors,
+            &self.sensor_gates,
+            self.feature_map,
+        )?;
         let (_, h1, _, h2) = self.forward_hidden(&x_feat)?;
         let h1_n = h1.len();
         let h2_n = h2.len();
@@ -1052,11 +1255,12 @@ impl DeltaMlpModel {
             *slot = acc;
         }
 
-        let g_xn = backprop_temporal_window_features(
+        let g_xn = backprop_neural_features(
             &g_feat,
             raw_d,
             self.n_sensors,
             &self.sensor_gates,
+            self.feature_map,
         )?;
         let mut grad = vec![0.0; raw_d];
         for j in 0..raw_d {
@@ -1194,6 +1398,129 @@ fn backprop_temporal_window_features(
     Some(grad_x)
 }
 
+fn build_tcn_features(
+    x_norm: &[f64],
+    n_sensors: usize,
+    sensor_gates: &[f64],
+) -> Option<Vec<f64>> {
+    let n_lags = infer_lag_count(x_norm.len(), n_sensors)?;
+    if sensor_gates.len() != n_sensors {
+        return None;
+    }
+    let mut out = Vec::with_capacity(
+        x_norm.len()
+            + n_sensors * n_lags.saturating_sub(1)
+            + n_sensors * n_lags.saturating_sub(2) * 2,
+    );
+    for lag in 0..n_lags {
+        let base = lag * n_sensors;
+        for (s, gate) in sensor_gates.iter().enumerate().take(n_sensors) {
+            out.push(*gate * x_norm[base + s]);
+        }
+    }
+    for lag in 0..n_lags.saturating_sub(1) {
+        let a = lag * n_sensors;
+        let b = (lag + 1) * n_sensors;
+        for (s, gate) in sensor_gates.iter().enumerate().take(n_sensors) {
+            out.push(*gate * (x_norm[a + s] - x_norm[b + s]));
+        }
+    }
+    for lag in 0..n_lags.saturating_sub(2) {
+        let a = lag * n_sensors;
+        let b = (lag + 1) * n_sensors;
+        let c = (lag + 2) * n_sensors;
+        for (s, gate) in sensor_gates.iter().enumerate().take(n_sensors) {
+            out.push(*gate * (x_norm[a + s] - x_norm[c + s]));
+            out.push(*gate * (x_norm[a + s] - 2.0 * x_norm[b + s] + x_norm[c + s]));
+        }
+    }
+    Some(out)
+}
+
+fn backprop_tcn_features(
+    grad_feat: &[f64],
+    raw_dim: usize,
+    n_sensors: usize,
+    sensor_gates: &[f64],
+) -> Option<Vec<f64>> {
+    let n_lags = infer_lag_count(raw_dim, n_sensors)?;
+    if sensor_gates.len() != n_sensors {
+        return None;
+    }
+    let mut grad_x = vec![0.0; raw_dim];
+    let mut pos = 0usize;
+    for lag in 0..n_lags {
+        let base = lag * n_sensors;
+        for (s, gate) in sensor_gates.iter().enumerate().take(n_sensors) {
+            let g = *grad_feat.get(pos)?;
+            grad_x[base + s] += *gate * g;
+            pos += 1;
+        }
+    }
+    for lag in 0..n_lags.saturating_sub(1) {
+        let a = lag * n_sensors;
+        let b = (lag + 1) * n_sensors;
+        for (s, gate) in sensor_gates.iter().enumerate().take(n_sensors) {
+            let g = *grad_feat.get(pos)?;
+            grad_x[a + s] += *gate * g;
+            grad_x[b + s] -= *gate * g;
+            pos += 1;
+        }
+    }
+    for lag in 0..n_lags.saturating_sub(2) {
+        let a = lag * n_sensors;
+        let b = (lag + 1) * n_sensors;
+        let c = (lag + 2) * n_sensors;
+        for (s, gate) in sensor_gates.iter().enumerate().take(n_sensors) {
+            let g_dilated = *grad_feat.get(pos)?;
+            pos += 1;
+            grad_x[a + s] += *gate * g_dilated;
+            grad_x[c + s] -= *gate * g_dilated;
+
+            let g_curvature = *grad_feat.get(pos)?;
+            pos += 1;
+            grad_x[a + s] += *gate * g_curvature;
+            grad_x[b + s] -= 2.0 * *gate * g_curvature;
+            grad_x[c + s] += *gate * g_curvature;
+        }
+    }
+    if pos != grad_feat.len() {
+        return None;
+    }
+    Some(grad_x)
+}
+
+fn build_neural_features(
+    x_norm: &[f64],
+    n_sensors: usize,
+    sensor_gates: &[f64],
+    feature_map: NeuralFeatureMap,
+) -> Option<Vec<f64>> {
+    match feature_map {
+        NeuralFeatureMap::DeltaWindow => {
+            build_temporal_window_features(x_norm, n_sensors, sensor_gates)
+        }
+        NeuralFeatureMap::TemporalConv => build_tcn_features(x_norm, n_sensors, sensor_gates),
+    }
+}
+
+fn backprop_neural_features(
+    grad_feat: &[f64],
+    raw_dim: usize,
+    n_sensors: usize,
+    sensor_gates: &[f64],
+    feature_map: NeuralFeatureMap,
+) -> Option<Vec<f64>> {
+    match feature_map {
+        NeuralFeatureMap::DeltaWindow => {
+            backprop_temporal_window_features(grad_feat, raw_dim, n_sensors, sensor_gates)
+        }
+        NeuralFeatureMap::TemporalConv => {
+            backprop_tcn_features(grad_feat, raw_dim, n_sensors, sensor_gates)
+        }
+    }
+}
+
 fn learn_sparse_sensor_gates(x_norm: &[Vec<f64>], y_norm: &[f64], n_sensors: usize) -> Vec<f64> {
     if x_norm.is_empty() || y_norm.is_empty() || n_sensors == 0 {
         return vec![1.0; n_sensors.max(1)];
@@ -1261,12 +1588,14 @@ fn learn_sparse_sensor_gates(x_norm: &[Vec<f64>], y_norm: &[f64], n_sensors: usi
 
     // Keep a minimum active sensor budget so the temporal model does not collapse to one channel.
     let active_threshold = SENSOR_GATE_ACTIVE_THRESHOLD;
+    let max_active = n_sensors.min(8).max(1);
+    let min_active = max_active.min(2);
     let target_active = if n_sensors <= 2 {
         1
     } else {
         ((n_sensors as f64) * 0.30).ceil() as usize
     }
-    .clamp(2, n_sensors.min(8));
+    .clamp(min_active, max_active);
     let active_now = gates.iter().filter(|g| **g >= active_threshold).count();
     if active_now < target_active {
         let mut ranked = (0..n_sensors).collect::<Vec<_>>();
@@ -1388,6 +1717,7 @@ fn build_delta_mlp_diagnostics(
     };
     Ok(DeltaMlpDiagnostics {
         config: row.config.clone(),
+        architecture: row.architecture.clone(),
         n_embedded: row.n_embedded,
         split: row.split.clone(),
         val_mse: row.val_mse,
@@ -1414,7 +1744,46 @@ fn fit_delta_mlp_model(
     hidden_hint: usize,
     lambda: f64,
     target_is_energy: bool,
-) -> Option<DeltaMlpModel> {
+) -> Option<DeltaNeuralModel> {
+    fit_delta_neural_model(
+        samples,
+        train_indices,
+        n_sensors,
+        hidden_hint,
+        lambda,
+        target_is_energy,
+        NeuralFeatureMap::DeltaWindow,
+    )
+}
+
+fn fit_delta_tcn_model(
+    samples: &[DelaySample],
+    train_indices: &[usize],
+    n_sensors: usize,
+    hidden_hint: usize,
+    lambda: f64,
+    target_is_energy: bool,
+) -> Option<DeltaNeuralModel> {
+    fit_delta_neural_model(
+        samples,
+        train_indices,
+        n_sensors,
+        hidden_hint,
+        lambda,
+        target_is_energy,
+        NeuralFeatureMap::TemporalConv,
+    )
+}
+
+fn fit_delta_neural_model(
+    samples: &[DelaySample],
+    train_indices: &[usize],
+    n_sensors: usize,
+    hidden_hint: usize,
+    lambda: f64,
+    target_is_energy: bool,
+    feature_map: NeuralFeatureMap,
+) -> Option<DeltaNeuralModel> {
     let first = samples.get(*train_indices.first()?)?;
     let d = first.z.len();
     if d == 0 || n_sensors == 0 {
@@ -1482,7 +1851,7 @@ fn fit_delta_mlp_model(
     let sensor_gates = learn_sparse_sensor_gates(&x_norm, &y_norm, n_sensors);
     let mut x_feat = Vec::with_capacity(train_n);
     for x in x_norm.iter().take(train_n) {
-        x_feat.push(build_temporal_window_features(x, n_sensors, &sensor_gates)?);
+        x_feat.push(build_neural_features(x, n_sensors, &sensor_gates, feature_map)?);
     }
     let p = x_feat.first()?.len();
     if p == 0 {
@@ -1702,9 +2071,10 @@ fn fit_delta_mlp_model(
         return None;
     }
 
-    Some(DeltaMlpModel {
+    Some(DeltaNeuralModel {
         n_sensors,
         sensor_gates,
+        feature_map,
         input_mean,
         input_scale,
         target_mean,
@@ -1817,9 +2187,41 @@ fn fit_local_model(
         ModelKind::Rational => fit_rational_model(samples, &neighbors, lambda, false)?,
         ModelKind::DeltaLinear => fit_linear_model(samples, &neighbors, lambda, true)?,
         ModelKind::DeltaRational => fit_rational_model(samples, &neighbors, lambda, true)?,
-        ModelKind::DeltaMlp => return None,
+        ModelKind::DeltaMlp | ModelKind::DeltaTcn => return None,
     };
     Some((local, fallback))
+}
+
+fn fit_delta_neural_for_model(
+    samples: &[DelaySample],
+    train_indices: &[usize],
+    k: usize,
+    lambda: f64,
+    model: ModelKind,
+    n_sensors: usize,
+    target_is_energy: bool,
+) -> anyhow::Result<DeltaNeuralModel> {
+    match model {
+        ModelKind::DeltaMlp => fit_delta_mlp_model(
+            samples,
+            train_indices,
+            n_sensors,
+            k,
+            lambda,
+            target_is_energy,
+        )
+        .ok_or_else(|| anyhow::anyhow!("delta_mlp fit failed")),
+        ModelKind::DeltaTcn => fit_delta_tcn_model(
+            samples,
+            train_indices,
+            n_sensors,
+            k,
+            lambda,
+            target_is_energy,
+        )
+        .ok_or_else(|| anyhow::anyhow!("delta_tcn fit failed")),
+        _ => anyhow::bail!("model is not neural: {}", model_kind_name(model)),
+    }
 }
 
 fn evaluate_model_mse(
@@ -1836,18 +2238,25 @@ fn evaluate_model_mse(
         anyhow::bail!("empty evaluation split");
     }
 
-    if matches!(model, ModelKind::DeltaMlp) {
-        let mlp = fit_delta_mlp_model(samples, train_indices, n_sensors, k, lambda, target_is_energy)
-            .ok_or_else(|| anyhow::anyhow!("delta_mlp fit failed"))?;
+    if matches!(model, ModelKind::DeltaMlp | ModelKind::DeltaTcn) {
+        let neural = fit_delta_neural_for_model(
+            samples,
+            train_indices,
+            k,
+            lambda,
+            model,
+            n_sensors,
+            target_is_energy,
+        )?;
         let mut se = 0.0;
         let mut n = 0usize;
         for &i in eval_indices {
             let s = samples
                 .get(i)
                 .ok_or_else(|| anyhow::anyhow!("evaluation index out of bounds: {i}"))?;
-            let pred = mlp
+            let pred = neural
                 .predict(&s.z)
-                .ok_or_else(|| anyhow::anyhow!("delta_mlp prediction failed for index {i}"))?;
+                .ok_or_else(|| anyhow::anyhow!("neural prediction failed for index {i}"))?;
             let err = pred - s.y;
             se += err * err;
             n += 1;
@@ -1887,10 +2296,17 @@ fn evaluate_sensitivity_summary(
         anyhow::bail!("sensitivity evaluation requires at least 2 points");
     }
 
-    let fitted_mlp = if matches!(model, ModelKind::DeltaMlp) {
+    let fitted_neural = if matches!(model, ModelKind::DeltaMlp | ModelKind::DeltaTcn) {
         Some(
-            fit_delta_mlp_model(samples, train_indices, n_sensors, k, lambda, target_is_energy)
-                .ok_or_else(|| anyhow::anyhow!("delta_mlp fit failed"))?,
+            fit_delta_neural_for_model(
+                samples,
+                train_indices,
+                k,
+                lambda,
+                model,
+                n_sensors,
+                target_is_energy,
+            )?,
         )
     } else {
         None
@@ -1916,9 +2332,10 @@ fn evaluate_sensitivity_summary(
             .get(j)
             .ok_or_else(|| anyhow::anyhow!("sensitivity peer index out of bounds: {j}"))?;
 
-        let grad = if let Some(mlp) = fitted_mlp.as_ref() {
-            mlp.gradient(&s_i.z)
-                .ok_or_else(|| anyhow::anyhow!("delta_mlp gradient failed for index {i}"))?
+        let grad = if let Some(neural) = fitted_neural.as_ref() {
+            neural
+                .gradient(&s_i.z)
+                .ok_or_else(|| anyhow::anyhow!("neural gradient failed for index {i}"))?
         } else {
             let (local, _) = fit_local_model(samples, train_indices, &s_i.z, k, lambda, model)
                 .ok_or_else(|| anyhow::anyhow!("local model fit failed for index {i}"))?;
@@ -1999,12 +2416,143 @@ fn evaluate_persistence_mse(
     Ok(se / n as f64)
 }
 
+fn build_recursive_query_single_sensor(
+    target: &[f64],
+    start_t: usize,
+    current_t: usize,
+    tau: usize,
+    m: usize,
+    predicted: &BTreeMap<usize, f64>,
+) -> anyhow::Result<Vec<f64>> {
+    let mut z = Vec::with_capacity(m);
+    for j in 0..m {
+        let lag_t = current_t
+            .checked_sub(j * tau)
+            .ok_or_else(|| anyhow::anyhow!("lag underflow while building recursive query"))?;
+        let v = if lag_t > start_t {
+            predicted.get(&lag_t).copied().ok_or_else(|| {
+                anyhow::anyhow!("missing predicted value for recursive lag time {lag_t}")
+            })?
+        } else {
+            *target
+                .get(lag_t)
+                .ok_or_else(|| anyhow::anyhow!("target index out of bounds for lag time {lag_t}"))?
+        };
+        if !v.is_finite() {
+            anyhow::bail!("non-finite value in recursive query at lag time {}", lag_t);
+        }
+        z.push(v);
+    }
+    Ok(z)
+}
+
+fn evaluate_recursive_horizon_metric(
+    samples: &[DelaySample],
+    target: &[f64],
+    train_indices: &[usize],
+    eval_indices: &[usize],
+    config: &TakensConfig,
+    n_sensors: usize,
+    target_is_energy: bool,
+    horizon: usize,
+) -> anyhow::Result<Option<HorizonMetric>> {
+    if horizon == 0 || eval_indices.is_empty() || n_sensors != 1 {
+        return Ok(None);
+    }
+    let fitted_neural = if matches!(config.model, ModelKind::DeltaMlp | ModelKind::DeltaTcn) {
+        Some(fit_delta_neural_for_model(
+            samples,
+            train_indices,
+            config.k,
+            config.lambda,
+            config.model,
+            n_sensors,
+            target_is_energy,
+        )?)
+    } else {
+        None
+    };
+
+    let mut se_model = 0.0;
+    let mut se_baseline = 0.0;
+    let mut n_eval = 0usize;
+    for &idx in eval_indices {
+        let s0 = samples
+            .get(idx)
+            .ok_or_else(|| anyhow::anyhow!("evaluation index out of bounds: {idx}"))?;
+        let t0 = s0.target_step.saturating_sub(1);
+        let t_h = t0 + horizon;
+        let Some(&truth_h) = target.get(t_h) else {
+            continue;
+        };
+
+        let mut predicted = BTreeMap::<usize, f64>::new();
+        for step in 1..=horizon {
+            let current_t = t0 + step - 1;
+            let query = build_recursive_query_single_sensor(
+                target,
+                t0,
+                current_t,
+                config.tau,
+                config.m,
+                &predicted,
+            )?;
+            let pred = if let Some(neural) = fitted_neural.as_ref() {
+                neural
+                    .predict(&query)
+                    .ok_or_else(|| anyhow::anyhow!("neural recursive prediction failed"))?
+            } else {
+                fit_local_model(
+                    samples,
+                    train_indices,
+                    &query,
+                    config.k,
+                    config.lambda,
+                    config.model,
+                )
+                .and_then(|(local, fallback)| local.predict(&query).or(Some(fallback)))
+                .ok_or_else(|| anyhow::anyhow!("local recursive prediction failed"))?
+            };
+            predicted.insert(current_t + 1, pred);
+        }
+
+        let pred_h = predicted.get(&t_h).copied().ok_or_else(|| {
+            anyhow::anyhow!("missing recursive prediction at horizon time {t_h}")
+        })?;
+        let err = pred_h - truth_h;
+        se_model += err * err;
+
+        let base_err = s0.x_t - truth_h;
+        se_baseline += base_err * base_err;
+        n_eval += 1;
+    }
+
+    if n_eval == 0 {
+        return Ok(None);
+    }
+    let holdout_mse = se_model / n_eval as f64;
+    let holdout_baseline_mse = se_baseline / n_eval as f64;
+    let holdout_relative_improvement = if holdout_baseline_mse > 0.0 {
+        (holdout_baseline_mse - holdout_mse) / holdout_baseline_mse
+    } else {
+        0.0
+    };
+    Ok(Some(HorizonMetric {
+        horizon,
+        n_eval,
+        holdout_mse,
+        holdout_baseline_mse,
+        holdout_relative_improvement,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         assert_no_chronological_leakage, build_delay_embedding, build_delay_embedding_multi,
-        evaluate_model_mse, evaluate_persistence_mse, evaluate_sensitivity_summary, split_indices,
-        ModelKind, SplitMode,
+        evaluate_model_mse, evaluate_persistence_mse, evaluate_recursive_horizon_metric,
+        evaluate_sensitivity_summary, infer_model_architecture, split_indices, ModelKind,
+        SplitMode, TakensConfig,
     };
 
     fn logistic_series(n: usize, r: f64, x0: f64) -> Vec<f64> {
@@ -2353,6 +2901,128 @@ mod tests {
     }
 
     #[test]
+    fn delta_tcn_beats_persistence_on_nonlinear_residual_fixture() {
+        let (target, sensor_u) = nonlinear_delta_series(1200, 0.1);
+        let emb = build_delay_embedding_multi(&target, &[target.clone(), sensor_u], 1, 1).unwrap();
+        let split = split_indices(emb.len(), SplitMode::Chronological, 21, 0.7, 0.15).unwrap();
+
+        let delta_tcn_mse = evaluate_model_mse(
+            &emb,
+            &split.train,
+            &split.holdout,
+            12,
+            1e-6,
+            ModelKind::DeltaTcn,
+            2,
+            false,
+        )
+        .unwrap();
+        let baseline_mse = evaluate_persistence_mse(&emb, &split.holdout).unwrap();
+
+        assert!(
+            delta_tcn_mse < baseline_mse * 0.75,
+            "expected delta_tcn to beat persistence on nonlinear residual fixture (baseline={} delta_tcn={})",
+            baseline_mse,
+            delta_tcn_mse
+        );
+    }
+
+    #[test]
+    fn recursive_horizon_metric_is_available_for_single_sensor() {
+        let series = logistic_series(800, 3.75, 0.23);
+        let emb = build_delay_embedding(&series, 1, 3).unwrap();
+        let split = split_indices(emb.len(), SplitMode::Chronological, 7, 0.7, 0.15).unwrap();
+        let cfg = TakensConfig {
+            tau: 1,
+            m: 3,
+            k: 12,
+            lambda: 1e-6,
+            model: ModelKind::DeltaLinear,
+            split_mode: SplitMode::Chronological,
+        };
+        let metric = evaluate_recursive_horizon_metric(
+            &emb,
+            &series,
+            &split.train,
+            &split.holdout,
+            &cfg,
+            1,
+            false,
+            4,
+        )
+        .unwrap()
+        .expect("horizon metric");
+        assert_eq!(metric.horizon, 4);
+        assert!(metric.n_eval > 0);
+        assert!(metric.holdout_mse.is_finite());
+        assert!(metric.holdout_baseline_mse.is_finite());
+    }
+
+    #[test]
+    fn infer_model_architecture_reports_expected_counts_for_local_models() {
+        let linear_cfg = TakensConfig {
+            tau: 1,
+            m: 5,
+            k: 10,
+            lambda: 1e-6,
+            model: ModelKind::Linear,
+            split_mode: SplitMode::Chronological,
+        };
+        let linear = infer_model_architecture(&linear_cfg, 2).expect("linear arch");
+        assert_eq!(linear.model_family, "local_linear");
+        assert_eq!(linear.feature_map, "affine");
+        assert_eq!(linear.input_dim, 10);
+        assert_eq!(linear.feature_dim, 11);
+        assert_eq!(linear.depth, 1);
+        assert_eq!(linear.width, 11);
+        assert_eq!(linear.hidden_layers, 0);
+        assert!(linear.hidden_widths.is_empty());
+        assert_eq!(linear.parameter_count, 11);
+
+        let rational_cfg = TakensConfig {
+            model: ModelKind::DeltaRational,
+            ..linear_cfg
+        };
+        let rational = infer_model_architecture(&rational_cfg, 2).expect("delta rational arch");
+        assert_eq!(rational.model_family, "delta_local_rational");
+        assert_eq!(rational.feature_dim, 11);
+        assert_eq!(rational.parameter_count, 22);
+    }
+
+    #[test]
+    fn infer_model_architecture_reports_expected_counts_for_neural_models() {
+        let mlp_cfg = TakensConfig {
+            tau: 1,
+            m: 4,
+            k: 12,
+            lambda: 1e-6,
+            model: ModelKind::DeltaMlp,
+            split_mode: SplitMode::Chronological,
+        };
+        let mlp = infer_model_architecture(&mlp_cfg, 3).expect("delta mlp arch");
+        assert_eq!(mlp.model_family, "delta_neural");
+        assert_eq!(mlp.feature_map, "delta_window");
+        assert_eq!(mlp.input_dim, 12);
+        assert_eq!(mlp.feature_dim, 21);
+        assert_eq!(mlp.depth, 3);
+        assert_eq!(mlp.width, 12);
+        assert_eq!(mlp.hidden_layers, 2);
+        assert_eq!(mlp.hidden_widths, vec![12, 6]);
+        assert_eq!(mlp.parameter_count, 349);
+
+        let tcn_cfg = TakensConfig {
+            model: ModelKind::DeltaTcn,
+            ..mlp_cfg
+        };
+        let tcn = infer_model_architecture(&tcn_cfg, 3).expect("delta tcn arch");
+        assert_eq!(tcn.model_family, "delta_neural");
+        assert_eq!(tcn.feature_map, "temporal_conv");
+        assert_eq!(tcn.feature_dim, 33);
+        assert_eq!(tcn.hidden_widths, vec![12, 6]);
+        assert_eq!(tcn.parameter_count, 493);
+    }
+
+    #[test]
     fn sparse_sensor_gates_keep_multiple_channels_active() {
         let n = 240usize;
         let n_sensors = 10usize;
@@ -2391,6 +3061,23 @@ mod tests {
             active,
             gates
         );
+    }
+
+    #[test]
+    fn sparse_sensor_gates_handles_single_sensor_without_panic() {
+        let n = 128usize;
+        let mut x_norm = Vec::with_capacity(n);
+        let mut y_norm = Vec::with_capacity(n);
+        for t in 0..n {
+            let tt = t as f64;
+            let x = (0.05 * tt).sin() + 0.3 * (0.011 * tt).cos();
+            x_norm.push(vec![x, x * 0.9]);
+            y_norm.push(0.7 * x + 0.1 * x.sin());
+        }
+        let gates = super::learn_sparse_sensor_gates(&x_norm, &y_norm, 1);
+        assert_eq!(gates.len(), 1);
+        assert!(gates[0].is_finite());
+        assert!(gates[0] >= 0.0 && gates[0] <= 1.0);
     }
 
     #[test]

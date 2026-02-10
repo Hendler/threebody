@@ -120,6 +120,8 @@ struct EfficacyAggregate {
     best_channel: Option<String>,
     worst_channel: Option<String>,
     claim_status: String,
+    evidence_tier: String,
+    science_claim_allowed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -230,18 +232,20 @@ pub(crate) fn run_report(
         let input: InputTakensReport = serde_json::from_str(&raw).map_err(|e| {
             anyhow::anyhow!("failed to parse report {} as JSON: {}", path.display(), e)
         })?;
+        validate_input_takens_report(&path, &input)?;
 
         let column = input.column.trim().to_string();
-        if column.is_empty() {
-            anyhow::bail!("report {} missing column", path.display());
-        }
         let kind = classify_column(&column);
         let mut rel = input.best.holdout_relative_improvement;
-        if rel == 0.0 && input.best.holdout_baseline_mse > 0.0 {
+        if (!rel.is_finite() || rel == 0.0) && input.best.holdout_baseline_mse > 0.0 {
             rel = (input.best.holdout_baseline_mse - input.best.holdout_mse)
                 / input.best.holdout_baseline_mse;
         }
-        let sensitivity = input.best.holdout_sensitivity.median_rel_error;
+        let sensitivity = if input.best.holdout_sensitivity.median_rel_error.is_finite() {
+            input.best.holdout_sensitivity.median_rel_error
+        } else {
+            f64::INFINITY
+        };
         let effective = rel > thresholds.improvement_threshold
             && sensitivity.is_finite()
             && sensitivity <= thresholds.max_sensitivity_median;
@@ -308,6 +312,33 @@ pub(crate) fn run_report(
         eprintln!("wrote efficacy report: {}", out.display());
     }
 
+    Ok(())
+}
+
+fn validate_input_takens_report(path: &std::path::Path, input: &InputTakensReport) -> anyhow::Result<()> {
+    if input.column.trim().is_empty() {
+        anyhow::bail!("report {} missing column", path.display());
+    }
+    if !input.best.holdout_mse.is_finite() || input.best.holdout_mse < 0.0 {
+        anyhow::bail!(
+            "report {} has invalid holdout_mse={}",
+            path.display(),
+            input.best.holdout_mse
+        );
+    }
+    if !input.best.holdout_baseline_mse.is_finite() || input.best.holdout_baseline_mse < 0.0 {
+        anyhow::bail!(
+            "report {} has invalid holdout_baseline_mse={}",
+            path.display(),
+            input.best.holdout_baseline_mse
+        );
+    }
+    if !input.best.holdout_relative_improvement.is_finite() && input.best.holdout_baseline_mse <= 0.0 {
+        anyhow::bail!(
+            "report {} has non-finite holdout_relative_improvement and baseline<=0",
+            path.display()
+        );
+    }
     Ok(())
 }
 
@@ -381,6 +412,8 @@ fn build_aggregate(
     } else {
         "mixed_or_channel_specific".to_string()
     };
+    let (evidence_tier, science_claim_allowed) =
+        classify_evidence_tier(n_channels, n_effective, median_all, ci_all.map(|(lo, _)| lo));
 
     EfficacyAggregate {
         n_channels,
@@ -399,7 +432,24 @@ fn build_aggregate(
         best_channel,
         worst_channel,
         claim_status,
+        evidence_tier: evidence_tier.to_string(),
+        science_claim_allowed,
     }
+}
+
+fn classify_evidence_tier(
+    n_channels: usize,
+    n_effective: usize,
+    median_all: f64,
+    ci_low: Option<f64>,
+) -> (&'static str, bool) {
+    if n_channels == 0 || n_effective == 0 {
+        return ("engineering_only", false);
+    }
+    if n_effective == n_channels && median_all > 0.0 && ci_low.map_or(false, |v| v > 0.0) {
+        return ("physics_candidate", true);
+    }
+    ("predictive_signal", false)
 }
 
 pub(crate) fn run_compare(
@@ -825,11 +875,13 @@ fn render_markdown(report: &EfficacyReport) -> String {
         report.bootstrap.seed
     ));
     out.push_str(&format!(
-        "- channels: {}\n- effective channels: {} ({:.1}%)\n- claim status: `{}`\n\n",
+        "- channels: {}\n- effective channels: {} ({:.1}%)\n- claim status: `{}`\n- evidence tier: `{}`\n- science claim allowed: `{}`\n\n",
         report.aggregate.n_channels,
         report.aggregate.n_effective,
         100.0 * report.aggregate.effective_rate,
-        report.aggregate.claim_status
+        report.aggregate.claim_status,
+        report.aggregate.evidence_tier,
+        report.aggregate.science_claim_allowed
     ));
     out.push_str(&format!(
         "- median improvement (all): {:.6e} (CI: {} to {})\n",
@@ -880,7 +932,7 @@ mod tests {
     use std::fs;
 
     use super::{
-        build_aggregate, classify_column, is_raw_state_column, run_compare, ChannelKind,
+        build_aggregate, classify_column, is_raw_state_column, run_compare, run_report, ChannelKind,
         EfficacyChannel,
     };
 
@@ -950,6 +1002,8 @@ mod tests {
             "expected strong raw-vs-derived gap, got {delta}"
         );
         assert_eq!(agg.claim_status, "information_helpful_in_some_channels");
+        assert_eq!(agg.evidence_tier, "predictive_signal");
+        assert!(!agg.science_claim_allowed);
     }
 
     #[test]
@@ -973,6 +1027,8 @@ mod tests {
         let agg = build_aggregate(&channels, 0.95, 512, 42);
         assert_eq!(agg.n_effective, 0);
         assert_eq!(agg.claim_status, "no_information_gain");
+        assert_eq!(agg.evidence_tier, "engineering_only");
+        assert!(!agg.science_claim_allowed);
     }
 
     #[test]
@@ -1004,6 +1060,59 @@ mod tests {
             .expect("all ci high");
         assert!(lo <= agg.median_relative_improvement_all);
         assert!(agg.median_relative_improvement_all <= hi);
+    }
+
+    #[test]
+    fn aggregate_marks_physics_candidate_when_all_channels_clear_positive_ci() {
+        let channels = vec![
+            row("a1_x", ChannelKind::RawState, 0.95, 0.01, true),
+            row("v1_x", ChannelKind::RawState, 0.92, 0.02, true),
+            row("r1_x", ChannelKind::RawState, 0.90, 0.02, true),
+            row(
+                "min_pair_dist",
+                ChannelKind::DerivedDiagnostic,
+                0.89,
+                0.03,
+                true,
+            ),
+        ];
+        let agg = build_aggregate(&channels, 0.95, 2000, 11);
+        assert_eq!(agg.n_channels, agg.n_effective);
+        assert_eq!(agg.evidence_tier, "physics_candidate");
+        assert!(agg.science_claim_allowed);
+    }
+
+    #[test]
+    fn run_report_rejects_missing_column_schema() {
+        let tmp_dir = env::temp_dir().join(format!(
+            "threebody_report_schema_unit_{}",
+            std::process::id()
+        ));
+        if tmp_dir.exists() {
+            let _ = fs::remove_dir_all(&tmp_dir);
+        }
+        fs::create_dir_all(&tmp_dir).expect("create temp dir");
+        let bad = tmp_dir.join("bad_report.json");
+        let out = tmp_dir.join("out.json");
+        fs::write(
+            &bad,
+            r#"{
+  "best": {
+    "config": {"model":"linear"},
+    "holdout_mse": 1.0,
+    "holdout_baseline_mse": 2.0,
+    "holdout_relative_improvement": 0.5,
+    "holdout_sensitivity": {"median_rel_error": 0.01}
+  }
+}"#,
+        )
+        .expect("write bad report");
+        let err = run_report(vec![bad], out, None, 0.0, 0.1, 128, 0.95, 42).unwrap_err();
+        assert!(
+            err.to_string().contains("missing column"),
+            "unexpected error: {err}"
+        );
+        let _ = fs::remove_dir_all(&tmp_dir);
     }
 
     #[test]
