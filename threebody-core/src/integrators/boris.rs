@@ -8,14 +8,7 @@ pub struct Boris;
 
 impl Integrator for Boris {
     fn step(&self, system: &System, dt: f64, cfg: &Config) -> System {
-        let force_cfg = ForceConfig {
-            g: cfg.constants.g,
-            k_e: cfg.constants.k_e,
-            mu_0: cfg.constants.mu_0,
-            epsilon: cfg.softening,
-            enable_gravity: cfg.enable_gravity,
-            enable_em: cfg.enable_em,
-        };
+        let force_cfg = ForceConfig::from_config(cfg, cfg.softening);
 
         let mut next = system.clone();
         let n = system.n();

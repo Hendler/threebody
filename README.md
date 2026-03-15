@@ -3,7 +3,7 @@
 `threebody` is a Rust workspace for simulating three-body systems and testing whether simple, interpretable models can predict their behavior.
 
 The project has two main parts:
-- A numerical simulator for three interacting bodies with Newtonian gravity and optional quasi-static electromagnetism.
+- A numerical simulator for three interacting bodies with Newtonian gravity and optional electromagnetic models (`quasistatic` by default, plus a low-velocity `darwin` finite-`c` correction).
 - A discovery pipeline that learns sparse equations from simulator output and checks them by forward rollout.
 
 This is research code, not a general-purpose physics engine. The current code is built around exactly three bodies, defaults to gravity-only runs, and treats EM as an approximation rather than full electrodynamics.
@@ -48,6 +48,7 @@ Useful follow-ups:
 - `cargo run -p threebody-cli -- --help`
 - `cargo test`
 - `just quickstart` for the full factory workflow when LLM access is configured
+- `scripts/autoresearch_eval.sh` for the numeric-only quickstart profile used by external `autoresearch`
 
 ## What the simulator writes
 
@@ -57,12 +58,14 @@ Useful follow-ups:
 ## Notes
 
 - Truth-mode runs use adaptive RK45 for tighter error control.
+- `em_model = "darwin"` adds a moving-source finite-`c` correction intended for low-velocity regimes; it is still not full retarded electrodynamics.
 - Discovery works from simulator-provided accelerations instead of finite-differenced trajectories.
 - Predictability tools and LLM-assisted workflows exist, but they are more experimental than the basic simulate-and-discover path.
+- `quickstart --profile autoresearch` disables the internal LLM path, emits machine-readable score files, and is intended to be the fixed benchmark harness for `autoresearch`.
 
 ## More detail
 
-- Previous long-form README: [old-readme.md](old-readme.md)
+- Previous long-form README: [README_OLD.md](README_OLD.md)
 - Core crate notes: [threebody-core/README.md](threebody-core/README.md)
 - CLI usage details: [threebody-cli/README.md](threebody-cli/README.md)
 - Research writeup: [academic_paper.tex](academic_paper.tex)

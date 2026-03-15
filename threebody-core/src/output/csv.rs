@@ -54,14 +54,7 @@ pub fn write_csv<W: Write>(mut writer: W, steps: &[SimStep], cfg: &Config) -> io
     let header = csv_header(cfg);
     writeln!(writer, "{}", header.join(","))?;
 
-    let force_cfg = ForceConfig {
-        g: cfg.constants.g,
-        k_e: cfg.constants.k_e,
-        mu_0: cfg.constants.mu_0,
-        epsilon: cfg.softening,
-        enable_gravity: cfg.enable_gravity,
-        enable_em: cfg.enable_em,
-    };
+    let force_cfg = ForceConfig::from_config(cfg, cfg.softening);
 
     for (idx, step) in steps.iter().enumerate() {
         let acc = compute_accel(&step.system, &force_cfg);

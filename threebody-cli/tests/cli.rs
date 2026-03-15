@@ -756,6 +756,57 @@ fn quickstart_command_runs() {
 }
 
 #[test]
+fn quickstart_autoresearch_writes_score_artifacts() {
+    let exe = env!("CARGO_BIN_EXE_threebody-cli");
+    let tmp_dir = env::temp_dir().join(format!(
+        "threebody_quickstart_autoresearch_{}",
+        std::process::id()
+    ));
+    if tmp_dir.exists() {
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+    fs::create_dir_all(&tmp_dir).expect("create temp dir");
+
+    let out = Command::new(exe)
+        .current_dir(&tmp_dir)
+        .args([
+            "quickstart",
+            "--profile",
+            "autoresearch",
+            "--out-dir",
+            tmp_dir.to_str().unwrap(),
+            "--steps",
+            "5",
+            "--max-iters",
+            "1",
+        ])
+        .output()
+        .expect("quickstart autoresearch");
+    assert!(
+        out.status.success(),
+        "quickstart autoresearch failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(tmp_dir.join("autoresearch_score.json").exists());
+    assert!(tmp_dir.join("autoresearch_score.tsv").exists());
+    assert!(tmp_dir.join("autoresearch_score.txt").exists());
+    assert!(tmp_dir.join("AUTORESEARCH_PROGRAM.md").exists());
+
+    let json = fs::read_to_string(tmp_dir.join("autoresearch_score.json"))
+        .expect("read autoresearch score json");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("parse autoresearch score");
+    assert_eq!(
+        value.get("profile").and_then(|v| v.as_str()),
+        Some("autoresearch")
+    );
+    assert_eq!(
+        value.get("score_direction").and_then(|v| v.as_str()),
+        Some("lower_is_better")
+    );
+}
+
+#[test]
 fn quickstart_command_runs_with_require_llm_against_stub() {
     use std::net::TcpStream;
     use std::sync::atomic::Ordering;

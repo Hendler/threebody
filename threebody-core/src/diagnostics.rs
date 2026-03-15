@@ -40,7 +40,7 @@ pub fn angular_momentum(system: &System) -> Vec3 {
 /// - Always includes kinetic energy.
 /// - Includes gravitational potential only if `cfg.enable_gravity`.
 /// - Includes electrostatic potential only if `cfg.enable_em`.
-/// - Does not include magnetic field energy (not modeled).
+/// - Does not include magnetic field energy or finite-c Darwin interaction energy.
 pub fn energy_proxy(system: &System, cfg: &Config) -> f64 {
     let mut kinetic = 0.0;
     for i in 0..3 {

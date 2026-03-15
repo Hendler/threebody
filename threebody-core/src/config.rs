@@ -1,10 +1,16 @@
 use serde::{Deserialize, Serialize};
 
+fn default_light_speed() -> f64 {
+    10.0
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct Constants {
     pub g: f64,
     pub k_e: f64,
     pub mu_0: f64,
+    #[serde(default = "default_light_speed")]
+    pub c: f64,
 }
 
 impl Default for Constants {
@@ -13,8 +19,18 @@ impl Default for Constants {
             g: 1.0,
             k_e: 1.0,
             mu_0: 1.0,
+            c: default_light_speed(),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EmModel {
+    #[default]
+    Quasistatic,
+    #[serde(alias = "darwin_like", alias = "finite_c")]
+    Darwin,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -131,6 +147,8 @@ pub struct Config {
     pub softening: f64,
     pub enable_gravity: bool,
     pub enable_em: bool,
+    #[serde(default)]
+    pub em_model: EmModel,
     pub output: OutputConfig,
     pub close_encounter: CloseEncounterConfig,
     pub allow_leapfrog_with_em: bool,
@@ -144,6 +162,7 @@ impl Default for Config {
             softening: 0.0,
             enable_gravity: true,
             enable_em: false,
+            em_model: EmModel::default(),
             output: OutputConfig::default(),
             close_encounter: CloseEncounterConfig::default(),
             allow_leapfrog_with_em: false,
@@ -156,8 +175,12 @@ impl Config {
         if !self.constants.g.is_finite()
             || !self.constants.k_e.is_finite()
             || !self.constants.mu_0.is_finite()
+            || !self.constants.c.is_finite()
         {
             return Err("constants must be finite".to_string());
+        }
+        if self.constants.c <= 0.0 {
+            return Err("constants.c must be > 0".to_string());
         }
         if self.softening < 0.0 {
             return Err("softening must be >= 0".to_string());
@@ -198,6 +221,15 @@ impl Config {
         if self.close_encounter.substep_dt_ratio_max < 0.0 {
             return Err("close_encounter.substep_dt_ratio_max must be >= 0".to_string());
         }
+        if self.enable_em
+            && matches!(self.em_model, EmModel::Darwin)
+            && matches!(self.integrator.kind, IntegratorKind::Boris)
+        {
+            return Err(
+                "integrator=boris is not supported with em_model=darwin; use rk45, leapfrog, or implicit_midpoint"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 
@@ -207,10 +239,15 @@ impl Config {
             && matches!(self.integrator.kind, IntegratorKind::Leapfrog)
             && !self.allow_leapfrog_with_em
         {
-            warnings.push(
-                "leapfrog with EM enabled may violate structure; consider Boris or RK45"
-                    .to_string(),
-            );
+            let msg = match self.em_model {
+                EmModel::Quasistatic => {
+                    "leapfrog with EM enabled may violate structure; consider Boris or RK45"
+                }
+                EmModel::Darwin => {
+                    "leapfrog with darwin EM enabled may violate structure; consider RK45 or implicit_midpoint"
+                }
+            };
+            warnings.push(msg.to_string());
         }
         warnings
     }
@@ -219,7 +256,8 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseEncounterConfig, Config, Constants, IntegratorConfig, IntegratorKind, OutputConfig,
+        CloseEncounterConfig, Config, Constants, EmModel, IntegratorConfig, IntegratorKind,
+        OutputConfig, default_light_speed,
     };
     use serde_json;
 
@@ -249,6 +287,7 @@ mod tests {
             softening: -0.1,
             enable_gravity: true,
             enable_em: false,
+            em_model: EmModel::default(),
             output: OutputConfig::default(),
             close_encounter: CloseEncounterConfig::default(),
             allow_leapfrog_with_em: false,
@@ -270,5 +309,51 @@ mod tests {
         cfg.allow_leapfrog_with_em = false;
         let warnings = cfg.warnings();
         assert!(!warnings.is_empty());
+    }
+
+    #[test]
+    fn legacy_config_defaults_new_em_fields() {
+        let json = r#"{
+          "constants": { "g": 1.0, "k_e": 2.0, "mu_0": 3.0 },
+          "integrator": {
+            "kind": "Rk45",
+            "dt": 0.01,
+            "rtol": 1e-9,
+            "atol": 1e-12,
+            "dt_min": 1e-6,
+            "dt_max": 0.1,
+            "adaptive": true,
+            "max_rejects": 8,
+            "safety": 0.9,
+            "implicit_max_iters": 20,
+            "implicit_tol": 1e-12
+          },
+          "softening": 0.0,
+          "enable_gravity": true,
+          "enable_em": false,
+          "output": {
+            "include_fields": true,
+            "include_potentials": true,
+            "include_diagnostics": true
+          },
+          "close_encounter": {
+            "r_min": 0.0,
+            "action": "StopAndReport",
+            "softening": 0.0
+          },
+          "allow_leapfrog_with_em": false
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.constants.c, default_light_speed());
+        assert_eq!(cfg.em_model, EmModel::Quasistatic);
+    }
+
+    #[test]
+    fn boris_is_rejected_for_darwin_em() {
+        let mut cfg = Config::default();
+        cfg.enable_em = true;
+        cfg.em_model = EmModel::Darwin;
+        cfg.integrator.kind = IntegratorKind::Boris;
+        assert!(cfg.validate().is_err());
     }
 }
