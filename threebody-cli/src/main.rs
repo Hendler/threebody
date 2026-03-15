@@ -9976,12 +9976,21 @@ fn write_autoresearch_quickstart_artifacts(
         render_autoresearch_score_tsv(&score),
     )?;
 
-    let root_program = std::path::Path::new("program.md");
-    if root_program.exists() {
-        let _ = fs::copy(root_program, out_dir.join("AUTORESEARCH_PROGRAM.md"));
+    if let Some(program_path) = locate_autoresearch_program_md() {
+        let _ = fs::copy(program_path, out_dir.join("AUTORESEARCH_PROGRAM.md"));
     }
 
     Ok(())
+}
+
+fn locate_autoresearch_program_md() -> Option<std::path::PathBuf> {
+    let cwd_program = std::path::Path::new("program.md");
+    if cwd_program.exists() {
+        return Some(cwd_program.to_path_buf());
+    }
+    let manifest_dir = std::path::Path::new(option_env!("CARGO_MANIFEST_DIR")?);
+    let repo_program = manifest_dir.parent()?.join("program.md");
+    repo_program.exists().then_some(repo_program)
 }
 
 fn bucket_from_notes(notes: &[String]) -> Option<BucketKey> {
