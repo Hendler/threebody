@@ -87,6 +87,7 @@ pub(crate) fn run_ensemble(
     mode: String,
     em: bool,
     no_em: bool,
+    em_model: Option<String>,
     no_gravity: bool,
 ) -> anyhow::Result<()> {
     if n == 0 {
@@ -99,7 +100,7 @@ pub(crate) fn run_ensemble(
         anyhow::bail!("--dt must be finite and > 0");
     }
 
-    let cfg = crate::build_config(config, &mode, None, em, no_em, no_gravity)?;
+    let cfg = crate::build_config(config, &mode, None, em, no_em, em_model, no_gravity)?;
 
     if !ic.exists() {
         anyhow::bail!("ic JSON not found: {}", ic.display());
@@ -317,6 +318,7 @@ mod tests {
             "truth".to_string(),
             false,
             false,
+            None,
             false,
         )
         .unwrap();

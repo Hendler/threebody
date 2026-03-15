@@ -77,6 +77,9 @@ pub enum PredictabilityCommand {
         /// Disable EM.
         #[arg(long)]
         no_em: bool,
+        /// EM model override: quasistatic | darwin.
+        #[arg(long)]
+        em_model: Option<String>,
         /// Disable gravity.
         #[arg(long)]
         no_gravity: bool,
@@ -305,9 +308,22 @@ pub fn run(cmd: PredictabilityCommand) -> anyhow::Result<()> {
             mode,
             em,
             no_em,
+            em_model,
             no_gravity,
         } => ensemble::run_ensemble(
-            config, ic, out_dir, n, sigma_pos, sigma_vel, seed, steps, dt, mode, em, no_em,
+            config,
+            ic,
+            out_dir,
+            n,
+            sigma_pos,
+            sigma_vel,
+            seed,
+            steps,
+            dt,
+            mode,
+            em,
+            no_em,
+            em_model,
             no_gravity,
         ),
         PredictabilityCommand::Detect {

@@ -10,6 +10,13 @@
 //! Magnetostatics (quasi-static Biot-Savart style):
 //!   B_i = sum_{j != i} (mu_0 / 4pi) * q_j * (v_j x (r_i - r_j)) / |r_i - r_j|^3
 //!
+//! Darwin-like finite-c moving-source mode:
+//!   beta_j = v_j / c
+//!   beta_perp^2 = |beta_j|^2 - (beta_j . n_ij)^2
+//!   s_ij = (1 - |beta_j|^2) / (|r_ij|^3 * (1 - beta_perp^2)^(3/2))
+//!   E_i = sum_{j != i} k_e * q_j * r_ij * s_ij
+//!   B_i = sum_{j != i} (mu_0 / 4pi) * q_j * (v_j x r_ij) * s_ij
+//!
 //! Lorentz acceleration:
 //!   a_i(em) = (q_i / m_i) * (E_i + v_i x B_i)
 //!
@@ -39,6 +46,7 @@
 //! let validity = model_validity();
 //! assert!(validity.regimes.contains(&"gravity_only"));
 //! assert!(validity.regimes.contains(&"em_quasistatic"));
+//! assert!(validity.regimes.contains(&"em_darwin_like"));
 //! assert!(validity.non_claims.contains(&"no_retardation"));
 //! assert!(validity.non_claims.contains(&"no_radiation_reaction"));
 //! assert!(validity.non_claims.contains(&"no_self_fields"));
@@ -54,8 +62,13 @@ pub struct ModelValidity {
 /// Returns the supported regimes and explicit non-claims.
 pub const fn model_validity() -> ModelValidity {
     ModelValidity {
-        regimes: &["gravity_only", "em_quasistatic"],
-        non_claims: &["no_retardation", "no_radiation_reaction", "no_self_fields"],
+        regimes: &["gravity_only", "em_quasistatic", "em_darwin_like"],
+        non_claims: &[
+            "no_retardation",
+            "no_radiation_reaction",
+            "no_self_fields",
+            "no_accelerating_source_fields",
+        ],
     }
 }
 

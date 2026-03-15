@@ -42,6 +42,11 @@ quickstart steps="200":
 
   echo "Quickstart complete: $out"
 
+quickstart-autoresearch steps="200" max_iters="3":
+  #!/usr/bin/env bash
+  set -euo pipefail
+  scripts/autoresearch_eval.sh --steps "{{steps}}" --max-iters "{{max_iters}}"
+
 quickstart10 steps="200":
   #!/usr/bin/env bash
   set -euo pipefail

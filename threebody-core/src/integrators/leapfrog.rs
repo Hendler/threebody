@@ -7,14 +7,7 @@ pub struct Leapfrog;
 
 impl Integrator for Leapfrog {
     fn step(&self, system: &System, dt: f64, cfg: &Config) -> System {
-        let force_cfg = ForceConfig {
-            g: cfg.constants.g,
-            k_e: cfg.constants.k_e,
-            mu_0: cfg.constants.mu_0,
-            epsilon: cfg.softening,
-            enable_gravity: cfg.enable_gravity,
-            enable_em: cfg.enable_em,
-        };
+        let force_cfg = ForceConfig::from_config(cfg, cfg.softening);
         let acc = compute_accel(system, &force_cfg);
         let mut next = system.clone();
         let mut v_half = system.state.vel.clone();

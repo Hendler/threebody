@@ -160,14 +160,7 @@ pub fn simulate(
             }
         }
 
-        let force_cfg = ForceConfig {
-            g: local_cfg.constants.g,
-            k_e: local_cfg.constants.k_e,
-            mu_0: local_cfg.constants.mu_0,
-            epsilon: local_cfg.softening,
-            enable_gravity: local_cfg.enable_gravity,
-            enable_em: local_cfg.enable_em,
-        };
+        let force_cfg = ForceConfig::from_config(&local_cfg, local_cfg.softening);
         let acc = compute_accel(&system, &force_cfg);
         let regime = compute_regime(&system, &acc, dt);
         let diagnostics = compute_diagnostics(&system, &local_cfg);

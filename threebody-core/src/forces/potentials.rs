@@ -1,3 +1,5 @@
+use crate::config::EmModel;
+use crate::forces::em::moving_source_inv_r;
 use crate::math::vec3::Vec3;
 use crate::state::Body;
 
@@ -17,6 +19,8 @@ pub fn potentials(
     k_e: f64,
     mu_0: f64,
     epsilon: f64,
+    model: EmModel,
+    c: f64,
 ) -> Potentials {
     debug_assert_eq!(bodies.len(), 3);
     debug_assert_eq!(pos.len(), 3);
@@ -31,8 +35,7 @@ pub fn potentials(
                 continue;
             }
             let r_ij = pos[i] - pos[j];
-            let r2 = r_ij.norm_sq();
-            let inv_r = softened_inv_r(r2, epsilon);
+            let inv_r = moving_source_inv_r(r_ij, vel[j], epsilon, model, c);
             if inv_r == 0.0 {
                 continue;
             }
@@ -44,21 +47,9 @@ pub fn potentials(
 
     Potentials { phi, a }
 }
-
-fn softened_inv_r(r2: f64, epsilon: f64) -> f64 {
-    if r2 == 0.0 {
-        return 0.0;
-    }
-    let soft2 = if epsilon == 0.0 {
-        r2
-    } else {
-        r2 + epsilon * epsilon
-    };
-    1.0 / soft2.sqrt()
-}
-
 #[cfg(test)]
 mod tests {
+    use crate::config::EmModel;
     use super::potentials;
     use crate::math::vec3::Vec3;
     use crate::state::Body;
@@ -76,7 +67,16 @@ mod tests {
             Vec3::zero(),
         ];
         let vel = [Vec3::new(0.1, 0.2, 0.3); 3];
-        let p = potentials(&bodies, &pos, &vel, 1.0, 1.0, 0.0);
+        let p = potentials(
+            &bodies,
+            &pos,
+            &vel,
+            1.0,
+            1.0,
+            0.0,
+            EmModel::Quasistatic,
+            10.0,
+        );
         assert_eq!(p.phi, [0.0; 3]);
         assert_eq!(p.a, [Vec3::zero(); 3]);
     }
@@ -94,7 +94,16 @@ mod tests {
             Vec3::zero(),
         ];
         let vel = [Vec3::zero(); 3];
-        let p = potentials(&bodies, &pos, &vel, 1.0, 1.0, 0.0);
+        let p = potentials(
+            &bodies,
+            &pos,
+            &vel,
+            1.0,
+            1.0,
+            0.0,
+            EmModel::Quasistatic,
+            10.0,
+        );
         assert_eq!(p.a, [Vec3::zero(); 3]);
         assert!(p.phi[0] != 0.0);
     }

@@ -3,19 +3,19 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use threebody_core::config::{Config, IntegratorKind};
+use threebody_core::config::{Config, EmModel, IntegratorKind};
 use threebody_core::diagnostics::compute_diagnostics;
-use threebody_core::forces::{compute_accel, ForceConfig};
+use threebody_core::forces::{ForceConfig, compute_accel};
 use threebody_core::frames::to_barycentric;
 use threebody_core::integrators::{
-    boris::Boris, implicit_midpoint::ImplicitMidpoint, leapfrog::Leapfrog, rk45::Rk45, Integrator,
+    Integrator, boris::Boris, implicit_midpoint::ImplicitMidpoint, leapfrog::Leapfrog, rk45::Rk45,
 };
 use threebody_core::math::vec3::Vec3;
 use threebody_core::output::csv::write_csv;
 use threebody_core::output::parse::{parse_header, require_columns};
 use threebody_core::output::sidecar::{build_sidecar, write_sidecar};
 use threebody_core::regime::compute_regime;
-use threebody_core::sim::{simulate, SimOptions};
+use threebody_core::sim::{SimOptions, simulate};
 use threebody_core::state::{Body, State, System};
 use threebody_discover::ga::DiscoveryConfig;
 use threebody_discover::judge::{
@@ -26,18 +26,18 @@ use threebody_discover::judge::{
 use threebody_discover::library::FeatureLibrary;
 use threebody_discover::llm::{AutoLlmClient, LlmClient, MockLlm, OpenAIClient};
 use threebody_discover::{
-    grid_search, lasso_path_search, run_search, stls_path_search, Dataset, DiscoverySolverSummary,
-    FactoryEvaluationCandidate, FactoryEvaluationInput, FactoryEvaluationIteration,
-    FactoryEvaluationIterationJudge, FitnessHeuristic, GaSolverSummary, LassoConfig,
-    LassoSolverSummary, StlsConfig, StlsSolverSummary, FACTORY_EVALUATION_VERSION,
+    Dataset, DiscoverySolverSummary, FACTORY_EVALUATION_VERSION, FactoryEvaluationCandidate,
+    FactoryEvaluationInput, FactoryEvaluationIteration, FactoryEvaluationIterationJudge,
+    FitnessHeuristic, GaSolverSummary, LassoConfig, LassoSolverSummary, StlsConfig,
+    StlsSolverSummary, grid_search, lasso_path_search, run_search, stls_path_search,
 };
 
 mod eval;
 mod predictability;
 
 use eval::{
-    format_vector_model, rollout_metrics, rollout_trace, sensitivity_eval, SensitivityEval,
-    VectorModel,
+    SensitivityEval, VectorModel, format_vector_model, rollout_metrics, rollout_trace,
+    sensitivity_eval,
 };
 
 #[derive(Parser)]
@@ -97,6 +97,9 @@ enum Commands {
         /// Disable EM.
         #[arg(long)]
         no_em: bool,
+        /// EM model override: quasistatic | darwin.
+        #[arg(long)]
+        em_model: Option<String>,
         /// Disable gravity.
         #[arg(long)]
         no_gravity: bool,
@@ -134,6 +137,9 @@ enum Commands {
         em: bool,
         #[arg(long)]
         no_em: bool,
+        /// EM model override: quasistatic | darwin.
+        #[arg(long)]
+        em_model: Option<String>,
         #[arg(long)]
         no_gravity: bool,
         #[arg(long, default_value = "csv")]
@@ -217,6 +223,9 @@ enum Commands {
         /// Steps to simulate per run.
         #[arg(long, default_value_t = 200)]
         steps: usize,
+        /// Quickstart profile: standard | autoresearch.
+        #[arg(long, default_value = "standard")]
+        profile: String,
         /// Max factory iterations (default: 10).
         #[arg(long, default_value_t = 10, hide = true)]
         max_iters: usize,
@@ -247,6 +256,9 @@ enum Commands {
         /// Held-out IC rollouts for the selected best EM-heavy equation.
         #[arg(long, default_value_t = 2)]
         heldout: usize,
+        /// EM model override for the oracle: quasistatic | darwin.
+        #[arg(long)]
+        em_model: Option<String>,
         /// Do not attempt to build PDFs via pdflatex.
         #[arg(long)]
         no_pdf: bool,
@@ -289,6 +301,9 @@ enum Commands {
         /// Disable EM.
         #[arg(long)]
         no_em: bool,
+        /// EM model override: quasistatic | darwin.
+        #[arg(long)]
+        em_model: Option<String>,
         /// Disable gravity.
         #[arg(long)]
         no_gravity: bool,
@@ -462,14 +477,28 @@ fn main() -> anyhow::Result<()> {
             integrator,
             em,
             no_em,
+            em_model,
             no_gravity,
             format,
             dry_run,
             summary,
         } => {
             run_simulation(
-                config, output, steps, dt, mode, preset, ic, integrator, em, no_em, no_gravity,
-                format, dry_run, summary,
+                config,
+                output,
+                steps,
+                dt,
+                mode,
+                preset,
+                ic,
+                integrator,
+                em,
+                no_em,
+                em_model,
+                no_gravity,
+                format,
+                dry_run,
+                summary,
             )?;
         }
         Commands::Run {
@@ -483,14 +512,28 @@ fn main() -> anyhow::Result<()> {
             integrator,
             em,
             no_em,
+            em_model,
             no_gravity,
             format,
             dry_run,
             summary,
         } => {
             run_simulation(
-                config, output, steps, dt, mode, preset, ic, integrator, em, no_em, no_gravity,
-                format, dry_run, summary,
+                config,
+                output,
+                steps,
+                dt,
+                mode,
+                preset,
+                ic,
+                integrator,
+                em,
+                no_em,
+                em_model,
+                no_gravity,
+                format,
+                dry_run,
+                summary,
             )?;
         }
         Commands::Discover {
@@ -554,10 +597,11 @@ fn main() -> anyhow::Result<()> {
         Commands::Quickstart {
             out_dir,
             steps,
+            profile,
             max_iters,
             require_llm,
         } => {
-            run_quickstart(out_dir, steps, max_iters, require_llm)?;
+            run_quickstart(out_dir, steps, profile, max_iters, require_llm)?;
         }
         Commands::BenchEm {
             results_dir,
@@ -567,6 +611,7 @@ fn main() -> anyhow::Result<()> {
             max_cases,
             seed,
             heldout,
+            em_model,
             no_pdf,
         } => {
             run_bench_em(
@@ -577,6 +622,7 @@ fn main() -> anyhow::Result<()> {
                 max_cases,
                 seed,
                 heldout,
+                em_model,
                 !no_pdf,
             )?;
         }
@@ -594,6 +640,7 @@ fn main() -> anyhow::Result<()> {
             preset,
             em,
             no_em,
+            em_model,
             no_gravity,
             runs,
             population,
@@ -744,6 +791,7 @@ fn main() -> anyhow::Result<()> {
                 preset,
                 em,
                 no_em,
+                em_model,
                 no_gravity,
                 runs,
                 population,
@@ -908,11 +956,15 @@ fn run_llm_check(model: String, openai_key_file: Option<PathBuf>) -> anyhow::Res
 fn run_quickstart(
     out_dir: Option<PathBuf>,
     steps: usize,
+    profile: String,
     max_iters: usize,
     require_llm: bool,
 ) -> anyhow::Result<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    let profile = parse_quickstart_profile(&profile).ok_or_else(|| {
+        anyhow::anyhow!("unknown --profile={profile} (expected standard|autoresearch)")
+    })?;
     let out_dir = out_dir.unwrap_or_else(|| {
         let ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -941,9 +993,26 @@ fn run_quickstart(
         lasso_tol: 1e-6,
     };
 
-    let llm_model = std::env::var("THREEBODY_LLM_MODEL")
-        .or_else(|_| std::env::var("OPENAI_MODEL"))
-        .unwrap_or_else(|_| "gpt-5.2".to_string());
+    let mut advanced = FactoryAdvancedSettings::default();
+    let (llm_mode, llm_model, require_llm) = match profile {
+        QuickstartProfile::Standard => (
+            "auto".to_string(),
+            std::env::var("THREEBODY_LLM_MODEL")
+                .or_else(|_| std::env::var("OPENAI_MODEL"))
+                .unwrap_or_else(|_| "gpt-5.2".to_string()),
+            require_llm,
+        ),
+        QuickstartProfile::Autoresearch => {
+            if require_llm {
+                anyhow::bail!(
+                    "--require-llm is incompatible with --profile autoresearch; \
+                     this profile is intentionally numeric-only and deterministic"
+                );
+            }
+            advanced.selector_policy = SelectorPolicy::NumericMdl;
+            ("off".to_string(), "gpt-5.2".to_string(), false)
+        }
+    };
 
     let factory_dir = out_dir.join("factory");
     run_factory(
@@ -957,6 +1026,7 @@ fn run_quickstart(
         "three-body".to_string(),
         false,
         false,
+        None,
         false,
         50,
         20,
@@ -965,7 +1035,7 @@ fn run_quickstart(
         "euler".to_string(),
         solver_settings,
         "auto".to_string(),
-        "auto".to_string(),
+        llm_mode,
         llm_model,
         None,
         require_llm,
@@ -974,7 +1044,7 @@ fn run_quickstart(
         SeedSuite::deterministic_v1(),
         true,
         Vec::new(),
-        FactoryAdvancedSettings::default(),
+        advanced,
     )?;
 
     // Copy a single novice-friendly artifact to the quickstart root.
@@ -986,10 +1056,17 @@ fn run_quickstart(
     if eval_pdf.exists() {
         let _ = fs::copy(&eval_pdf, out_dir.join("RESULTS.pdf"));
     }
+    if matches!(profile, QuickstartProfile::Autoresearch) {
+        write_autoresearch_quickstart_artifacts(&out_dir, &factory_dir)?;
+    }
 
     update_best_results_index_best_effort(std::path::Path::new("results"));
 
-    println!("Quickstart complete: {}", out_dir.display());
+    println!(
+        "Quickstart complete: {} (profile={})",
+        out_dir.display(),
+        profile.as_str()
+    );
     println!("Key outputs:");
     println!("- {}/RESULTS.md", out_dir.display());
     println!("- {}/RESULTS.pdf (if built)", out_dir.display());
@@ -997,7 +1074,35 @@ fn run_quickstart(
         "- {}/factory/ (evidence + per-iteration artifacts)",
         out_dir.display()
     );
+    if matches!(profile, QuickstartProfile::Autoresearch) {
+        println!("- {}/autoresearch_score.json", out_dir.display());
+        println!("- {}/autoresearch_score.tsv", out_dir.display());
+        println!("- {}/AUTORESEARCH_PROGRAM.md", out_dir.display());
+    }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuickstartProfile {
+    Standard,
+    Autoresearch,
+}
+
+impl QuickstartProfile {
+    fn as_str(self) -> &'static str {
+        match self {
+            QuickstartProfile::Standard => "standard",
+            QuickstartProfile::Autoresearch => "autoresearch",
+        }
+    }
+}
+
+fn parse_quickstart_profile(raw: &str) -> Option<QuickstartProfile> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "standard" => Some(QuickstartProfile::Standard),
+        "autoresearch" | "auto_research" | "auto-research" => Some(QuickstartProfile::Autoresearch),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1050,6 +1155,7 @@ fn run_bench_em(
     max_cases: usize,
     seed: u64,
     heldout: usize,
+    em_model: Option<String>,
     build_pdf: bool,
 ) -> anyhow::Result<()> {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -1111,6 +1217,10 @@ fn run_bench_em(
     let mut oracle_cfg = Config::default();
     oracle_cfg.enable_gravity = true;
     oracle_cfg.enable_em = true;
+    if let Some(name) = em_model {
+        oracle_cfg.em_model =
+            parse_em_model(&name).ok_or_else(|| anyhow::anyhow!("unknown em model: {name}"))?;
+    }
     oracle_cfg.integrator.kind = IntegratorKind::Rk45;
     oracle_cfg.integrator.adaptive = true;
     oracle_cfg.integrator.rtol = 1e-12;
@@ -1227,7 +1337,7 @@ fn run_bench_em(
             &vector_data.feature_names,
             &result,
             &oracle_cfg,
-            "em_quasistatic",
+            regime_label(&oracle_cfg),
             rollout_integrator,
         );
         let lasso_candidates = build_vector_candidates(
@@ -1237,7 +1347,7 @@ fn run_bench_em(
             &vector_data.feature_names,
             &result,
             &oracle_cfg,
-            "em_quasistatic",
+            regime_label(&oracle_cfg),
             rollout_integrator,
         );
 
@@ -1396,7 +1506,7 @@ fn run_bench_em(
         eval_iterations.push(FactoryEvaluationIteration {
             iteration: idx + 1,
             run_id: run_id.clone(),
-            regime: "em_quasistatic".to_string(),
+            regime: regime_label(&oracle_cfg).to_string(),
             solver: solver_summary,
             simulation: Some(sim_summary.clone()),
             top_candidates,
@@ -1424,7 +1534,7 @@ fn run_bench_em(
     notes.push(format!("seed={seed}"));
     notes.push(format!("max_cases={}", suite_cases.len()));
     notes.push("mode=truth".to_string());
-    notes.push("regime=em_quasistatic".to_string());
+    notes.push(format!("regime={}", regime_label(&oracle_cfg)));
 
     let eval_input = FactoryEvaluationInput {
         version: FACTORY_EVALUATION_VERSION.to_string(),
@@ -1764,6 +1874,7 @@ fn run_simulation(
     integrator_override: Option<String>,
     em: bool,
     no_em: bool,
+    em_model_override: Option<String>,
     no_gravity: bool,
     format: String,
     dry_run: bool,
@@ -1778,6 +1889,7 @@ fn run_simulation(
         integrator_override,
         em,
         no_em,
+        em_model_override,
         no_gravity,
     )?;
     let system = if let Some(path) = ic_path {
@@ -1819,6 +1931,7 @@ fn build_config(
     integrator_override: Option<String>,
     em: bool,
     no_em: bool,
+    em_model_override: Option<String>,
     no_gravity: bool,
 ) -> anyhow::Result<Config> {
     let mut cfg: Config = if let Some(path) = config_path.clone() {
@@ -1840,6 +1953,10 @@ fn build_config(
     }
     if no_em {
         cfg.enable_em = false;
+    }
+    if let Some(name) = em_model_override {
+        cfg.em_model = parse_em_model(&name)
+            .ok_or_else(|| anyhow::anyhow!("unknown em model: {name}"))?;
     }
     if no_gravity {
         cfg.enable_gravity = false;
@@ -1866,6 +1983,27 @@ fn build_config(
     }
     cfg.validate().map_err(anyhow::Error::msg)?;
     Ok(cfg)
+}
+
+fn parse_em_model(raw: &str) -> Option<EmModel> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "quasistatic" | "quasi_static" | "quasi-static" => Some(EmModel::Quasistatic),
+        "darwin" | "darwin_like" | "darwin-like" | "finite_c" | "finite-c" => {
+            Some(EmModel::Darwin)
+        }
+        _ => None,
+    }
+}
+
+fn regime_label(cfg: &Config) -> &'static str {
+    if !cfg.enable_em {
+        "gravity_only"
+    } else {
+        match cfg.em_model {
+            EmModel::Quasistatic => "em_quasistatic",
+            EmModel::Darwin => "em_darwin_like",
+        }
+    }
 }
 
 fn simulate_with_cfg(
@@ -2089,11 +2227,7 @@ fn run_discovery(
         stats: sidecar.sim_stats,
     };
 
-    let regime = if sim_cfg.enable_em {
-        "em_quasistatic"
-    } else {
-        "gravity_only"
-    };
+    let regime = regime_label(&sim_cfg);
 
     let vector_data = build_vector_dataset(&result, &sim_cfg, &library.features, body);
     let [dataset_x, dataset_y, dataset_z] = component_datasets(&vector_data);
@@ -2330,14 +2464,7 @@ fn load_steps_from_csv(
     let header = parse_header(&header_line);
     let map = require_columns(&header, &REQUIRED).map_err(anyhow::Error::msg)?;
 
-    let force_cfg = ForceConfig {
-        g: cfg.constants.g,
-        k_e: cfg.constants.k_e,
-        mu_0: cfg.constants.mu_0,
-        epsilon: cfg.softening,
-        enable_gravity: cfg.enable_gravity,
-        enable_em: cfg.enable_em,
-    };
+    let force_cfg = ForceConfig::from_config(cfg, cfg.softening);
 
     let mut steps = Vec::new();
     for (line_no, line) in reader.lines().enumerate() {
@@ -2812,14 +2939,7 @@ fn build_vector_dataset(
 ) -> VectorDataset {
     let mut samples = Vec::new();
     let mut targets = Vec::new();
-    let force_cfg = ForceConfig {
-        g: cfg.constants.g,
-        k_e: cfg.constants.k_e,
-        mu_0: cfg.constants.mu_0,
-        epsilon: cfg.softening,
-        enable_gravity: cfg.enable_gravity,
-        enable_em: cfg.enable_em,
-    };
+    let force_cfg = ForceConfig::from_config(cfg, cfg.softening);
     for step in &result.steps {
         let system = &step.system;
         let acc = compute_accel(system, &force_cfg);
@@ -4186,20 +4306,14 @@ fn build_sim_summary(
     }
 
     let grav_force_cfg = ForceConfig {
-        g: cfg.constants.g,
-        k_e: cfg.constants.k_e,
-        mu_0: cfg.constants.mu_0,
-        epsilon: cfg.softening,
         enable_gravity: true,
         enable_em: false,
+        ..ForceConfig::from_config(cfg, cfg.softening)
     };
     let em_force_cfg = ForceConfig {
-        g: cfg.constants.g,
-        k_e: cfg.constants.k_e,
-        mu_0: cfg.constants.mu_0,
-        epsilon: cfg.softening,
         enable_gravity: false,
         enable_em: true,
+        ..ForceConfig::from_config(cfg, cfg.softening)
     };
 
     let mean_abs_accel_grav = cfg
@@ -5266,6 +5380,7 @@ fn run_factory(
     preset: String,
     em: bool,
     no_em: bool,
+    em_model: Option<String>,
     no_gravity: bool,
     runs: usize,
     population: usize,
@@ -5388,7 +5503,8 @@ fn run_factory(
     let mut equation_search_archive = load_equation_search_archive(&equation_search_archive_path);
     let mut archive_seeded_from: Vec<String> = Vec::new();
     let mut archive_seed_merge_rows: Vec<serde_json::Value> = Vec::new();
-    let mut seed_archives_seen: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    let mut seed_archives_seen: std::collections::BTreeSet<PathBuf> =
+        std::collections::BTreeSet::new();
     for seed in &equation_archive_seed {
         let seed_paths = collect_equation_archive_seed_paths(seed);
         if seed_paths.is_empty() {
@@ -5455,15 +5571,19 @@ fn run_factory(
         fs::create_dir_all(&run_dir)?;
         set_gate_params(effective_gate_params);
 
-        let mut cfg = build_config(config.clone(), &mode, None, em, no_em, no_gravity)?;
+        let mut cfg = build_config(
+            config.clone(),
+            &mode,
+            None,
+            em,
+            no_em,
+            em_model.clone(),
+            no_gravity,
+        )?;
         if matches!(cfg.integrator.kind, IntegratorKind::Rk45) && cfg.integrator.adaptive {
             cfg.integrator.max_rejects = cfg.integrator.max_rejects.max(64);
         }
-        let regime = if cfg.enable_em {
-            "em_quasistatic"
-        } else {
-            "gravity_only"
-        };
+        let regime = regime_label(&cfg);
         let ic_bounds = default_ic_bounds();
         let pre_ic_feature_names = augment_library_features(
             feature_library_for_kind(current_library),
@@ -7572,7 +7692,7 @@ fn benchmark_suite_v1(regime: &str, bounds: &IcBounds) -> Vec<(String, InitialCo
                 },
             ));
         }
-        "em_quasistatic" => {
+        "em_quasistatic" | "em_darwin_like" => {
             // A small, deterministic suite intended to make EM effects non-trivial while staying within bounds.
             cases.push((
                 "em_like_charges_fast".to_string(),
@@ -7598,7 +7718,7 @@ fn benchmark_suite_v1(regime: &str, bounds: &IcBounds) -> Vec<(String, InitialCo
                         },
                     ],
                     barycentric: true,
-                    notes: "benchmark_suite_v1 em_quasistatic em_like_charges_fast".to_string(),
+                    notes: format!("benchmark_suite_v1 {regime} em_like_charges_fast"),
                 },
             ));
             cases.push((
@@ -7625,7 +7745,7 @@ fn benchmark_suite_v1(regime: &str, bounds: &IcBounds) -> Vec<(String, InitialCo
                         },
                     ],
                     barycentric: true,
-                    notes: "benchmark_suite_v1 em_quasistatic em_alternating_signs".to_string(),
+                    notes: format!("benchmark_suite_v1 {regime} em_alternating_signs"),
                 },
             ));
             cases.push((
@@ -7652,7 +7772,7 @@ fn benchmark_suite_v1(regime: &str, bounds: &IcBounds) -> Vec<(String, InitialCo
                         },
                     ],
                     barycentric: true,
-                    notes: "benchmark_suite_v1 em_quasistatic em_high_ang_momentum_3d".to_string(),
+                    notes: format!("benchmark_suite_v1 {regime} em_high_ang_momentum_3d"),
                 },
             ));
         }
@@ -9085,7 +9205,8 @@ fn merge_equation_search_archive(
                 0.0
             };
 
-            if incoming.best_score + 1e-12 < dst_node.best_score || !dst_node.best_score.is_finite() {
+            if incoming.best_score + 1e-12 < dst_node.best_score || !dst_node.best_score.is_finite()
+            {
                 dst_node.best_score = incoming.best_score;
                 dst_node.descriptor = incoming.descriptor.clone();
             }
@@ -9628,6 +9749,25 @@ struct StrictHoldoutReportV1 {
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+struct AutoresearchScoreV1 {
+    version: String,
+    generated_at_utc: String,
+    profile: String,
+    score_direction: String,
+    score: f64,
+    status: String,
+    strict_holdout_passed: bool,
+    benchmark_passed: Option<bool>,
+    benchmark_rmse_mean_current: Option<f64>,
+    benchmark_rmse_mean_prior: Option<f64>,
+    benchmark_relative_improvement: Option<f64>,
+    seed_suite_relative_improvement_median: Option<f64>,
+    candidate_complexity: Option<usize>,
+    run_dir: String,
+    notes: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 struct BestRecord {
     bucket: BucketKey,
     run_dir: String,
@@ -9657,6 +9797,191 @@ fn updated_at_unix_utc() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("unix_seconds={secs}")
+}
+
+fn read_json_file_optional<T>(path: &std::path::Path) -> anyhow::Result<Option<T>>
+where
+    T: serde::de::DeserializeOwned,
+{
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(path)?;
+    Ok(Some(serde_json::from_str(&raw)?))
+}
+
+fn build_autoresearch_score(
+    out_dir: &std::path::Path,
+    benchmark_eval: Option<&BenchmarkEvalV1>,
+    strict_holdout: Option<&StrictHoldoutReportV1>,
+) -> AutoresearchScoreV1 {
+    const MISSING_BENCHMARK_PENALTY: f64 = 1_000_000_000.0;
+    const BENCHMARK_FAIL_PENALTY: f64 = 100_000.0;
+    const STRICT_FAIL_PENALTY: f64 = 1_000_000.0;
+    const COMPLEXITY_TIEBREAK: f64 = 1e-6;
+
+    let strict_holdout_passed = strict_holdout
+        .map(|report| report.strict_holdout_passed)
+        .unwrap_or(false);
+    let benchmark_passed = strict_holdout.and_then(|report| report.benchmark_passed);
+    let benchmark_rmse_mean_current = strict_holdout
+        .and_then(|report| report.benchmark_rmse_mean_current)
+        .or_else(|| benchmark_eval.and_then(|eval| eval.aggregate.rmse_mean));
+    let benchmark_rmse_mean_prior =
+        strict_holdout.and_then(|report| report.benchmark_rmse_mean_prior);
+    let benchmark_relative_improvement =
+        strict_holdout.and_then(|report| report.benchmark_relative_improvement);
+    let seed_suite_relative_improvement_median =
+        strict_holdout.and_then(|report| report.seed_suite_relative_improvement_median);
+    let candidate_complexity = benchmark_eval.map(|eval| eval.candidate.complexity);
+
+    let mut notes = vec![
+        "primary_metric=benchmark_rmse_mean_current (lower is better)".to_string(),
+        format!("penalty_missing_benchmark={MISSING_BENCHMARK_PENALTY}"),
+        format!("penalty_benchmark_fail={BENCHMARK_FAIL_PENALTY}"),
+        format!("penalty_strict_holdout_fail={STRICT_FAIL_PENALTY}"),
+        format!("tiebreak_complexity_multiplier={COMPLEXITY_TIEBREAK}"),
+    ];
+    if strict_holdout.is_none() {
+        notes.push("strict_holdout_report_missing".to_string());
+    }
+    if benchmark_eval.is_none() {
+        notes.push("benchmark_eval_missing".to_string());
+    }
+    if let Some(report) = strict_holdout {
+        notes.extend(
+            report
+                .notes
+                .iter()
+                .take(8)
+                .map(|note| format!("strict_holdout_note={note}")),
+        );
+    }
+
+    let mut score = benchmark_rmse_mean_current.unwrap_or(MISSING_BENCHMARK_PENALTY);
+    if benchmark_rmse_mean_current.is_none() {
+        score += MISSING_BENCHMARK_PENALTY;
+    }
+    if benchmark_passed == Some(false) {
+        score += BENCHMARK_FAIL_PENALTY;
+    }
+    if !strict_holdout_passed {
+        score += STRICT_FAIL_PENALTY;
+    }
+    if let Some(complexity) = candidate_complexity {
+        score += complexity as f64 * COMPLEXITY_TIEBREAK;
+    }
+
+    let status = if strict_holdout_passed {
+        "strict_holdout_pass"
+    } else if benchmark_passed == Some(true) {
+        "benchmark_pass_seed_suite_fail"
+    } else if benchmark_passed == Some(false) {
+        "benchmark_fail"
+    } else if benchmark_rmse_mean_current.is_some() {
+        "benchmark_only_missing_strict_holdout"
+    } else {
+        "missing_benchmark"
+    };
+
+    AutoresearchScoreV1 {
+        version: "v1".to_string(),
+        generated_at_utc: updated_at_unix_utc(),
+        profile: QuickstartProfile::Autoresearch.as_str().to_string(),
+        score_direction: "lower_is_better".to_string(),
+        score,
+        status: status.to_string(),
+        strict_holdout_passed,
+        benchmark_passed,
+        benchmark_rmse_mean_current,
+        benchmark_rmse_mean_prior,
+        benchmark_relative_improvement,
+        seed_suite_relative_improvement_median,
+        candidate_complexity,
+        run_dir: out_dir.display().to_string(),
+        notes,
+    }
+}
+
+fn autoresearch_score_tsv_header() -> &'static str {
+    "generated_at_utc\tprofile\tstatus\tscore\tstrict_holdout_passed\tbenchmark_passed\tbenchmark_rmse_mean_current\tbenchmark_rmse_mean_prior\tbenchmark_relative_improvement\tseed_suite_relative_improvement_median\tcandidate_complexity\trun_dir\n"
+}
+
+fn format_tsv_opt_f64(value: Option<f64>) -> String {
+    value
+        .map(|v| format!("{v:.12e}"))
+        .unwrap_or_else(|| "".to_string())
+}
+
+fn format_tsv_opt_bool(value: Option<bool>) -> String {
+    value
+        .map(|v| {
+            if v {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
+        })
+        .unwrap_or_else(|| "".to_string())
+}
+
+fn format_tsv_opt_usize(value: Option<usize>) -> String {
+    value.map(|v| v.to_string()).unwrap_or_default()
+}
+
+fn render_autoresearch_score_tsv(score: &AutoresearchScoreV1) -> String {
+    let mut out = String::from(autoresearch_score_tsv_header());
+    out.push_str(&format!(
+        "{}\t{}\t{}\t{:.12e}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        score.generated_at_utc,
+        score.profile,
+        score.status,
+        score.score,
+        if score.strict_holdout_passed {
+            "true"
+        } else {
+            "false"
+        },
+        format_tsv_opt_bool(score.benchmark_passed),
+        format_tsv_opt_f64(score.benchmark_rmse_mean_current),
+        format_tsv_opt_f64(score.benchmark_rmse_mean_prior),
+        format_tsv_opt_f64(score.benchmark_relative_improvement),
+        format_tsv_opt_f64(score.seed_suite_relative_improvement_median),
+        format_tsv_opt_usize(score.candidate_complexity),
+        score.run_dir
+    ));
+    out
+}
+
+fn write_autoresearch_quickstart_artifacts(
+    out_dir: &std::path::Path,
+    factory_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let benchmark_eval: Option<BenchmarkEvalV1> =
+        read_json_file_optional(&factory_dir.join("benchmark_eval.json"))?;
+    let strict_holdout: Option<StrictHoldoutReportV1> =
+        read_json_file_optional(&factory_dir.join("strict_holdout_report.json"))?;
+    let score = build_autoresearch_score(out_dir, benchmark_eval.as_ref(), strict_holdout.as_ref());
+
+    fs::write(
+        out_dir.join("autoresearch_score.json"),
+        serde_json::to_string_pretty(&score)?,
+    )?;
+    fs::write(
+        out_dir.join("autoresearch_score.txt"),
+        format!("{:.12e}\n", score.score),
+    )?;
+    fs::write(
+        out_dir.join("autoresearch_score.tsv"),
+        render_autoresearch_score_tsv(&score),
+    )?;
+
+    let root_program = std::path::Path::new("program.md");
+    if root_program.exists() {
+        let _ = fs::copy(root_program, out_dir.join("AUTORESEARCH_PROGRAM.md"));
+    }
+
+    Ok(())
 }
 
 fn bucket_from_notes(notes: &[String]) -> Option<BucketKey> {
@@ -12851,6 +13176,15 @@ mod tests {
     }
 
     #[test]
+    fn parse_em_model_aliases() {
+        assert_eq!(parse_em_model("quasistatic"), Some(EmModel::Quasistatic));
+        assert_eq!(parse_em_model("quasi-static"), Some(EmModel::Quasistatic));
+        assert_eq!(parse_em_model("darwin"), Some(EmModel::Darwin));
+        assert_eq!(parse_em_model("finite_c"), Some(EmModel::Darwin));
+        assert_eq!(parse_em_model("unknown"), None);
+    }
+
+    #[test]
     fn parse_advanced_factory_modes_and_families() {
         assert_eq!(parse_atlas_gate_mode("binary"), Some(AtlasGateMode::Binary));
         assert_eq!(parse_atlas_gate_mode("smooth"), Some(AtlasGateMode::Smooth));
@@ -13066,9 +13400,11 @@ mod tests {
             eq_z: threebody_discover::Equation { terms: vec![] },
         };
         let notes = canonicalize_model_partition_redundancy(&mut model, 1e-9);
-        assert!(notes
-            .iter()
-            .any(|n| n.contains("canonicalized_exact_partition")));
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.contains("canonicalized_exact_partition"))
+        );
         let coeffs = axis_coeff_map(&model.eq_x);
         assert!(!coeffs.contains_key("grav_far_x"));
         let c_base = coeffs.get("grav_x").copied().unwrap_or(0.0);
@@ -13116,12 +13452,16 @@ mod tests {
         ];
         let templates = generate_elegant_equation_templates(&feats, "gravity_only");
         assert!(templates.iter().any(|(eq, _)| eq.contains("jacobi_quad_x")));
-        assert!(templates
-            .iter()
-            .any(|(eq, _)| eq.contains("shape_radial_x")));
-        assert!(templates
-            .iter()
-            .any(|(eq, _)| eq.contains("sym_sigma1_grav_x")));
+        assert!(
+            templates
+                .iter()
+                .any(|(eq, _)| eq.contains("shape_radial_x"))
+        );
+        assert!(
+            templates
+                .iter()
+                .any(|(eq, _)| eq.contains("sym_sigma1_grav_x"))
+        );
     }
 
     #[test]
@@ -13204,13 +13544,25 @@ mod tests {
 
         let archive_root = root.join("equation_search_archive.json");
         let archive_a = root.join("a").join("equation_search_archive.json");
-        let archive_b = root.join("a").join("b").join("equation_search_archive.json");
-        fs::write(&archive_root, "{\"version\":\"v1\",\"total_updates\":0,\"nodes\":[]}")
-            .expect("write root archive");
-        fs::write(&archive_a, "{\"version\":\"v1\",\"total_updates\":0,\"nodes\":[]}")
-            .expect("write archive a");
-        fs::write(&archive_b, "{\"version\":\"v1\",\"total_updates\":0,\"nodes\":[]}")
-            .expect("write archive b");
+        let archive_b = root
+            .join("a")
+            .join("b")
+            .join("equation_search_archive.json");
+        fs::write(
+            &archive_root,
+            "{\"version\":\"v1\",\"total_updates\":0,\"nodes\":[]}",
+        )
+        .expect("write root archive");
+        fs::write(
+            &archive_a,
+            "{\"version\":\"v1\",\"total_updates\":0,\"nodes\":[]}",
+        )
+        .expect("write archive a");
+        fs::write(
+            &archive_b,
+            "{\"version\":\"v1\",\"total_updates\":0,\"nodes\":[]}",
+        )
+        .expect("write archive b");
         fs::write(root.join("a").join("ignore.json"), "{}").expect("write non-archive file");
 
         let mut expected = vec![archive_a.clone(), archive_b.clone(), archive_root.clone()];
@@ -13261,7 +13613,10 @@ mod tests {
                     last_seen_iter: 4,
                     improvements: 2,
                     descriptor: EquationDescriptor::from_equation_text(eq_shared),
-                    source_counts: std::collections::BTreeMap::from([("equation_ga".to_string(), 3)]),
+                    source_counts: std::collections::BTreeMap::from([(
+                        "equation_ga".to_string(),
+                        3,
+                    )]),
                     seed_counts: std::collections::BTreeMap::from([(202, 2)]),
                 },
                 EquationSearchNode {
@@ -13366,7 +13721,10 @@ mod tests {
                 if seen.contains(&norm) {
                     None
                 } else {
-                    Some((mcts_uct_score(node, total_visits, total_seed_buckets, 0.7, 0.0), norm))
+                    Some((
+                        mcts_uct_score(node, total_visits, total_seed_buckets, 0.7, 0.0),
+                        norm,
+                    ))
                 }
             })
             .collect::<Vec<_>>();
@@ -13414,8 +13772,7 @@ mod tests {
             (stable_no_bonus - uncertain_no_bonus).abs() < 1e-12,
             "without uncertainty bonus they should be tied"
         );
-        let stable_with_bonus =
-            mcts_uct_score(&stable, total_visits, total_seed_buckets, 0.4, 0.5);
+        let stable_with_bonus = mcts_uct_score(&stable, total_visits, total_seed_buckets, 0.4, 0.5);
         let uncertain_with_bonus =
             mcts_uct_score(&uncertain, total_visits, total_seed_buckets, 0.4, 0.5);
         assert!(
@@ -13684,9 +14041,11 @@ mod tests {
 
         let index = scan_best_results(&root).unwrap();
         assert_eq!(index.buckets.len(), 1);
-        assert!(index.buckets[0]
-            .eval_input_path
-            .contains("quickstart_factory"));
+        assert!(
+            index.buckets[0]
+                .eval_input_path
+                .contains("quickstart_factory")
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -14197,14 +14556,7 @@ mod tests {
         ];
         let system = System::new(bodies, State::new(pos, vel));
 
-        let force_cfg = threebody_core::forces::ForceConfig {
-            g: cfg.constants.g,
-            k_e: cfg.constants.k_e,
-            mu_0: cfg.constants.mu_0,
-            epsilon: cfg.softening,
-            enable_gravity: cfg.enable_gravity,
-            enable_em: cfg.enable_em,
-        };
+        let force_cfg = threebody_core::forces::ForceConfig::from_config(&cfg, cfg.softening);
         let fields = threebody_core::forces::compute_fields(&system, &force_cfg);
         let accel = threebody_core::forces::compute_accel(&system, &force_cfg);
 
@@ -14424,5 +14776,94 @@ mod tests {
         assert!(!settings.normalize);
         assert!((settings.stls_ridge_lambda - 1e-6).abs() < 1e-18);
         assert_eq!(settings.stls_thresholds, vec![0.1, 0.2, 0.4]);
+    }
+
+    #[test]
+    fn parse_quickstart_profile_accepts_autoresearch_aliases() {
+        assert_eq!(
+            parse_quickstart_profile("autoresearch"),
+            Some(QuickstartProfile::Autoresearch)
+        );
+        assert_eq!(
+            parse_quickstart_profile("auto-research"),
+            Some(QuickstartProfile::Autoresearch)
+        );
+        assert_eq!(
+            parse_quickstart_profile("standard"),
+            Some(QuickstartProfile::Standard)
+        );
+        assert_eq!(parse_quickstart_profile("unknown"), None);
+    }
+
+    #[test]
+    fn autoresearch_score_penalizes_missing_strict_holdout() {
+        let score = build_autoresearch_score(std::path::Path::new("results/run"), None, None);
+        assert!(!score.strict_holdout_passed);
+        assert!(score.score >= 1_000_000_000.0);
+        assert_eq!(score.status, "missing_benchmark");
+    }
+
+    #[test]
+    fn autoresearch_score_prefers_passing_lower_rmse_models() {
+        let benchmark = BenchmarkEvalV1 {
+            version: "v1".to_string(),
+            suite_id: "benchmark_suite_v1".to_string(),
+            bucket: BucketKey {
+                steps: 100,
+                dt: 0.01,
+            },
+            regime: "gravity_only".to_string(),
+            rollout_integrator: "leapfrog".to_string(),
+            candidate: BenchmarkCandidateRef {
+                run_id: "run_001".to_string(),
+                candidate_id: 0,
+                equation_text: "ax=grav_x ; ay=grav_y ; az=grav_z".to_string(),
+                complexity: 3,
+            },
+            cases: Vec::new(),
+            aggregate: BenchmarkAggregate {
+                suite_id: "benchmark_suite_v1".to_string(),
+                rollout_integrator: "leapfrog".to_string(),
+                cases: 3,
+                rmse_mean: Some(0.2),
+                rmse_max: Some(0.3),
+                divergence_time_min: Some(1.0),
+            },
+            notes: Vec::new(),
+        };
+        let strict = StrictHoldoutReportV1 {
+            version: "v1".to_string(),
+            claim_gate: "highbar_v2_benchmark_first".to_string(),
+            benchmark_required: true,
+            benchmark_passed: Some(true),
+            benchmark_relative_improvement: Some(0.1),
+            benchmark_rmse_mean_current: Some(0.2),
+            benchmark_rmse_mean_prior: Some(0.25),
+            seed_suite_relative_improvement_median: Some(0.05),
+            seed_suite_ci_low: Some(0.01),
+            seed_suite_ci_high: Some(0.08),
+            high_bar_passed_seed_suite: true,
+            strict_holdout_passed: true,
+            sensitivity_relative_error_median: Some(0.1),
+            sensitivity_ftle_observed: Some(0.2),
+            notes: Vec::new(),
+        };
+        let passing = build_autoresearch_score(
+            std::path::Path::new("results/pass"),
+            Some(&benchmark),
+            Some(&strict),
+        );
+
+        let mut failing_strict = strict.clone();
+        failing_strict.strict_holdout_passed = false;
+        let failing = build_autoresearch_score(
+            std::path::Path::new("results/fail"),
+            Some(&benchmark),
+            Some(&failing_strict),
+        );
+
+        assert!(passing.score < failing.score);
+        assert_eq!(passing.status, "strict_holdout_pass");
+        assert_eq!(failing.status, "benchmark_pass_seed_suite_fail");
     }
 }

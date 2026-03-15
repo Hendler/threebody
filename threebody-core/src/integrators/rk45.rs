@@ -14,14 +14,7 @@ impl Integrator for Rk45 {
 }
 
 pub fn step_with_error(system: &System, dt: f64, cfg: &Config) -> (System, f64, f64) {
-    let force_cfg = ForceConfig {
-        g: cfg.constants.g,
-        k_e: cfg.constants.k_e,
-        mu_0: cfg.constants.mu_0,
-        epsilon: cfg.softening,
-        enable_gravity: cfg.enable_gravity,
-        enable_em: cfg.enable_em,
-    };
+    let force_cfg = ForceConfig::from_config(cfg, cfg.softening);
 
     let (k1p, k1v) = deriv(system, &force_cfg);
     let (k2p, k2v) = deriv(

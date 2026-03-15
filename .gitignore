@@ -8,6 +8,7 @@ target
 .venv/
 factory_out/
 results/
+results.tsv
 .openai_key
 config.json
 ic.json

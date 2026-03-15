@@ -1,6 +1,6 @@
 # threebody-core
 
-Core library for three-body simulation with gravity and quasi-static EM.
+Core library for three-body simulation with gravity and configurable EM (`quasistatic` by default, optional low-velocity `darwin` finite-`c` correction).
 
 **Quick example**
 ```rust,no_run
@@ -28,3 +28,5 @@ println!("steps={}", result.steps.len());
 - `integrators`: leapfrog, RK45, Boris.
 - `sim`: simulation driver, adaptive RK45 truth mode, and encounter policy.
 - `output`: CSV writer (includes per-step `dt`) and JSON sidecar with config, header hash, warnings, last regime, dt stats, and the initial state snapshot.
+
+`Config.constants.c` and `Config.em_model` control the finite-`c` EM path. `em_model="darwin"` is still approximate and does not add radiation or full retarded fields.
